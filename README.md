@@ -1,6 +1,6 @@
 # CellPilot
 
-https://github.com/user-attachments/assets/ed3def8c-b2eb-4b59-bab0-5dd4e2c035f2
+https://github.com/user-attachments/assets/39fd7834-2d85-4b4c-bbce-f617393a6f9a
 
 CellPilot is a serverless, AI-powered desktop application for chat-based single-cell and spatial transcriptomics analysis. It runs entirely on your local machine. No server or data upload required.
 
