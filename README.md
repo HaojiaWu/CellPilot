@@ -16,7 +16,6 @@ Download the pre-built desktop app at **[cellpilot.humphreyslab.com](https://cel
 
 ---
 
-https://github.com/user-attachments/assets/2d851311-dffd-4b32-ab52-e0d853150dc1
 
 ## For developers
 
@@ -46,7 +45,7 @@ npm run build
 npm run electron
 ```
 
-https://github.com/user-attachments/assets/c85f2b02-187c-47f5-b6d8-ec844103df2f
+https://github.com/user-attachments/assets/2d851311-dffd-4b32-ab52-e0d853150dc1
 
 ### Package as a desktop app
 
