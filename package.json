@@ -1,0 +1,140 @@
+{
+  "name": "cellpilot",
+  "version": "2.0.0",
+  "description": "CellPilot: A Serverless, AI-Powered Desktop Application for Chat-Based Single-Cell and Spatial Transcriptomics Analysis.",
+  "main": "public/electron.js",
+  "homepage": "./",
+  "scripts": {
+    "start": "craco start",
+    "build": "craco build",
+    "test": "craco test",
+    "eject": "react-scripts eject",
+    "electron": "cross-env ELECTRON_RUN_AS_NODE= electron .",
+    "electron-dev": "concurrently \"cross-env BROWSER=none npm start\" \"wait-on http://localhost:3000 && cross-env BROWSER=none ELECTRON_RUN_AS_NODE= ELECTRON_START_URL=http://localhost:3000 electron .\"",
+    "postinstall": "electron-rebuild -f -w sharp",
+    "electron-pack": "electron-builder build --publish=never",
+    "electron-pack-win": "electron-builder build --win --x64",
+    "electron-pack-mac": "electron-builder build --mac",
+    "electron-pack-linux": "electron-builder build --linux",
+    "dist:mac-intel": "npm run build && electron-rebuild -f -w sharp --arch x64 && electron-builder build --mac --x64 --publish=never",
+    "dist:mac-arm": "npm run build && electron-rebuild -f -w sharp --arch arm64 && electron-builder build --mac --arm64 --publish=never"
+  },
+  "build": {
+    "appId": "com.cellpilot.app",
+    "productName": "CellPilot",
+    "afterSign": "scripts/notarize.js",
+    "files": [
+      "build/**/*",
+      "public/electron.js",
+      "public/preload.js",
+      "public/tiffToDzi.js"
+    ],
+    "asarUnpack": [
+      "build/**/*",
+      "node_modules/sharp/**/*",
+      "node_modules/@img/**/*"
+    ],
+    "directories": {
+      "buildResources": "assets"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "assets/entitlements.mac.plist",
+      "entitlementsInherit": "assets/entitlements.mac.plist",
+      "identity": ""
+    },
+    "dmg": {
+      "sign": false
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "assets/icon.png"
+    }
+  },
+  "keywords": [
+    "single-cell",
+    "bioinformatics",
+    "webassembly",
+    "electron",
+    "react",
+    "llama.cpp"
+  ],
+  "author": "CellPilot Team",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "@blueprintjs/core": "^4.20.0",
+    "@blueprintjs/popover2": "^1.14.0",
+    "@craco/craco": "^7.1.0",
+    "@deck.gl/aggregation-layers": "^8.9.36",
+    "@deck.gl/core": "^8.9.36",
+    "@deck.gl/layers": "^8.9.36",
+    "@deck.gl/react": "^8.9.36",
+    "@gmod/tabix": "^3.2.2",
+    "@mlc-ai/web-llm": "^0.2.80",
+    "@xenova/transformers": "^2.17.2",
+    "bakana": "^3.1.3",
+    "bakana-remotes": "^2.2.1",
+    "concurrently": "^8.2.2",
+    "copy-webpack-plugin": "^13.0.1",
+    "cross-env": "^10.1.0",
+    "d3": "^7.8.5",
+    "electron": "^39.2.7",
+    "electron-builder": "^24.9.1",
+    "electron-rebuild": "^3.2.9",
+    "emlapack": "^0.0.3",
+    "generic-filehandle": "^3.4.0",
+    "gesel": "^0.3.0",
+    "h5wasm": "^0.9.0",
+    "hash-wasm": "^4.11.0",
+    "hyparquet": "^1.24.1",
+    "hyparquet-compressors": "^1.1.1",
+    "igv": "^3.7.3",
+    "jszip": "^3.10.1",
+    "ml-matrix": "^6.12.1",
+    "openseadragon": "^5.0.1",
+    "parquet-wasm": "^0.7.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^10.1.0",
+    "react-scripts": "5.0.1",
+    "scran.js": "4.0.8",
+    "umap-js": "^1.4.0",
+    "wait-on": "^7.2.0",
+    "worker-loader": "^3.0.8"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}

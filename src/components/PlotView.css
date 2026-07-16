@@ -1,0 +1,925 @@
+.plot-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background-color: white;
+}
+
+.plot-view-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 15px 20px;
+  border-bottom: 1px solid #e0e0e0;
+  background: linear-gradient(to right, #f8f9fa, #ffffff);
+  font-weight: 600;
+  font-size: 16px;
+  color: #333;
+}
+
+.plot-view-content {
+  flex: 1;
+  padding: 16px;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 0;
+}
+
+/* Deck views (UmapDeckView) fill the full area, remove padding so legend sits at the edge.
+   overflow: hidden is critical to prevent a ResizeObserver feedback loop where a scrollbar
+   appearing/disappearing from overflow: auto causes repeated dimension changes. */
+.plot-view-content-deck {
+  padding: 0;
+  overflow: hidden;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+
+/* Peak View: scrollable area so full plot (header + all cluster tracks) can be scrolled horizontally and vertically */
+.plot-view-content-peak-view {
+  align-items: stretch;
+  justify-content: flex-start;
+  overflow: hidden;
+}
+.plot-view-content-peak-view > * {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.plot-view-content-spatial-cci {
+  align-items: stretch;
+  justify-content: flex-start;
+  overflow: hidden;
+}
+
+.plot-view-content-spatial-cci > * {
+  min-height: 0;
+  flex: 1;
+}
+
+/* Scroll wrapper for Peak View: horizontal and vertical scroll bars */
+.peaks-on-gene-scroll-wrapper {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #adb5bd #f1f3f5;
+}
+.peaks-on-gene-scroll-wrapper::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+.peaks-on-gene-scroll-wrapper::-webkit-scrollbar-track {
+  background: #f1f3f5;
+  border-radius: 6px;
+}
+.peaks-on-gene-scroll-wrapper::-webkit-scrollbar-thumb {
+  background: #adb5bd;
+  border-radius: 6px;
+}
+.peaks-on-gene-scroll-wrapper::-webkit-scrollbar-thumb:hover {
+  background: #868e96;
+}
+
+/* Let CoveragePlot grow to full content size inside scroll wrapper */
+.peaks-on-gene-scroll-wrapper > .coverage-plot-wrapper {
+  height: auto;
+  max-height: none;
+}
+.peaks-on-gene-scroll-wrapper .coverage-plot-container {
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+
+.plot-view-content > svg {
+  flex: 1 1 auto;
+  align-self: stretch;
+}
+
+.deck-scatter-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+}
+
+.deck-scatter-container > canvas {
+  flex: 1 1 auto;
+}
+
+.spatial-view .plot-view-content {
+  background-color: #ffffff;
+}
+
+.plot-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #64748b;
+  text-align: center;
+  padding: 40px;
+  font-size: 14px;
+  font-style: normal;
+  line-height: 1.6;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+}
+
+.plot-placeholder p {
+  font-size: 14px;
+  font-style: normal;
+  max-width: 400px;
+  line-height: 1.6;
+  margin: 0;
+  color: #64748b;
+  font-family: inherit;
+}
+
+svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.markers-table-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.markers-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.markers-summary h3 {
+  margin: 0;
+  font-size: 18px;
+  color: #2c3e50;
+}
+
+.markers-subtitle {
+  margin: 4px 0 0;
+  color: #65758b;
+  font-size: 13px;
+}
+
+.markers-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 13px;
+  color: #4a5568;
+}
+
+.markers-table-scroll {
+  width: 100%;
+  max-height: calc(100% - 8px);
+  overflow-y: auto;
+  overflow-x: auto;
+  border: 1px solid #e6e8f0;
+  border-radius: 8px;
+  background-color: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.02);
+  /* Ensure the container doesn't clip the sticky header */
+  position: relative;
+}
+
+.markers-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 640px;
+  /* Ensure table starts at the top of container */
+  margin: 0;
+}
+
+.markers-table thead th {
+  position: sticky;
+  top: 0;
+  background: linear-gradient(180deg, #f6f8fb 0%, #edf1f7 100%);
+  padding: 12px 14px;
+  text-align: left;
+  font-size: 13px;
+  color: #3f4c63;
+  font-weight: 600;
+  border-bottom: 2px solid #d8deeb;
+  z-index: 10;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+  /* Ensure header isn't clipped */
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.markers-table tbody td {
+  padding: 10px 14px;
+  font-size: 13px;
+  border-bottom: 1px solid #eef2f7;
+  color: #2d3748;
+}
+
+.markers-table tbody tr:nth-child(odd) {
+  background-color: #fbfdff;
+}
+
+.markers-table tbody tr:hover {
+  background-color: #f0f7ff;
+}
+
+.gene-name-cell {
+  font-weight: 600;
+  color: #1a202c;
+  white-space: nowrap;
+}
+
+.markers-empty {
+  text-align: center;
+  padding: 18px;
+  color: #8897ad;
+  font-style: italic;
+}
+
+.markers-footnote {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* DEG between samples: two-panel layout (table left, volcano right) */
+.deg-between-samples-panel {
+  display: flex;
+  flex-direction: row;
+  gap: 20px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 8px 0;
+}
+
+.deg-between-samples-left {
+  flex: 1 1 50%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.deg-between-samples-right {
+  flex: 1 1 50%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.deg-between-samples-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.deg-volcano-container {
+  flex: 1;
+  min-height: 280px;
+  background: #fafbfc;
+  border: 1px solid #e6e8f0;
+  border-radius: 8px;
+}
+
+.cell-fraction-panel .cell-fraction-chart {
+  flex: 1;
+  min-height: 260px;
+  background: #fafbfc;
+  border: 1px solid #e6e8f0;
+  border-radius: 8px;
+}
+
+/* Peaks-on-gene track (ATAC Peak View) */
+.peaks-on-gene-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: auto;
+  padding: 12px;
+}
+
+.peaks-on-gene-header {
+  margin-bottom: 12px;
+}
+
+.peaks-on-gene-header h3 {
+  margin: 0 0 4px 0;
+  font-size: 18px;
+  color: #1a202c;
+}
+
+.peaks-on-gene-subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: #65758b;
+}
+
+.peaks-track-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid #e6e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafbfc;
+}
+
+.peaks-track-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5568;
+}
+
+.peaks-track-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+
+.peaks-track-chrom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.peaks-track-chrom-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #4a5568;
+  min-width: 48px;
+}
+
+.peaks-track-chrom-bars {
+  position: relative;
+  flex: 1;
+  height: 24px;
+  min-width: 200px;
+  background: #edf1f7;
+  border-radius: 4px;
+}
+
+.peaks-track-bar {
+  position: absolute;
+  top: 4px;
+  height: 16px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, #5c7080 0%, #394b59 100%);
+  pointer-events: none;
+}
+
+.peaks-on-gene-footnote {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* Peak View loading state (no chromosome bar; show until coverage plot is ready) */
+.peaks-on-gene-loading .peaks-track-loading-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px 24px;
+  min-height: 120px;
+  color: #5c7080;
+  font-size: 14px;
+  text-align: center;
+  border: 1px dashed #c5cdd9;
+  border-radius: 8px;
+  background: #f8f9fc;
+}
+
+.peaks-on-gene-loading .peaks-track-loading-placeholder .bp5-icon {
+  color: #8f99a8;
+}
+
+/* Peak View empty state when no peaks linked to gene */
+.peaks-on-gene-empty .peaks-on-gene-empty-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px 24px;
+  text-align: center;
+  color: #5c7080;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.peaks-on-gene-empty-message p {
+  margin: 0;
+  max-width: 420px;
+}
+
+.peaks-on-gene-empty-message strong {
+  color: #394b59;
+}
+
+.peaks-on-gene-empty-hint {
+  font-size: 12px;
+  color: #73818c;
+}
+
+.peaks-on-gene-empty-hint code {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  background: #e8ecf1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Legacy Signac CoveragePlot-style: signal tracks per cluster (deprecated, use CoveragePlot.css) */
+/* Note: .coverage-plot-wrapper styles are now in CoveragePlot.css */
+
+.coverage-plot-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid #e6e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafbfc;
+}
+
+.coverage-track-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+}
+
+.coverage-track-label {
+  flex-shrink: 0;
+  width: 100px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #4a5568;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coverage-track-plot {
+  flex: 1;
+  min-width: 0;
+}
+
+.coverage-track-svg {
+  display: block;
+  overflow: visible;
+}
+
+.coverage-peaks-row .coverage-track-label {
+  font-weight: 600;
+}
+
+.coverage-plot-xaxis {
+  margin-top: 4px;
+  padding-left: 0;
+}
+
+.coverage-xaxis-svg {
+  display: block;
+  overflow: visible;
+}
+
+.coverage-xaxis-tick {
+  font-size: 10px;
+  fill: #4a5568;
+}
+
+.coverage-xaxis-label {
+  font-size: 11px;
+  fill: #4a5568;
+  font-weight: 500;
+}
+
+.spatial-overlay {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(27, 35, 52, 0.82);
+  color: #f1f5f9;
+  font-size: 12px;
+  max-width: 280px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.25);
+  pointer-events: auto;
+}
+
+.spatial-overlay-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.spatial-overlay-label {
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.9);
+}
+
+.spatial-overlay-metric {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.spatial-overlay-secondary {
+  font-size: 11px;
+  color: rgba(226, 232, 240, 0.72);
+}
+
+.spatial-legend-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+  column-gap: 0;
+  row-gap: 8px;
+}
+
+/* Two fixed columns, column-major ordering via markup, with scroll */
+.umap-legend-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px; /* row gap, column gap */
+  max-height: 420px;
+  overflow-y: auto;
+  padding-left: 2px;
+}
+
+.umap-legend-column {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.spatial-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: opacity 0.2s ease;
+}
+
+.spatial-legend-item:hover {
+  opacity: 0.8;
+}
+
+.legend-item-selected {
+  font-weight: 600;
+  background: rgba(128, 128, 128, 0.3);
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: 3px;
+}
+
+/* Context menu for cluster color picking */
+.legend-color-menu {
+  z-index: 10000;
+  background: #ffffff;
+  color: #1f2937;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 160px;
+  font-size: 12px;
+}
+
+.legend-color-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-start;
+}
+
+.legend-color-menu input[type="color"] {
+  width: 36px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid #94a3b8;
+  border-radius: 4px;
+  cursor: pointer;
+  background: #ffffff;
+}
+
+.legend-color-menu button {
+  font-size: 11px;
+  line-height: 1;
+  padding: 6px 10px;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  cursor: pointer;
+  color: #0f172a;
+}
+
+.legend-color-menu button:hover {
+  background: #e2e8f0;
+}
+
+.legend-color-menu-reset {
+  margin-left: auto;
+}
+
+.legend-color-menu-close {
+  align-self: flex-end;
+}
+
+.spatial-legend-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.25);
+}
+
+.spatial-legend-text {
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.92);
+}
+
+.spatial-expression-bar {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  height: 12px;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.25);
+}
+
+.spatial-expression-bar-step {
+  width: 100%;
+  height: 100%;
+}
+
+.spatial-expression-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-top: 2px;
+  color: rgba(226, 232, 240, 0.86);
+}
+
+.deck-scatter-container {
+  position: relative;
+  flex: 1 1 auto;
+  align-self: stretch;
+  width: 100%;
+  height: 100%;
+}
+
+.umap-overlay {
+  background: #ffffff;
+  color: #1f2937;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.15);
+}
+
+.umap-overlay .spatial-overlay-label,
+.umap-overlay .spatial-overlay-metric,
+.umap-overlay .spatial-overlay-secondary,
+.umap-legend-text {
+  color: #1f2937;
+}
+
+.umap-overlay .spatial-legend-swatch {
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.6);
+}
+
+/* Zoom Controls */
+.zoom-controls {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 10;
+}
+
+.zoom-button {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 4px;
+  background-color: #ffffff;
+  color: #334155;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.zoom-button:hover {
+  background-color: #f8fafc;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  transform: translateY(-1px);
+}
+
+.zoom-button:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+
+.zoom-button:focus {
+  outline: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), 0 0 0 2px rgba(59, 130, 246, 0.5);
+}
+
+.zoom-in {
+  padding-bottom: 2px;
+}
+
+.zoom-out {
+  padding-bottom: 0px;
+}
+
+/* Histology Image Controls */
+.histology-image-controls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 5px;
+  z-index: 1000;
+  background: rgba(255, 255, 255, 0.95);
+  padding: 8px;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.spatial-selection-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 900;
+  pointer-events: none;
+}
+
+.spatial-selection-overlay.is-active {
+  cursor: crosshair;
+  pointer-events: auto;
+}
+
+.spatial-selection-overlay path {
+  fill: rgba(17, 24, 39, 0.06);
+  stroke: #111827;
+  stroke-width: 5;
+  stroke-dasharray: 7 5;
+  vector-effect: non-scaling-stroke;
+}
+
+.spatial-selection-overlay path.selection-halo {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.95);
+  stroke-width: 9;
+}
+
+.spatial-selection-overlay path.selection-outline {
+  fill: none;
+  stroke: #111827;
+  stroke-width: 5;
+}
+
+.spatial-selection-overlay text {
+  fill: #0f172a;
+  font-size: 12px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: rgba(255, 255, 255, 0.9);
+  stroke-width: 4px;
+}
+
+.spatial-cci-results {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px;
+  background: #fff;
+}
+
+.spatial-cci-scroll {
+  width: 100%;
+  max-height: 520px;
+  min-height: 0;
+  overflow: scroll;
+  scrollbar-gutter: stable both-edges;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.spatial-cci-dotplot {
+  display: block;
+}
+
+.spatial-cci-grid-frame {
+  fill: #fff;
+  stroke: #d1d5db;
+  stroke-width: 1.2px;
+}
+
+.spatial-cci-grid-line {
+  stroke: #e5e7eb;
+  stroke-width: 1px;
+}
+
+.spatial-cci-dotplot text,
+.spatial-cci-network text {
+  fill: #111827;
+  font-size: 12px;
+}
+
+.spatial-cci-pair-label {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.spatial-cci-axis-label,
+.spatial-cci-legend-label {
+  font-size: 10px;
+}
+
+.spatial-cci-legend-title {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.spatial-cci-strength-legend-title {
+  font-size: 10px;
+}
+
+.spatial-cci-strength-legend-label {
+  font-size: 10px;
+}
+
+.spatial-cci-network-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.spatial-cci-network-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.spatial-cci-network-wrap {
+  display: flex;
+  justify-content: center;
+  margin-top: 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+}

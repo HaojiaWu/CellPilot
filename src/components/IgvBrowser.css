@@ -1,0 +1,69 @@
+.igv-browser-wrapper {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+.igv-browser-header {
+  margin-bottom: 8px;
+}
+
+.igv-browser-header h3 {
+  margin: 0 0 4px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #333;
+}
+
+.igv-browser-chromosome {
+  margin: 0 0 2px 0;
+  font-size: 14px;
+  color: #334155;
+}
+
+.igv-browser-chromosome strong {
+  font-weight: 600;
+}
+
+.igv-browser-genome {
+  color: #64748b;
+  font-weight: 500;
+}
+
+.igv-browser-subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.igv-browser-container {
+  width: 100%;
+  min-width: 800px;
+  height: 480px;
+  padding: 0 16px 0 32px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  overflow: auto;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+.igv-browser-footnote {
+  margin: 8px 0 0 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+/* Override IGV default min-height so it fits our container */
+.igv-browser-container .igv-root-container {
+  min-height: 0;
+}
+
+/* Hide IGV branding text (e.g. "Powered by IGV" link) inside the browser */
+.igv-browser-container a[href*="igv.org"],
+.igv-browser-container .igv-navbar-div a[href*="igv"] {
+  display: none !important;
+}

@@ -1,0 +1,153 @@
+.model-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+  width: 100%;
+}
+
+.model-selector-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.model-selector-section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #1f2937;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.model-selector-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.model-selector-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #1f2937;
+  font-size: 13px;
+  min-width: 100px;
+  flex-shrink: 0;
+}
+
+.model-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-download-btn {
+  flex-shrink: 0;
+  min-width: 100px;
+}
+
+.model-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11px;
+  color: #64748b;
+  font-style: italic;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+  line-height: 1.4;
+  margin-left: 0;
+}
+
+.model-info .bp4-icon {
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+/* Custom styling for Download button */
+.model-download-btn.bp4-button.bp4-intent-primary {
+  background: linear-gradient(135deg, #1a5f4a 0%, #156b52 30%, #0f4f3d 70%, #0d4434 100%);
+  color: white;
+  border: none;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(13, 68, 52, 0.3), 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
+}
+
+.model-download-btn.bp4-button.bp4-intent-primary:hover {
+  background: linear-gradient(135deg, #15503e 0%, #136048 30%, #0d4234 70%, #0a3629 100%);
+  box-shadow: 0 4px 12px rgba(13, 68, 52, 0.4), 0 2px 4px rgba(0, 0, 0, 0.25);
+  transform: translateY(-1px);
+}
+
+.model-download-btn.bp4-button.bp4-intent-primary:active {
+  background: linear-gradient(135deg, #104132 0%, #0f5442 30%, #0a3629 70%, #072820 100%);
+  box-shadow: 0 1px 4px rgba(13, 68, 52, 0.4), inset 0 2px 4px rgba(0, 0, 0, 0.2);
+  transform: translateY(0);
+}
+
+.model-download-btn.bp4-button.bp4-intent-primary:disabled {
+  background: #d1d5db;
+  color: #9ca3af;
+  box-shadow: none;
+}
+
+/* Success state for ready button */
+.model-download-btn.bp4-button.bp4-intent-success {
+  background: linear-gradient(135deg, #059669 0%, #047857 100%);
+  color: white;
+  border: none;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(5, 150, 105, 0.3);
+}
+
+.model-download-btn.bp4-button.bp4-intent-success:disabled {
+  background: linear-gradient(135deg, #059669 0%, #047857 100%);
+  color: white;
+  opacity: 0.9;
+}
+
+/* Progress bar styling */
+.model-progress {
+  padding: 0 4px;
+}
+
+.model-progress .bp4-progress-bar {
+  height: 6px;
+  border-radius: 3px;
+}
+
+.model-progress .bp4-progress-bar .bp4-progress-meter {
+  background: linear-gradient(90deg, #1a5f4a 0%, #2d8a6b 100%);
+}
+
+/* Status message styling */
+.model-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #64748b;
+  padding: 6px 10px;
+  background: #f8fafc;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+}
+
+.model-status-success {
+  color: #059669;
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+
+.model-status-success .bp4-icon {
+  color: #059669;
+}
+

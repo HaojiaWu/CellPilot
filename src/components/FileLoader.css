@@ -1,0 +1,281 @@
+.file-loader {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  gap: 12px;
+  width: 100%;
+}
+
+/* Section containers */
+.file-loader-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.file-loader-section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #1f2937;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.file-loader-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.file-loader-select-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.file-loader-select-wrapper .bp4-html-select {
+  flex: 1;
+}
+
+.file-loader-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #1f2937;
+  font-size: 13px;
+  min-width: 100px;
+  flex-shrink: 0;
+}
+
+.file-loader-row select {
+  flex: 1;
+}
+
+/* File info display */
+.file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid #4caf50;
+  background: linear-gradient(135deg, #e8f5e9 0%, #f1f8f4 100%);
+}
+
+.file-info-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.data-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background-color: white;
+  border-radius: 4px;
+  border: 1px solid #d1fae5;
+}
+
+/* Tighter layout for scMultiome so cells, genes, and peaks stay within the box */
+.file-info--multiome {
+  padding: 8px 10px;
+  gap: 6px;
+}
+
+.file-info--multiome .file-info-header {
+  gap: 6px;
+}
+
+.file-info--multiome .data-stats {
+  gap: 4px;
+  padding: 3px 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.file-info--multiome .stat-item {
+  flex-shrink: 0;
+  font-size: 11px;
+  gap: 2px;
+}
+
+.file-info--multiome .stat-item .bp4-icon {
+  flex-shrink: 0;
+}
+
+.file-info--multiome .stat-divider {
+  margin: 0 1px;
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #2f3b52;
+}
+
+.stat-item strong {
+  color: #059669;
+  font-weight: 600;
+}
+
+.stat-divider {
+  color: #cbd5e1;
+  font-weight: bold;
+  margin: 0 2px;
+}
+
+.file-path {
+  font-size: 11px;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+}
+
+/* No data placeholder (more compact) */
+.no-data-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px dashed #cbd5e1;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.no-data-placeholder .bp4-icon {
+  margin-bottom: 0;
+}
+
+/* Drag-over state for drop target */
+.no-data-placeholder.drag-over {
+  border-color: #1a5f4a;
+  background: linear-gradient(180deg, #f0f9f6 0%, #f5fbf9 100%);
+  box-shadow: 0 2px 8px rgba(26, 95, 74, 0.12);
+}
+
+.file-loader-warnings {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #fff8e1;
+  border: 1px solid #f0d479;
+  border-radius: 4px;
+  max-height: 100px;
+  overflow-y: auto;
+}
+
+.file-loader-warnings .skip-item {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  font-size: 11px;
+  color: #8a6d00;
+  margin-bottom: 4px;
+}
+
+.file-loader-warnings .skip-item:last-child {
+  margin-bottom: 0;
+}
+
+.file-loader-error {
+  position: absolute;
+  bottom: -25px;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #d32f2f;
+  font-size: 12px;
+  padding: 4px 8px;
+  background-color: #ffebee;
+  border-radius: 4px;
+  z-index: 10;
+}
+
+/* Custom styling for Browse button */
+.file-loader-browse.bp4-button.bp4-intent-primary {
+  background: linear-gradient(135deg, #1a5f4a 0%, #156b52 30%, #0f4f3d 70%, #0d4434 100%);
+  color: white;
+  border: none;
+  box-shadow: 0 2px 8px rgba(13, 68, 52, 0.3), 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
+}
+
+.file-loader-browse.bp4-button.bp4-intent-primary:hover {
+  background: linear-gradient(135deg, #15503e 0%, #136048 30%, #0d4234 70%, #0a3629 100%);
+  box-shadow: 0 4px 12px rgba(13, 68, 52, 0.4), 0 2px 4px rgba(0, 0, 0, 0.25);
+  transform: translateY(-1px);
+}
+
+.file-loader-browse.bp4-button.bp4-intent-primary:active {
+  background: linear-gradient(135deg, #104132 0%, #0f5442 30%, #0a3629 70%, #072820 100%);
+  box-shadow: 0 1px 4px rgba(13, 68, 52, 0.4), inset 0 2px 4px rgba(0, 0, 0, 0.2);
+  transform: translateY(0);
+}
+
+.file-loader-browse.bp4-button.bp4-intent-primary.bp4-loading {
+  background: linear-gradient(135deg, #1a5f4a 0%, #156b52 30%, #0f4f3d 70%, #0d4434 100%);
+  opacity: 0.7;
+}
+
+/* Integration (2–3 datasets) */
+.file-loader-integration {
+  gap: 10px;
+}
+
+.file-loader-hint {
+  font-size: 12px;
+  color: #64748b;
+  margin: 0 0 6px 0;
+}
+
+.file-loader-integration-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.file-loader-integration-name {
+  width: 140px;
+  min-width: 100px;
+}
+
+.file-loader-integration-path {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-loader-integration-path-text {
+  font-size: 12px;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-loader-integration-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
