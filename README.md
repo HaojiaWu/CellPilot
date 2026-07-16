@@ -16,7 +16,7 @@ Download the pre-built desktop app at **[cellpilot.humphreyslab.com](https://cel
 
 ---
 
-https://github.com/user-attachments/assets/fb472649-4190-47d6-9302-bd6af364671c
+https://github.com/user-attachments/assets/2d851311-dffd-4b32-ab52-e0d853150dc1
 
 ## For developers
 
