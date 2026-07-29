@@ -2540,7 +2540,7 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         if (result.message) {
           // Only add message if we didn't already show one for this action
           // (plot_gene_expression and deg_between_samples already show a message above)
-          if (command.action !== 'plot_gene_expression' && command.action !== 'deg_between_samples' && command.action !== 'plot_cell_fraction' && command.action !== 'plot_gene_dotplot' && command.action !== 'plot_gene_violin' && command.action !== 'tf_motif_analysis' && command.action !== 'spatial_region_markers' && command.action !== 'spatial_cell_interaction' && routerResult.source !== 'agent_silent') {
+          if (command.action !== 'plot_gene_expression' && command.action !== 'deg_between_samples' && command.action !== 'plot_cell_fraction' && command.action !== 'plot_gene_dotplot' && command.action !== 'plot_gene_violin' && command.action !== 'tf_motif_analysis' && command.action !== 'spatial_region_markers' && command.action !== 'spatial_cell_interaction' && command.action !== 'cluster_info' && routerResult.source !== 'agent_silent') {
             addBotMessage(result.message || 'Analysis started...', 'success');
           }
         }

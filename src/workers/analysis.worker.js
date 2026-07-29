@@ -16624,7 +16624,14 @@ async function findMarkers(params = {}) {
     otherCells,
   });
 
-  if (usePrecomputedClusters || !rnaMarkers) {
+  // Always derive RNA means and detection fractions from the normalized matrix.
+  // Bakana's cached ScoreMarkersResults can be stale after cluster restoration,
+  // relabelling, or reclustering, and its factorized group order is not guaranteed
+  // to stay aligned with currentResults.clusters. The Wilcoxon test below already
+  // reads these same matrix rows, so using the matrix here keeps pct.1/pct.2 and
+  // avg_logFC consistent with the expression plot and the tested cell groups.
+  const computeStatsFromMatrix = !isAtacMarkers || usePrecomputedClusters || !rnaMarkers;
+  if (computeStatsFromMatrix) {
     // Compute marker statistics directly from expression matrix using current cluster assignments
     // This is used when:
     // 1. Using precomputed clusters (e.g., Xenium data) without bakana marker detection
@@ -16632,7 +16639,11 @@ async function findMarkers(params = {}) {
     // Note: For single-cell data with merged clusters, we still use bakana's marker statistics
     // because the Wilcoxon test (which determines gene ranking) uses the current merged
     // cluster assignments from currentResults.clusters.
-    const reason = usePrecomputedClusters ? 'precomputed clusters' : 'no marker detection';
+    const reason = !isAtacMarkers
+      ? 'use current RNA matrix and cluster assignments'
+      : usePrecomputedClusters
+        ? 'precomputed clusters'
+        : 'no marker detection';
     console.log(`Computing marker statistics from expression matrix (reason: ${reason})...`);
     self.postMessage({
       type: 'STATUS_UPDATE',
@@ -17891,115 +17902,52 @@ async function getClusterInfo(params = {}) {
   // We'll call findMarkers internally and extract the top 10
   console.log(`getClusterInfo: Getting top markers for cluster ${requestedCluster}`);
 
-  // Get marker detection state
-  const markerState = state.marker_detection;
   const normMatrix = state.rna_normalization.fetchNormalizedMatrix();
   const { geneNames } = await ensureGeneLookup();
   const nGenes = geneNames.length;
 
-  let markerResults = markerState?.fetchResults?.();
-  let rnaMarkers = markerResults?.RNA;
-
-  // Check if we need to compute from matrix or can use bakana stats
-  const hasPrecomputedData = loadedData.precomputed &&
-                              loadedData.precomputed.umap &&
-                              loadedData.precomputed.clusters;
-  const usePrecomputedClusters = hasPrecomputedData && !rnaMarkers;
-
   let meanTarget, detectedTarget, meanOther, detectedOther;
   const otherCells = totalCells - clusterCellCount;
 
-  if (usePrecomputedClusters || !rnaMarkers) {
-    // Compute from matrix
-    meanTarget = new Float64Array(nGenes);
-    detectedTarget = new Float64Array(nGenes);
-    meanOther = new Float64Array(nGenes);
-    detectedOther = new Float64Array(nGenes);
+  // Always compute cluster-info marker summaries from the current normalized
+  // matrix. The old cached-results branch populated meanTarget/detectedTarget
+  // from Bakana but left meanOther/detectedOther as zero-filled arrays. Since
+  // cluster_info is rendered as the same marker table as find_markers, that
+  // produced pct.2 = 0 and pseudo-count-inflated logFC values.
+  meanTarget = new Float64Array(nGenes);
+  detectedTarget = new Float64Array(nGenes);
+  meanOther = new Float64Array(nGenes);
+  detectedOther = new Float64Array(nGenes);
 
-    const targetIndices = [];
-    const otherIndices = [];
-    clusterAssignments.forEach((value, index) => {
-      if (targetClustersSet.has(String(value))) {
-        targetIndices.push(index);
-      } else {
-        otherIndices.push(index);
-      }
-    });
-
-    for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
-      const row = normMatrix.row(geneIndex, { asTypedArray: true });
-      let sumTarget = 0, detectedCountTarget = 0;
-      for (const idx of targetIndices) {
-        const val = row[idx];
-        sumTarget += val;
-        if (val > 0) detectedCountTarget++;
-      }
-      meanTarget[geneIndex] = targetIndices.length > 0 ? sumTarget / targetIndices.length : 0;
-      detectedTarget[geneIndex] = targetIndices.length > 0 ? detectedCountTarget / targetIndices.length : 0;
-
-      let sumOther = 0, detectedCountOther = 0;
-      for (const idx of otherIndices) {
-        const val = row[idx];
-        sumOther += val;
-        if (val > 0) detectedCountOther++;
-      }
-      meanOther[geneIndex] = otherIndices.length > 0 ? sumOther / otherIndices.length : 0;
-      detectedOther[geneIndex] = otherIndices.length > 0 ? detectedCountOther / otherIndices.length : 0;
-    }
-  } else {
-    // Use bakana stats (with merge detection)
-    const bakanaGroupCount = typeof rnaMarkers.numberOfGroups === 'function'
-      ? rnaMarkers.numberOfGroups()
-      : uniqueClusters.length;
-    const clustersWereMerged = bakanaGroupCount !== uniqueClusters.length || isMergedClusterRequest;
-
-    if (clustersWereMerged) {
-      // Compute from matrix for merged clusters
-      meanTarget = new Float64Array(nGenes);
-      detectedTarget = new Float64Array(nGenes);
-      meanOther = new Float64Array(nGenes);
-      detectedOther = new Float64Array(nGenes);
-
-      const targetIndices = [];
-      const otherIndices = [];
-      clusterAssignments.forEach((value, index) => {
-        if (targetClustersSet.has(String(value))) {
-          targetIndices.push(index);
-        } else {
-          otherIndices.push(index);
-        }
-      });
-
-      for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
-        const row = normMatrix.row(geneIndex, { asTypedArray: true });
-        let sumTarget = 0, detectedCountTarget = 0;
-        for (const idx of targetIndices) {
-          const val = row[idx];
-          sumTarget += val;
-          if (val > 0) detectedCountTarget++;
-        }
-        meanTarget[geneIndex] = targetIndices.length > 0 ? sumTarget / targetIndices.length : 0;
-        detectedTarget[geneIndex] = targetIndices.length > 0 ? detectedCountTarget / targetIndices.length : 0;
-
-        let sumOther = 0, detectedCountOther = 0;
-        for (const idx of otherIndices) {
-          const val = row[idx];
-          sumOther += val;
-          if (val > 0) detectedCountOther++;
-        }
-        meanOther[geneIndex] = otherIndices.length > 0 ? sumOther / otherIndices.length : 0;
-        detectedOther[geneIndex] = otherIndices.length > 0 ? detectedCountOther / otherIndices.length : 0;
-      }
+  const targetIndicesForStats = [];
+  const otherIndicesForStats = [];
+  clusterAssignments.forEach((value, index) => {
+    if (targetClustersSet.has(String(value))) {
+      targetIndicesForStats.push(index);
     } else {
-      // Use bakana pre-computed stats
-      if (typeof requestedCluster !== 'number' || requestedCluster < 0 || requestedCluster >= bakanaGroupCount) {
-        throw new Error(`Requested cluster ${requestedCluster} is out of range.`);
-      }
-      meanTarget = rnaMarkers.mean(requestedCluster, { copy: true });
-      detectedTarget = rnaMarkers.detected(requestedCluster, { copy: true });
-      meanOther = new Float64Array(nGenes);
-      detectedOther = new Float64Array(nGenes);
+      otherIndicesForStats.push(index);
     }
+  });
+
+  for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
+    const row = normMatrix.row(geneIndex, { asTypedArray: true });
+    let sumTarget = 0, detectedCountTarget = 0;
+    for (const idx of targetIndicesForStats) {
+      const val = row[idx];
+      sumTarget += val;
+      if (val > 0) detectedCountTarget++;
+    }
+    meanTarget[geneIndex] = targetIndicesForStats.length > 0 ? sumTarget / targetIndicesForStats.length : 0;
+    detectedTarget[geneIndex] = targetIndicesForStats.length > 0 ? detectedCountTarget / targetIndicesForStats.length : 0;
+
+    let sumOther = 0, detectedCountOther = 0;
+    for (const idx of otherIndicesForStats) {
+      const val = row[idx];
+      sumOther += val;
+      if (val > 0) detectedCountOther++;
+    }
+    meanOther[geneIndex] = otherIndicesForStats.length > 0 ? sumOther / otherIndicesForStats.length : 0;
+    detectedOther[geneIndex] = otherIndicesForStats.length > 0 ? detectedCountOther / otherIndicesForStats.length : 0;
   }
 
   // Compute Wilcoxon p-values for ranking
