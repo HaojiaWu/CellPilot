@@ -13114,3 +13114,5260 @@ async function plotAtacGeneActivity(params) {
     if (tssResult.peakIndices.length > 0) {
       peakIndices = tssResult.peakIndices;
       peaksOnGene = tssResult.peaksOnGene;
+      console.log('scATAC: gene activity for', geneName, 'via TSS-based linking (' + peakIndices.length + ' peaks within 500kb of TSS, genome:', genome || 'default');
+    } else {
+      const hint = peakAnnotation.length === 0 || peakAnnotation.every((p) => !(p.gene && String(p.gene).trim()))
+        ? ' Ensure your peak annotation file has a gene column (e.g. "gene", "gene_name", or "symbol"), or try a gene in the TSS reference (e.g. SLC12A1, CD4, MS4A1).'
+        : '';
+      throw new Error(`No peaks found for gene "${geneName}". Try another gene or check spelling.${hint}`);
+    }
+  }
+
+  // Diagnostic logging for debugging gene activity
+  const isIntegration = loadedData?.info?.modality === 'atac-integration';
+  console.log(`scATAC gene activity [${geneName}]: modality=${loadedData?.info?.modality}, nCells=${nCells}, ` +
+    `peakIndices=${peakIndices.length}, usedTSS=${usedTSS}, ` +
+    `totalAnnotations=${peakAnnotation.length}, totalPeakNames=${peakNames.length}`);
+  if (isIntegration && peakIndices.length > 0) {
+    // Log matched peak details for debugging
+    const samplePeaks = peakIndices.slice(0, 5).map(idx => `${peakNames[idx]}(gene=${peakAnnotation[idx]?.gene || '?'})`);
+    console.log(`  Matched peaks (first 5): ${samplePeaks.join(', ')}`);
+  }
+
+  const expression = new Float32Array(nCells);
+  const cscForExpr = peakMatrix.getCSC ? peakMatrix.getCSC() : null;
+  if (cscForExpr) {
+    // Fast path: iterate CSC non-zeros directly — avoids allocating a dense column per cell
+    const peakSet = new Set(peakIndices);
+    const { colPtr, rowIdx, values } = cscForExpr;
+
+    for (let c = 0; c < nCells; c++) {
+      let geneSum = 0;
+      for (let p = colPtr[c]; p < colPtr[c + 1]; p++) {
+        if (peakSet.has(rowIdx[p])) geneSum += values[p];
+      }
+      expression[c] = geneSum;
+    }
+  } else {
+    for (let c = 0; c < nCells; c++) {
+      let sum = 0;
+      const col = peakMatrix.column(c);
+      for (let p = 0; p < peakIndices.length; p++) sum += col[peakIndices[p]] || 0;
+      expression[c] = sum;
+    }
+  }
+  // Diagnostic: expression stats before normalization
+  if (isIntegration) {
+    let nNonZero = 0, exprSum = 0, exprMax = 0;
+    for (let c = 0; c < nCells; c++) {
+      if (expression[c] > 0) { nNonZero++; exprSum += expression[c]; }
+      if (expression[c] > exprMax) exprMax = expression[c];
+    }
+    console.log(`  Expression stats (raw): nonzero=${nNonZero}/${nCells} (${(nNonZero/nCells*100).toFixed(1)}%), ` +
+      `mean=${(exprSum/nCells).toFixed(3)}, max=${exprMax}`);
+    // Per-sample breakdown
+    if (loadedData.integrationViews) {
+      for (const [vName, vData] of Object.entries(loadedData.integrationViews)) {
+        const indices = vData.indices || [];
+        let vNonZero = 0, vSum = 0, vMax = 0;
+        for (const idx of indices) {
+          if (expression[idx] > 0) { vNonZero++; vSum += expression[idx]; }
+          if (expression[idx] > vMax) vMax = expression[idx];
+        }
+        console.log(`    ${vName}: nonzero=${vNonZero}/${indices.length} (${(vNonZero/indices.length*100).toFixed(1)}%), ` +
+          `mean=${(vSum/indices.length).toFixed(3)}, max=${vMax}`);
+      }
+    }
+  }
+
+  // For integration: depth-normalize per cell so cross-sample comparison is fair,
+  // then apply log1p for sharper color contrast (same principle as scRNA-seq library-size normalization).
+  // Standalone single-sample ATAC uses raw counts (cells from one experiment have uniform depth),
+  // but integration combines samples with potentially very different total fragment counts per cell,
+  // causing the raw-count color scale to appear flat.
+  if (isIntegration) {
+    const colSumsForNorm = loadedData.atacColSums;
+    if (Array.isArray(colSumsForNorm) && colSumsForNorm.length === nCells) {
+      // Step 1: Depth-normalize per cell so cross-sample depth differences don't drive color.
+      // Scale to median library size so absolute values stay interpretable.
+      const depthsSorted = Float64Array.from(colSumsForNorm).sort();
+      const mid = Math.floor(depthsSorted.length / 2);
+      const medianDepth = depthsSorted.length % 2 === 1
+        ? depthsSorted[mid]
+        : (depthsSorted[mid - 1] + depthsSorted[mid]) / 2;
+      const targetDepth = medianDepth > 0 ? medianDepth : 1;
+      for (let c = 0; c < nCells; c++) {
+        const depth = colSumsForNorm[c] > 0 ? colSumsForNorm[c] : 1;
+        expression[c] = Math.log1p((expression[c] / depth) * targetDepth);
+      }
+
+      // Step 2: Background subtraction — remove the noise floor.
+      // In the unified peak set, even non-expressing cells accumulate small counts
+      // across many gene-linked peaks, shifting them off zero and washing out color contrast.
+      // Subtract the p15 level (noise floor) and clip to 0, so background cells collapse
+      // to pure blue while truly expressing cells keep their signal. This mirrors what
+      // Seurat ScaleData / Signac does to create sharp FeaturePlot colors.
+      const exprSorted = Float64Array.from(expression).sort();
+      const noiseFloor = exprSorted[Math.floor(0.15 * exprSorted.length)];
+      if (noiseFloor > 0) {
+        for (let c = 0; c < nCells; c++) {
+          expression[c] = Math.max(0, expression[c] - noiseFloor);
+        }
+      }
+      console.log(`  Integration gene activity: depth-normalized + log1p + bg-subtraction applied, medianDepth=${medianDepth.toFixed(0)}, noiseFloor=${noiseFloor.toFixed(4)}`);
+    }
+  }
+
+  let maxVal = 1;
+  for (let c = 0; c < nCells; c++) { if (expression[c] > maxVal) maxVal = expression[c]; }
+
+  const coordinates = currentResults.umap;
+  if (!coordinates || coordinates.length !== nCells) {
+    throw new Error('UMAP coordinates not available for ATAC gene activity plot.');
+  }
+
+  let coverageByCluster = null;
+  let region = null;
+  let viewCoverageByCluster = null;
+  const clusters = currentResults.clusters;
+  if (peaksOnGene.length > 0 && Array.isArray(clusters) && clusters.length === nCells) {
+    const chrom = peaksOnGene[0].chrom;
+    const minStart = Math.min(...peaksOnGene.map((p) => Number(p.start) || 0));
+    const maxEnd = Math.max(...peaksOnGene.map((p) => Number(p.end) || 0));
+    const regionStart = Math.max(0, minStart - ATAC_EXTEND_UPSTREAM);
+    const regionEnd = maxEnd + ATAC_EXTEND_DOWNSTREAM;
+    const { peakRows: regionPeakRows } = getPeaksInRegion(peakAnnotation, peakNames, chrom, regionStart, regionEnd);
+
+    // atac-integration: rebuild regionPeakRows using original per-sample peak coordinates
+    // instead of merged/unified coordinates, so coverage curves look like single-sample mode.
+    // Each original peak is mapped to its unified matrix row by coordinate overlap.
+    let effectivePeakRows = regionPeakRows;
+    if (loadedData?.info?.modality === 'atac-integration' && Array.isArray(loadedData.atacSamples) && regionPeakRows.length > 0) {
+      // Build lookup: for a given genomic position, find the unified peak row that contains it
+      const unifiedRowsByRange = regionPeakRows.map(pr => ({
+        rowIndex: pr.rowIndex,
+        start: Number(pr.start) || 0,
+        end: Number(pr.end) || 0,
+      }));
+      unifiedRowsByRange.sort((a, b) => a.start - b.start);
+
+      // Find unified row index for an original peak by coordinate overlap
+      function findUnifiedRow(oStart, oEnd) {
+        for (const u of unifiedRowsByRange) {
+          if (u.end <= oStart) continue;
+          if (u.start >= oEnd) break;
+          // Overlap found
+          return u.rowIndex;
+        }
+        return -1;
+      }
+
+      // Collect original per-sample peaks in the region.
+      // Use peakNames (peaks.bed, always present) parsed as chr-start-end coordinates.
+      const origRows = [];
+      const seenCoords = new Set();
+      const chromNorm = String(chrom || '').toLowerCase();
+      for (const sample of loadedData.atacSamples) {
+        const sPeakNames = sample.peakNames || [];
+        for (const pn of sPeakNames) {
+          const m = String(pn).match(/^([^-]+)-(\d+)-(\d+)$/);
+          if (!m) continue;
+          const pChrom = m[1];
+          if (pChrom.toLowerCase() !== chromNorm) continue;
+          const s = parseInt(m[2]);
+          const e = parseInt(m[3]);
+          if (e < regionStart || s > regionEnd) continue;
+          const key = `${s}-${e}`;
+          if (seenCoords.has(key)) continue;
+          seenCoords.add(key);
+          const uRow = findUnifiedRow(s, e);
+          if (uRow >= 0) {
+            origRows.push({ rowIndex: uRow, start: s, end: e });
+          }
+        }
+      }
+      if (origRows.length > 0) {
+        origRows.sort((a, b) => a.start - b.start);
+        console.log(`scATAC integration: using ${origRows.length} original per-sample peak positions instead of ${regionPeakRows.length} unified for coverage`);
+        effectivePeakRows = origRows;
+      }
+    }
+
+    if (effectivePeakRows.length > 0) {
+      coverageByCluster = computeCoverageByClusterRaw(peakMatrix, clusters, effectivePeakRows, loadedData.atacColSums);
+      region = { chrom, start: regionStart, end: regionEnd };
+      // atac-integration: compute per-sample coverage (mask cells outside each sample to null)
+      // Use a global medianScale so all samples are on the same scale for comparison
+      if (loadedData?.info?.modality === 'atac-integration') {
+        const iViews = getAtacIntegrationViewsForPlot();
+        if (iViews) {
+          // Compute global median scale factor from ALL cells (same as the global coverageByCluster above)
+          const hasCS = Array.isArray(loadedData.atacColSums) && loadedData.atacColSums.length === nCells;
+          let globalMedianScale = null;
+          if (hasCS) {
+            const uniqueC = Array.from(new Set(clusters)).filter(c => c !== null && c !== undefined);
+            const gsFactors = [];
+            for (const cId of uniqueC) {
+              let depthSum = 0, cnt = 0;
+              for (let i = 0; i < nCells; i++) {
+                if (clusters[i] === cId) { depthSum += loadedData.atacColSums[i] || 0; cnt++; }
+              }
+              if (cnt > 0) gsFactors.push((depthSum / cnt) * cnt);
+            }
+            gsFactors.sort((a, b) => a - b);
+            if (gsFactors.length > 0) {
+              globalMedianScale = gsFactors.length % 2 === 1
+                ? gsFactors[Math.floor(gsFactors.length / 2)]
+                : (gsFactors[gsFactors.length / 2 - 1] + gsFactors[gsFactors.length / 2]) / 2;
+              if (globalMedianScale <= 0) globalMedianScale = 1;
+            }
+          }
+          viewCoverageByCluster = {};
+          // Full list of all cluster IDs in the dataset (no cap) for consistent order and empty tracks
+          const allClusterIds = Array.from(new Set(clusters)).filter((c) => c !== null && c !== undefined);
+          allClusterIds.sort((a, b) => (typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b))));
+          const maxClustersUncap = Math.max(100000, allClusterIds.length);
+          for (const vName of iViews.datasetNames) {
+            const vIndices = iViews.integrationViews[vName]?.indices;
+            if (!Array.isArray(vIndices) || vIndices.length === 0) continue;
+            const maskedClusters = new Array(nCells).fill(null);
+            for (const idx of vIndices) maskedClusters[idx] = clusters[idx];
+            viewCoverageByCluster[vName] = computeCoverageByClusterRaw(
+              peakMatrix, maskedClusters, effectivePeakRows, loadedData.atacColSums, globalMedianScale, maxClustersUncap
+            );
+          }
+          // Ensure every view has the same set of clusters (all clusters); fill missing with empty tracks
+          for (const vName of Object.keys(viewCoverageByCluster)) {
+            const cov = viewCoverageByCluster[vName];
+            if (!Array.isArray(cov)) continue;
+            const byId = new Map();
+            for (const c of cov) byId.set(c.clusterId, c);
+            const filled = [];
+            for (const cid of allClusterIds) {
+              if (byId.has(cid)) {
+                filled.push(byId.get(cid));
+              } else {
+                const emptySignal = effectivePeakRows.map((p) => ({ start: p.start, end: p.end, value: 0 }));
+                filled.push({ clusterId: cid, label: String(cid), cellCount: 0, signal: emptySignal });
+              }
+            }
+            viewCoverageByCluster[vName] = filled;
+          }
+        }
+      }
+    }
+  }
+
+  // atac-integration: replace peaksOnGene with original per-sample peaks (un-merged)
+  // so the PEAKS track matches what single-sample mode shows.
+  // The unified (merged) peaks were used above for region/coverage computation which is correct,
+  // but for display we want the original discrete peaks from each sample.
+  if (loadedData?.info?.modality === 'atac-integration' && Array.isArray(loadedData.atacSamples) && peaksOnGene.length > 0) {
+    const origPeaks = [];
+    const seen = new Set();
+    const genome = loadedData.info?.genome;
+    for (const sample of loadedData.atacSamples) {
+      const sAnno = sample.peakAnnotation || [];
+      const sPeakNames = sample.peakNames || [];
+      // Try gene-based lookup first, then TSS-based fallback (same logic as main path)
+      let sResult = getPeaksForGene(geneName, sAnno, sPeakNames);
+      if (sResult.peaksOnGene.length === 0) {
+        sResult = getPeaksForGeneByTSS(geneName, sAnno, sPeakNames, undefined, genome);
+      }
+      for (const p of sResult.peaksOnGene) {
+        const key = `${p.chrom}:${p.start}-${p.end}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          origPeaks.push(p);
+        }
+      }
+    }
+    if (origPeaks.length > 0) {
+      console.log(`scATAC integration: replaced ${peaksOnGene.length} unified peaks with ${origPeaks.length} original per-sample peaks for display`);
+      peaksOnGene = origPeaks;
+    }
+  }
+
+  // Get filtered/ordered barcodes that match the clusters array
+  // For legacy path, try to apply filter mask if available
+  let cellBarcodes = null;
+  if (loadedData.cellBarcodes && Array.isArray(loadedData.cellBarcodes)) {
+    const state = loadedData.state;
+    if (state && state.cell_filtering && typeof state.cell_filtering.fetchKeep === 'function') {
+      try {
+        const keepResult = state.cell_filtering.fetchKeep();
+        let keptIndices = null;
+        if (keepResult && typeof keepResult[Symbol.iterator] === 'function') {
+          keptIndices = [];
+          let idx = 0;
+          for (const kept of keepResult) {
+            if (kept) keptIndices.push(idx);
+            idx++;
+          }
+        } else if (keepResult && typeof keepResult.length === 'number') {
+          keptIndices = [];
+          for (let i = 0; i < keepResult.length; i++) {
+            if (keepResult[i]) keptIndices.push(i);
+          }
+        }
+        if (keptIndices && keptIndices.length > 0 && keptIndices.length === clusters?.length) {
+          cellBarcodes = keptIndices.map(idx => loadedData.cellBarcodes[idx]);
+          console.log('Using filtered barcodes (legacy, keep mask):', cellBarcodes.length);
+        }
+      } catch (e) {
+        console.warn('Failed to get keep mask for barcode filtering (legacy):', e.message);
+      }
+    }
+    // Fallback: use original barcodes if lengths match
+    if (!cellBarcodes && loadedData.cellBarcodes.length === nCells) {
+      cellBarcodes = loadedData.cellBarcodes;
+      console.log('Using original barcodes (legacy, no filtering):', cellBarcodes.length);
+    }
+  }
+
+  // Percentile-based range for color scale.
+  // For integration: after background subtraction most cells are 0, so percentiles over the full
+  // array are dominated by zeros. Use only the non-zero cells to set the upper bound — this
+  // ensures that moderate expressors map to the middle of the color scale (white) rather than
+  // appearing as barely-visible pale blue. Min is always 0 (background-subtracted baseline).
+  // For single-sample: use 2nd-98th percentile of full array as before.
+  let expressionRange = null;
+  if (expression.length > 0) {
+    if (isIntegration) {
+      const nonZero = [];
+      for (let c = 0; c < nCells; c++) { if (expression[c] > 0) nonZero.push(expression[c]); }
+      if (nonZero.length > 0) {
+        nonZero.sort((a, b) => a - b);
+        // Use p95 of non-zero cells as max — the top 5% of expressors saturate at red,
+        // and cells with moderate accessibility get a full color spread.
+        const p95nz = nonZero[Math.floor(0.95 * nonZero.length)];
+        const rangeMax = p95nz > 0 ? p95nz : nonZero[nonZero.length - 1];
+        if (Number.isFinite(rangeMax) && rangeMax > 0) {
+          expressionRange = [0, rangeMax];
+        }
+      }
+      console.log(`  Integration color range: nonZeroCells=${nonZero.length}/${nCells} (${(nonZero.length/nCells*100).toFixed(1)}%), rangeMax=${expressionRange ? expressionRange[1].toFixed(4) : 'null'}`);
+    } else {
+      const sorted = Array.from(expression).sort((a, b) => a - b);
+      const p02 = sorted[Math.floor(0.02 * sorted.length)];
+      const p98 = sorted[Math.floor(0.98 * sorted.length)];
+      const exprMax = sorted[sorted.length - 1];
+      const rangeMax = (p98 > p02) ? p98 : exprMax;
+      if (Number.isFinite(rangeMax) && rangeMax > 0) {
+        expressionRange = [p02, rangeMax];
+      }
+    }
+  }
+
+  console.log('ATAC gene activity response (legacy):', {
+    geneName,
+    nCells,
+    cellBarcodesLength: cellBarcodes?.length,
+    clustersLength: clusters?.length,
+    hasRegion: !!region,
+    barcodesMatchClusters: cellBarcodes?.length === clusters?.length,
+  });
+
+  // Compute per-cluster mean depth for Signac-style fragment normalization
+  let clusterMeanDepths = undefined;
+  const colSums = loadedData.atacColSums;
+  if (Array.isArray(colSums) && colSums.length === nCells && Array.isArray(clusters) && clusters.length === nCells) {
+    const depthMap = {};
+    const countMap = {};
+    for (let i = 0; i < nCells; i++) {
+      const c = clusters[i];
+      if (c === null || c === undefined) continue;
+      depthMap[c] = (depthMap[c] || 0) + (colSums[i] || 0);
+      countMap[c] = (countMap[c] || 0) + 1;
+    }
+    clusterMeanDepths = {};
+    for (const c of Object.keys(depthMap)) {
+      clusterMeanDepths[c] = countMap[c] > 0 ? depthMap[c] / countMap[c] : 0;
+    }
+  }
+
+  const payload = {
+    type: 'gene_expression',
+    geneName,
+    expression: Array.from(expression),
+    expressionRange: expressionRange || undefined,
+    coordinates,
+    colorMap: colorMap || null,
+    peaksOnGene: peaksOnGene.length ? peaksOnGene : undefined,
+    coverageByCluster: coverageByCluster && coverageByCluster.length ? coverageByCluster : undefined,
+    region: region || undefined,
+    genome: loadedData.info?.genome || undefined,
+    cellBarcodes: cellBarcodes || undefined,
+    clusters: clusters || undefined,
+    clusterMeanDepths: clusterMeanDepths || undefined,
+    isAtac: true,
+    viewCoverageByCluster: viewCoverageByCluster || undefined,
+    // Include integration views so frontend can query per-sample fragments
+    integrationViews: (loadedData?.info?.modality === 'atac-integration' && loadedData.integrationViews)
+      ? loadedData.integrationViews : undefined,
+    datasetNames: (loadedData?.info?.modality === 'atac-integration' && loadedData.info?.datasetNames)
+      ? loadedData.info.datasetNames : undefined,
+  };
+  scAtacGeneActivityCache.set(cacheKey, {
+    ...payload,
+    expression: [...payload.expression],
+    expressionRange: payload.expressionRange ? [...payload.expressionRange] : undefined,
+    coordinates: payload.coordinates ? payload.coordinates.map((c) => [...c]) : undefined,
+    peaksOnGene: payload.peaksOnGene ? payload.peaksOnGene.map((p) => ({ ...p })) : undefined,
+    coverageByCluster: copyCoverageByCluster(payload.coverageByCluster),
+    viewCoverageByCluster: payload.viewCoverageByCluster
+      ? Object.fromEntries(Object.entries(payload.viewCoverageByCluster).map(([k, v]) => [k, copyCoverageByCluster(v)]))
+      : undefined,
+    region: payload.region ? { ...payload.region } : undefined,
+    cellBarcodes: payload.cellBarcodes ? [...payload.cellBarcodes] : undefined,
+    clusters: payload.clusters ? [...payload.clusters] : undefined,
+  });
+  // Strip coverage fields when user only asked for gene activity UMAP (not coverage plot)
+  const responsePayload = showPeakView ? payload : {
+    ...payload,
+    coverageByCluster: undefined,
+    viewCoverageByCluster: undefined,
+    region: undefined,
+    peaksOnGene: undefined,
+  };
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: responsePayload,
+  });
+}
+
+/**
+ * Signac-style per-cluster coverage: raw sum per peak, normalized by
+ * group_scale_factor = mean_depth * n_cells, rescaled to median(group_scale_factors).
+ * Falls back to simple mean-per-cell when colSums is unavailable.
+ */
+function computeCoverageByClusterRaw(peakMatrix, clusters, peakRows, colSums, globalMedianScale, maxClustersCap) {
+  const nCells = peakMatrix.numberOfColumns();
+  const uniqueClusters = Array.from(new Set(clusters)).filter((c) => c !== null && c !== undefined);
+  uniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b))));
+  const clusterToCells = new Map();
+  for (let i = 0; i < nCells; i++) {
+    const c = clusters[i];
+    if (c === null || c === undefined) continue;
+    if (!clusterToCells.has(c)) clusterToCells.set(c, []);
+    clusterToCells.get(c).push(i);
+  }
+
+  // Signac-style: compute group scale factors = mean_depth * n_cells per cluster
+  const hasColSums = Array.isArray(colSums) && colSums.length === nCells;
+  const groupScaleFactors = new Map();
+  if (hasColSums) {
+    for (const clusterId of uniqueClusters) {
+      const cellIndices = clusterToCells.get(clusterId) || [];
+      if (cellIndices.length === 0) { groupScaleFactors.set(clusterId, 1); continue; }
+      let depthSum = 0;
+      for (let j = 0; j < cellIndices.length; j++) depthSum += colSums[cellIndices[j]] || 0;
+      const meanDepth = depthSum / cellIndices.length;
+      groupScaleFactors.set(clusterId, meanDepth * cellIndices.length);
+    }
+    // Global scale factor = median of group scale factors
+    // If globalMedianScale is provided (e.g. for cross-sample comparability), use it instead
+    const gsVals = Array.from(groupScaleFactors.values()).sort((a, b) => a - b);
+    var medianScale;
+    if (globalMedianScale != null && globalMedianScale > 0) {
+      medianScale = globalMedianScale;
+    } else {
+      medianScale = gsVals.length % 2 === 1
+        ? gsVals[Math.floor(gsVals.length / 2)]
+        : (gsVals[gsVals.length / 2 - 1] + gsVals[gsVals.length / 2]) / 2;
+      if (medianScale <= 0) medianScale = 1;
+    }
+  }
+
+  // Fast path: pre-accumulate per-cluster sums by scanning CSC non-zeros once
+  const cscForCov = peakMatrix.getCSC ? peakMatrix.getCSC() : null;
+  const peakRowMap = new Map(); // peakRow rowIndex → index in peakRows array
+  for (let ri = 0; ri < peakRows.length; ri++) peakRowMap.set(peakRows[ri].rowIndex, ri);
+  const clusterIdxMap = new Map();
+  for (let ci = 0; ci < uniqueClusters.length; ci++) clusterIdxMap.set(uniqueClusters[ci], ci);
+  // sums[clusterIdx][peakRowIdx] = raw sum
+  const sums = Array.from({ length: uniqueClusters.length }, () => new Float64Array(peakRows.length));
+  if (cscForCov) {
+    const { colPtr, rowIdx, values } = cscForCov;
+    for (let c = 0; c < nCells; c++) {
+      const clustId = clusters[c];
+      if (clustId === null || clustId === undefined) continue;
+      const ci = clusterIdxMap.get(clustId);
+      if (ci === undefined) continue;
+      for (let p = colPtr[c]; p < colPtr[c + 1]; p++) {
+        const ri = peakRowMap.get(rowIdx[p]);
+        if (ri !== undefined) sums[ci][ri] += values[p];
+      }
+    }
+  } else {
+    // Fallback: original row-access approach
+    for (let ci = 0; ci < uniqueClusters.length; ci++) {
+      const cellIndices = clusterToCells.get(uniqueClusters[ci]) || [];
+      for (let ri = 0; ri < peakRows.length; ri++) {
+        const row = peakMatrix.row(peakRows[ri].rowIndex);
+        for (let j = 0; j < cellIndices.length; j++) sums[ci][ri] += (row[cellIndices[j]] || 0);
+      }
+    }
+  }
+
+  const coverageByCluster = [];
+  for (let ci = 0; ci < uniqueClusters.length; ci++) {
+    const clusterId = uniqueClusters[ci];
+    const cellIndices = clusterToCells.get(clusterId) || [];
+    const signal = [];
+    for (let ri = 0; ri < peakRows.length; ri++) {
+      const p = peakRows[ri];
+      const sum = sums[ci][ri];
+      let value;
+      if (hasColSums) {
+        // Signac: norm = raw_sum / group_scale_factor * median_scale_factor
+        const gsf = groupScaleFactors.get(clusterId) || 1;
+        value = (sum / gsf) * medianScale;
+      } else {
+        // Fallback: simple mean per cell
+        value = cellIndices.length > 0 ? sum / cellIndices.length : 0;
+      }
+      signal.push({ start: p.start, end: p.end, value });
+    }
+    coverageByCluster.push({ clusterId, label: String(clusterId), cellCount: cellIndices.length, signal });
+  }
+  coverageByCluster.sort((a, b) => (b.cellCount || 0) - (a.cellCount || 0));
+  const cap = maxClustersCap != null ? maxClustersCap : ATAC_MAX_CLUSTERS_COVERAGE;
+  return coverageByCluster.slice(0, cap);
+}
+
+/** Per-cluster mean raw count over peaks when clusters map to full-matrix column indices (multiome). */
+function computeCoverageByClusterRawFromColumnMap(peakMatrix, clusterToColumnIndices, peakRows) {
+  const coverageByCluster = [];
+  const clusterIds = Array.from(clusterToColumnIndices.keys()).filter(c => c !== null && c !== undefined);
+  clusterIds.sort((a, b) => (typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b))));
+  for (const clusterId of clusterIds) {
+    const columnIndices = clusterToColumnIndices.get(clusterId) || [];
+    const signal = [];
+    for (const p of peakRows) {
+      let sum = 0;
+      const row = peakMatrix.row(p.rowIndex);
+      for (let j = 0; j < columnIndices.length; j++) {
+        const val = (row && row[columnIndices[j]] != null) ? row[columnIndices[j]] : 0;
+        sum += val;
+      }
+      const value = columnIndices.length > 0 ? sum / columnIndices.length : 0;
+      signal.push({ start: p.start, end: p.end, value });
+    }
+    coverageByCluster.push({ clusterId, label: String(clusterId), cellCount: columnIndices.length, signal });
+  }
+  coverageByCluster.sort((a, b) => (b.cellCount || 0) - (a.cellCount || 0));
+  return coverageByCluster.slice(0, ATAC_MAX_CLUSTERS_COVERAGE);
+}
+
+/**
+ * Plot gene activity for ATAC when we have state (runFullAnalysisPipeline) and peakAnnotation:
+ * sum normalized peak rows linked to the gene, then log-scale. Returns peaksOnGene and coverageByCluster for Peak View (Signac CoveragePlot-style).
+ */
+async function plotAtacGeneActivityFromState(params) {
+  const { gene, colorMap } = params;
+  const showPeakView = params.showPeakView === true;
+  const geneName = (gene && String(gene).trim()) || 'gene';
+  const cacheKey = geneName.toLowerCase().trim();
+  const cached = scAtacGeneActivityCache.get(cacheKey);
+  if (cached) {
+    console.log('scATAC: serving gene activity from cache for', geneName);
+    const cachedData = {
+      ...cached,
+      expression: [...cached.expression],
+      coordinates: cached.coordinates ? cached.coordinates.map((c) => [...c]) : undefined,
+    };
+    if (!showPeakView) {
+      cachedData.coverageByCluster = undefined;
+      cachedData.viewCoverageByCluster = undefined;
+      cachedData.region = undefined;
+      cachedData.peaksOnGene = undefined;
+    }
+    self.postMessage({ type: 'ANALYSIS_COMPLETE', data: cachedData });
+    return;
+  }
+  const peakAnnotation = loadedData.peakAnnotation;
+  const state = loadedData.state;
+  // Use raw count matrix (not normalized) for linear-scale ATAC gene activity
+  const countMatrixContainer = state.inputs.fetchCountMatrix();
+  const countModality = countMatrixContainer.available()[0];
+  const normMatrix = countMatrixContainer.get(countModality);
+  const nCells = normMatrix.numberOfColumns();
+  const { geneNames } = await ensureGeneLookup();
+  let { peakIndices, peaksOnGene } = getPeaksForGene(geneName, peakAnnotation, geneNames);
+  if (peakIndices.length === 0) {
+    const genome = loadedData.info?.genome;
+    const tssResult = getPeaksForGeneByTSS(geneName, peakAnnotation, geneNames, undefined, genome);
+    if (tssResult.peakIndices.length > 0) {
+      peakIndices = tssResult.peakIndices;
+      peaksOnGene = tssResult.peaksOnGene;
+      console.log('scATAC: gene activity for', geneName, 'via TSS-based linking (' + peakIndices.length + ' peaks within 500kb of TSS, genome:', genome || 'default');
+    } else {
+      const hint = peakAnnotation.length === 0 || peakAnnotation.every((p) => !(p.gene && String(p.gene).trim()))
+        ? ' Ensure your peak annotation file has a gene column (e.g. "gene", "gene_name", or "symbol"), or try a gene in the TSS reference (e.g. SLC12A1, CD4, MS4A1).'
+        : '';
+      throw new Error(`No peaks found for gene "${geneName}". Try another gene or check spelling.${hint}`);
+    }
+  }
+
+  const expression = new Float32Array(nCells);
+  for (let c = 0; c < nCells; c++) {
+    let sum = 0;
+    for (let p = 0; p < peakIndices.length; p++) {
+      const row = normMatrix.row(peakIndices[p]);
+      sum += (row && row[c]) ? row[c] : 0;
+    }
+    expression[c] = sum;
+  }
+  // Use raw counts directly (linear scale) for ATAC gene activity
+
+  const coordinates = currentResults.umap;
+  if (!coordinates || coordinates.length !== nCells) {
+    throw new Error('UMAP coordinates not available for ATAC gene activity plot.');
+  }
+
+  let coverageByCluster = null;
+  let region = null;
+  const clusters = currentResults.clusters;
+  if (peaksOnGene.length > 0 && Array.isArray(clusters) && clusters.length === nCells) {
+    const chrom = peaksOnGene[0].chrom;
+    const minStart = Math.min(...peaksOnGene.map((p) => Number(p.start) || 0));
+    const maxEnd = Math.max(...peaksOnGene.map((p) => Number(p.end) || 0));
+    const regionStart = Math.max(0, minStart - ATAC_EXTEND_UPSTREAM);
+    const regionEnd = maxEnd + ATAC_EXTEND_DOWNSTREAM;
+    const { peakRows, peaksInRegion } = getPeaksInRegion(peakAnnotation, geneNames, chrom, regionStart, regionEnd);
+    if (peakRows.length > 0) {
+      coverageByCluster = computeCoverageByCluster(normMatrix, clusters, peakRows);
+      region = { chrom, start: regionStart, end: regionEnd };
+    }
+  }
+
+  // Get filtered/ordered barcodes that match the clusters array
+  // This is critical: after cell filtering, the indices don't match original barcodes
+  let cellBarcodes = null;
+  if (loadedData.cellBarcodes && Array.isArray(loadedData.cellBarcodes)) {
+    const state = loadedData.state;
+    if (state && state.cell_filtering && typeof state.cell_filtering.fetchKeep === 'function') {
+      try {
+        const keepResult = state.cell_filtering.fetchKeep();
+        let keptIndices = null;
+        if (keepResult && typeof keepResult[Symbol.iterator] === 'function') {
+          keptIndices = [];
+          let idx = 0;
+          for (const kept of keepResult) {
+            if (kept) keptIndices.push(idx);
+            idx++;
+          }
+        } else if (keepResult && typeof keepResult.length === 'number') {
+          keptIndices = [];
+          for (let i = 0; i < keepResult.length; i++) {
+            if (keepResult[i]) keptIndices.push(i);
+          }
+        }
+        if (keptIndices && keptIndices.length === nCells) {
+          cellBarcodes = keptIndices.map(idx => loadedData.cellBarcodes[idx]);
+          console.log('Using filtered barcodes (keep mask):', cellBarcodes.length, 'of', loadedData.cellBarcodes.length);
+        }
+      } catch (e) {
+        console.warn('Failed to get keep mask for barcode filtering:', e.message);
+      }
+    }
+    // Fallback: if no filtering or lengths match, use original barcodes
+    if (!cellBarcodes && loadedData.cellBarcodes.length === nCells) {
+      cellBarcodes = loadedData.cellBarcodes;
+      console.log('Using original barcodes (no filtering detected):', cellBarcodes.length);
+    }
+  }
+
+  let expressionRangeFromState = null;
+  if (expression.length > 0) {
+    const sorted = Array.from(expression).sort((a, b) => a - b);
+    const p02 = sorted[Math.floor(0.02 * sorted.length)];
+    const p98 = sorted[Math.floor(0.98 * sorted.length)];
+    const exprMax = sorted[sorted.length - 1];
+    const rangeMax = (p98 > p02) ? p98 : exprMax;
+    if (Number.isFinite(rangeMax) && rangeMax > 0) {
+      expressionRangeFromState = [p02, rangeMax];
+    }
+  }
+
+  console.log('ATAC gene activity response:', {
+    geneName,
+    nCells,
+    cellBarcodesLength: cellBarcodes?.length,
+    clustersLength: clusters?.length,
+    hasRegion: !!region,
+    coverageByClusterLength: coverageByCluster?.length,
+    barcodesMatchClusters: cellBarcodes?.length === clusters?.length,
+  });
+
+  // Compute per-cluster mean depth for Signac-style fragment normalization
+  let clusterMeanDepths = undefined;
+  const colSumsState = loadedData.atacColSums;
+  if (Array.isArray(colSumsState) && colSumsState.length === nCells && Array.isArray(clusters) && clusters.length === nCells) {
+    const depthMap = {};
+    const countMap = {};
+    for (let i = 0; i < nCells; i++) {
+      const c = clusters[i];
+      if (c === null || c === undefined) continue;
+      depthMap[c] = (depthMap[c] || 0) + (colSumsState[i] || 0);
+      countMap[c] = (countMap[c] || 0) + 1;
+    }
+    clusterMeanDepths = {};
+    for (const c of Object.keys(depthMap)) {
+      clusterMeanDepths[c] = countMap[c] > 0 ? depthMap[c] / countMap[c] : 0;
+    }
+  }
+
+  const payload = {
+    type: 'gene_expression',
+    geneName,
+    expression: Array.from(expression),
+    expressionRange: expressionRangeFromState || undefined,
+    coordinates,
+    colorMap: colorMap || null,
+    peaksOnGene: peaksOnGene.length ? peaksOnGene : undefined,
+    coverageByCluster: coverageByCluster && coverageByCluster.length ? coverageByCluster : undefined,
+    region: region || undefined,
+    genome: loadedData.info?.genome || undefined,
+    cellBarcodes: cellBarcodes || undefined,
+    clusters: clusters || undefined,
+    clusterMeanDepths: clusterMeanDepths || undefined,
+    isAtac: true,
+  };
+  scAtacGeneActivityCache.set(cacheKey, {
+    ...payload,
+    expression: [...payload.expression],
+    expressionRange: payload.expressionRange ? [...payload.expressionRange] : undefined,
+    coordinates: payload.coordinates ? payload.coordinates.map((c) => [...c]) : undefined,
+    peaksOnGene: payload.peaksOnGene ? payload.peaksOnGene.map((p) => ({ ...p })) : undefined,
+    coverageByCluster: copyCoverageByCluster(payload.coverageByCluster),
+    region: payload.region ? { ...payload.region } : undefined,
+    cellBarcodes: payload.cellBarcodes ? [...payload.cellBarcodes] : undefined,
+    clusters: payload.clusters ? [...payload.clusters] : undefined,
+  });
+  const responsePayloadState = showPeakView ? payload : {
+    ...payload,
+    coverageByCluster: undefined,
+    viewCoverageByCluster: undefined,
+    region: undefined,
+    peaksOnGene: undefined,
+  };
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: responsePayloadState,
+  });
+}
+
+async function plotGeneExpression(params) {
+  const { gene, colorMap } = params;
+
+  console.log('====== plotGeneExpression called ======');
+  console.log('Gene:', gene);
+  console.log('ColorMap:', colorMap);
+  console.log('loadedData exists:', !!loadedData);
+  console.log('loadedData.state exists:', !!loadedData?.state);
+
+  const isPeakId = /^chr\w+[:-]\d+[:-]\d+$/i.test(String(gene || '').trim());
+
+  // scATAC (single-sample or atac-integration) + peak ID: plot single peak expression on UMAP
+  if ((loadedData?.info?.modality === 'atac' || loadedData?.info?.modality === 'atac-integration') &&
+      loadedData.atacPeakMatrix && isPeakId) {
+    const peakMatrix = loadedData.atacPeakMatrix;
+    const peakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
+    const peakIdx = findPeakIndex(gene, peakNames);
+    if (peakIdx === -1) {
+      throw new Error(`Peak ${gene} not found in peak matrix (${peakNames.length} peaks available).`);
+    }
+    const nCells = peakMatrix.numberOfColumns();
+    const fullRow = peakMatrix.row(peakIdx);
+    const peakExpression = new Float32Array(nCells);
+    for (let j = 0; j < nCells; j++) {
+      peakExpression[j] = Math.log1p(fullRow[j] || 0);
+    }
+    const coordinates = currentResults.umap;
+    const clusters = currentResults.clusters;
+    if (!coordinates || coordinates.length !== nCells) {
+      throw new Error('UMAP coordinates not available for peak plot.');
+    }
+    const cellBarcodes = loadedData.cellBarcodes || [];
+    const payload = {
+      type: 'gene_expression',
+      coordinates,
+      expression: peakExpression,
+      geneName: peakNames[peakIdx],
+      colorMap,
+      coverageByCluster: undefined,
+      region: undefined,
+      genome: loadedData.info?.genome || 'hg38',
+      cellBarcodes: cellBarcodes.length === nCells ? cellBarcodes : null,
+      clusters,
+      isAtac: true,
+      umapOnly: true,
+    };
+    if (loadedData?.info?.modality === 'atac-integration' && loadedData.integrationViews) {
+      payload.integrationViews = loadedData.integrationViews;
+      payload.datasetNames = loadedData.info?.datasetNames || [];
+    }
+    self.postMessage({ type: 'ANALYSIS_COMPLETE', data: payload });
+    console.log('scATAC: sent peak plot for', peakNames[peakIdx]);
+    return;
+  }
+
+  // ATAC with legacy runAtacPipeline (atacPeakMatrix): plot gene activity from peaks linked to gene
+  if ((loadedData?.info?.modality === 'atac' || loadedData?.info?.modality === 'atac-integration') && loadedData.atacPeakMatrix && loadedData.peakAnnotation) {
+    console.log('>>> ROUTING: plotAtacGeneActivity (legacy raw peak matrix path)');
+    await plotAtacGeneActivity(params);
+    return;
+  }
+
+  // ATAC with state + peakAnnotation: if "gene" is a gene name (not peak ID), plot gene activity from state matrix
+  if (
+    loadedData?.info?.modality === 'atac' &&
+    loadedData.state &&
+    loadedData.peakAnnotation &&
+    !isPeakId
+  ) {
+    console.log('>>> ROUTING: plotAtacGeneActivityFromState (bakana state path)');
+    await plotAtacGeneActivityFromState(params);
+    return;
+  }
+
+  // Multiome: plot RNA expression AND ATAC gene activity for the same gene
+  if (loadedData?.info?.modality === 'multiome' && !isPeakId) {
+    console.log('Multiome: will plot both RNA expression and ATAC gene activity for', gene);
+  }
+
+  // Multiome + peak ID: plot ATAC-only using peak matrix (no RNA dual-plot)
+  if (loadedData?.info?.modality === 'multiome' && isPeakId) {
+    console.log('Multiome: plotting peak', gene, 'in ATAC view only');
+    const multiomePeak = await getMultiomePeakMatrix();
+    if (!multiomePeak) throw new Error('No peak matrix available for ATAC peak plotting.');
+    const { peakMatrix, peakNames, fullBarcodeOrder } = multiomePeak;
+    const peakIdx = findPeakIndex(gene, peakNames);
+    if (peakIdx === -1) throw new Error(`Peak ${gene} not found in peak matrix (${peakNames.length} peaks available).`);
+
+    // Extract peak values for filtered cells
+    const filteredBarcodes = loadedData.cellBarcodes || [];
+    const nFiltered = filteredBarcodes.length;
+    const barcodeToColIdx = new Map();
+    for (let i = 0; i < fullBarcodeOrder.length; i++) barcodeToColIdx.set(fullBarcodeOrder[i], i);
+
+    const fullRow = peakMatrix.row(peakIdx);
+    const peakExpression = new Float32Array(nFiltered);
+    for (let j = 0; j < nFiltered; j++) {
+      const colIdx = barcodeToColIdx.get(filteredBarcodes[j]);
+      if (colIdx !== undefined) peakExpression[j] = Math.log1p(fullRow[colIdx] || 0);
+    }
+
+    // Get ATAC coordinates + clusters
+    let atacCoordinates = loadedData.precomputed?.atacAligned?.coordinates || currentResults.umap;
+    let atacClusters = loadedData.precomputed?.atacAligned?.clusters || currentResults.clusters;
+    if (atacCoordinates && atacCoordinates.length !== nFiltered) {
+      atacCoordinates = currentResults.umap;
+      if (atacCoordinates && atacCoordinates.length !== nFiltered) atacCoordinates = null;
+    }
+    if (!atacClusters || atacClusters.length !== nFiltered) atacClusters = currentResults.clusters;
+
+    // Build region from peak coordinates
+    const peakMatch = gene.match(/^(chr\w+):(\d+)-(\d+)$/i);
+    const region = peakMatch ? {
+      chrom: peakMatch[1],
+      start: Math.max(0, parseInt(peakMatch[2]) - 5000),
+      end: parseInt(peakMatch[3]) + 5000,
+    } : null;
+    const peaksOnGene = peakMatch
+      ? [{ chrom: peakMatch[1], start: parseInt(peakMatch[2]), end: parseInt(peakMatch[3]),
+           peakName: peakNames[peakIdx] }]
+      : [];
+
+    self.postMessage({
+      type: 'ANALYSIS_COMPLETE',
+      data: {
+        type: 'gene_expression',
+        multiomeModality: 'atac',
+        coordinates: atacCoordinates,
+        expression: peakExpression,
+        geneName: peakNames[peakIdx],
+        colorMap,
+        peaksOnGene,
+        coverageByCluster: null,
+        region,
+        genome: loadedData.info?.genome || 'hg38',
+        cellBarcodes: filteredBarcodes,
+        clusters: atacClusters,
+        isAtac: true,
+      },
+    });
+    console.log('Multiome: sent ATAC peak plot for', peakNames[peakIdx]);
+    return;
+  }
+
+  // ATAC with state: "gene" can be a peak ID (chrN:start-end); use state matrix. RNA: use resolveGeneExpression.
+  if (!loadedData || (!loadedData.state && !loadedData.jsNormMatrix && !loadedData.jsH5TmpFile)) {
+    const error = new Error('No data loaded. Please load data first.');
+    console.error('plotGeneExpression error:', error.message);
+    throw error;
+  }
+
+  try {
+    console.log('Resolving gene expression for:', gene);
+    const { geneName, logExpression } = await resolveGeneExpression(gene);
+    console.log('Gene resolved:', geneName);
+    console.log('Expression array length:', logExpression.length);
+    console.log('Expression sample (first 10):', Array.from(logExpression.slice(0, 10)));
+
+    // Always fetch UMAP coordinates for the UMAP view.
+    // For "Load previous results", prefer the restored saved coordinates to avoid stale
+    // currentResults.umap from other branches that may have different cell ordering/length.
+    const restoredPrev = loadedData?.restoredPreviousResults;
+    let umapCoordinates = Array.isArray(restoredPrev?.umapCoordinates) ? restoredPrev.umapCoordinates : currentResults.umap;
+    if (!umapCoordinates && loadedData.state) {
+      console.log('Fetching UMAP results from analysis state...');
+      const umapResults = await loadedData.state.umap.fetchResults();
+      umapCoordinates = [];
+      for (let i = 0; i < umapResults.x.length; i++) {
+        umapCoordinates.push([umapResults.x[i], umapResults.y[i]]);
+      }
+      currentResults.umap = umapCoordinates; // cache for later
+      console.log('UMAP coordinates fetched:', umapCoordinates.length);
+    } else {
+      console.log('Using cached UMAP coordinates:', umapCoordinates.length);
+    }
+
+    // For spatial datasets, also include spatial coordinates
+    // The spatial view will use spatialIndex coordinates (which match spatialData.coordinates order)
+    // The UMAP view will use the umapCoordinates from the artifact
+    // IMPORTANT: Check loadedData.spatialData directly instead of relying on global spatialData variable
+    let spatialCoordinates = null;
+    const spatialDataSource = loadedData?.spatialData || spatialData;
+    console.log('Checking for spatial coordinates:', {
+      hasLoadedDataSpatialData: !!loadedData?.spatialData,
+      hasGlobalSpatialData: !!spatialData,
+      hasCoordinatesInLoadedData: Array.isArray(loadedData?.spatialData?.coordinates),
+      coordinatesLengthInLoadedData: loadedData?.spatialData?.coordinates?.length,
+      hasCoordinatesInGlobal: Array.isArray(spatialData?.coordinates),
+      coordinatesLengthInGlobal: spatialData?.coordinates?.length,
+    });
+
+    const preferredSpatialCoords =
+      Array.isArray(restoredPrev?.spatialCoordinates) && restoredPrev.spatialCoordinates.length > 0
+        ? restoredPrev.spatialCoordinates
+        : (Array.isArray(spatialDataSource?.coordinates) ? spatialDataSource.coordinates : null);
+    if (Array.isArray(preferredSpatialCoords) && preferredSpatialCoords.length > 0) {
+      spatialCoordinates = preferredSpatialCoords.map(coord => {
+        if (coord == null) return [0, 0];
+        return Array.isArray(coord) ? [coord[0] ?? 0, coord[1] ?? 0] : [coord.x ?? 0, coord.y ?? 0];
+      });
+      console.log('Including spatial coordinates for gene expression plot: ' + spatialCoordinates.length + ' cells');
+    } else {
+      console.log('No spatial coordinates available - spatial data source:', spatialDataSource);
+    }
+
+    // Use UMAP coordinates as the primary coordinates (for backward compatibility with UMAP view)
+    // The spatial view will use its own spatialIndex coordinates, which should match spatialCoordinates
+    let coordinates = umapCoordinates;
+    console.log(`Using UMAP coordinates for gene expression plot: ${coordinates.length} cells`);
+
+    // Ensure expression array length matches coordinates length
+    let finalExpression = logExpression;
+    if (logExpression.length !== coordinates.length) {
+      console.warn(`Expression array length (${logExpression.length}) does not match coordinates length (${coordinates.length})`);
+      let realigned = false;
+
+      const restoredRemap = loadedData?.restoredExpressionSourceIndices;
+      if (restoredRemap && restoredRemap.length === coordinates.length) {
+        const remapped = new Float32Array(coordinates.length);
+        let matched = 0;
+        for (let i = 0; i < restoredRemap.length; i += 1) {
+          const src = restoredRemap[i];
+          if (src >= 0 && src < logExpression.length) {
+            remapped[i] = logExpression[src];
+            matched += 1;
+          }
+        }
+        if (matched > 0) {
+          finalExpression = remapped;
+          realigned = true;
+          console.log(`Gene expression restored-index realignment: matched ${matched}/${coordinates.length} cells`);
+        }
+      }
+
+      // Prefer barcode-based realignment when restored previous results changed cell ordering.
+      const preferredTargetBarcodes =
+        Array.isArray(restoredPrev?.cellBarcodes) && restoredPrev.cellBarcodes.length === coordinates.length
+          ? restoredPrev.cellBarcodes
+          : loadedData?.cellBarcodes;
+      const targetBarcodes = Array.isArray(preferredTargetBarcodes) && preferredTargetBarcodes.length === coordinates.length
+        ? preferredTargetBarcodes
+        : null;
+      if (targetBarcodes && loadedData?.state) {
+        try {
+          const annotations = loadedData.state.inputs.fetchCellAnnotations();
+          const sourceBarcodes = extractOrderedBarcodesFromAnnotations(annotations, logExpression.length);
+          const remapped = alignExpressionToTargetBarcodes(logExpression, sourceBarcodes, targetBarcodes);
+          if (remapped && remapped.matched > 0) {
+            finalExpression = remapped.aligned;
+            realigned = true;
+            console.log(
+              `Gene expression barcode realignment: matched ${remapped.matched}/${targetBarcodes.length} cells`
+            );
+            if (remapped.sampleUnmatched.length > 0) {
+              console.log('Gene expression realignment sample unmatched barcodes:', remapped.sampleUnmatched);
+            }
+          }
+        } catch (exprAlignErr) {
+          console.warn('Gene expression barcode realignment failed:', exprAlignErr);
+        }
+      }
+
+      if (!realigned) {
+        // Coordinate-key fallback for legacy saves without cellBarcodes:
+        // map expression from current state-order spatial coords to restored spatial coords.
+        if (
+          loadedData?.state &&
+          spatialDataSource?.idToCoord instanceof Map &&
+          Array.isArray(spatialCoordinates) &&
+          spatialCoordinates.length === coordinates.length
+        ) {
+          try {
+            const nExpr = logExpression.length;
+            let stateBarcodes = extractOrderedBarcodesFromAnnotations(
+              loadedData.state.inputs.fetchCellAnnotations(),
+              nExpr
+            );
+            if (!stateBarcodes) {
+              const src = Array.isArray(loadedData.cellBarcodes) ? loadedData.cellBarcodes : null;
+              const keepState = loadedData.state.cell_filtering;
+              if (src && keepState && typeof keepState.fetchKeep === 'function') {
+                const keepResult = keepState.fetchKeep();
+                let keepMask = keepResult
+                  ? (typeof keepResult.array === 'function'
+                      ? keepResult.array()
+                      : (typeof keepResult.toArray === 'function' ? keepResult.toArray() : keepResult))
+                  : null;
+                if (!Array.isArray(keepMask) && typeof keepMask?.length === 'number') keepMask = Array.from(keepMask);
+                if (Array.isArray(keepMask) && keepMask.length === src.length) {
+                  const kept = [];
+                  for (let i = 0; i < keepMask.length; i += 1) {
+                    const raw = Array.isArray(keepMask[i]) ? keepMask[i][0] : keepMask[i];
+                    const keep = typeof raw === 'number' ? raw !== 0 : !!raw;
+                    if (keep) kept.push(src[i]);
+                  }
+                  if (kept.length === nExpr) stateBarcodes = kept;
+                }
+              }
+            }
+
+            if (Array.isArray(stateBarcodes) && stateBarcodes.length === nExpr) {
+              const stateSpatial = mapBarcodesToCoordinates(
+                spatialDataSource,
+                stateBarcodes,
+                { allowLooseVariants: false }
+              );
+              if (Array.isArray(stateSpatial.coordinates) && stateSpatial.coordinates.length === nExpr) {
+                const exprByCoord = new Map();
+                for (let i = 0; i < nExpr; i += 1) {
+                  const key = makeCoordKey(stateSpatial.coordinates[i]);
+                  if (!key) continue;
+                  if (!exprByCoord.has(key)) exprByCoord.set(key, logExpression[i]);
+                }
+                const remapped = new Float32Array(spatialCoordinates.length);
+                let matched = 0;
+                for (let i = 0; i < spatialCoordinates.length; i += 1) {
+                  const key = makeCoordKey(spatialCoordinates[i]);
+                  if (key && exprByCoord.has(key)) {
+                    remapped[i] = exprByCoord.get(key);
+                    matched += 1;
+                  }
+                }
+                if (matched > 0) {
+                  finalExpression = remapped;
+                  realigned = true;
+                  console.log(`Gene expression coord-key realignment: matched ${matched}/${spatialCoordinates.length} cells`);
+                }
+              }
+            }
+          } catch (coordAlignErr) {
+            console.warn('Gene expression coord-key realignment failed:', coordAlignErr);
+          }
+        }
+      }
+
+      if (!realigned) {
+        // If restore metadata is incomplete (e.g. older saves without cellBarcodes),
+        // fall back to the *current analysis-state order* so expression and coordinates
+        // are still aligned by cell index.
+        if (loadedData?.state && spatialDataSource?.idToCoord instanceof Map) {
+          try {
+            const nExpr = logExpression.length;
+            let stateBarcodes = extractOrderedBarcodesFromAnnotations(
+              loadedData.state.inputs.fetchCellAnnotations(),
+              nExpr
+            );
+            if (!stateBarcodes) {
+              const keepState = loadedData.state.cell_filtering;
+              const sourceBarcodes = Array.isArray(loadedData.cellBarcodes) ? loadedData.cellBarcodes : null;
+              if (keepState && typeof keepState.fetchKeep === 'function' && sourceBarcodes?.length) {
+                const keepResult = keepState.fetchKeep();
+                let keepMask = keepResult
+                  ? (typeof keepResult.array === 'function'
+                      ? keepResult.array()
+                      : (typeof keepResult.toArray === 'function' ? keepResult.toArray() : keepResult))
+                  : null;
+                if (!Array.isArray(keepMask) && typeof keepMask?.length === 'number') {
+                  keepMask = Array.from(keepMask);
+                }
+                if (Array.isArray(keepMask) && keepMask.length === sourceBarcodes.length) {
+                  const kept = [];
+                  for (let i = 0; i < keepMask.length; i += 1) {
+                    const raw = Array.isArray(keepMask[i]) ? keepMask[i][0] : keepMask[i];
+                    const keep = typeof raw === 'number' ? raw !== 0 : !!raw;
+                    if (keep) kept.push(sourceBarcodes[i]);
+                  }
+                  if (kept.length === nExpr) {
+                    stateBarcodes = kept;
+                  }
+                }
+              }
+            }
+
+            if (Array.isArray(stateBarcodes) && stateBarcodes.length === nExpr) {
+              let stateUmapCoords = null;
+              try {
+                const um = await loadedData.state.umap.fetchResults();
+                stateUmapCoords = Array.from({ length: um.x.length }, (_, i) => [um.x[i], um.y[i]]);
+              } catch (_) {
+                stateUmapCoords = null;
+              }
+              const stateSpatial = mapBarcodesToCoordinates(
+                spatialDataSource,
+                stateBarcodes,
+                { allowLooseVariants: false }
+              );
+              if (Array.isArray(stateUmapCoords) && stateUmapCoords.length === nExpr) {
+                coordinates = stateUmapCoords;
+                currentResults.umap = stateUmapCoords;
+              }
+              if (Array.isArray(stateSpatial.coordinates) && stateSpatial.coordinates.length === nExpr) {
+                spatialCoordinates = stateSpatial.coordinates;
+              }
+              finalExpression = logExpression;
+              realigned = true;
+              console.warn('Gene expression fallback: switched to analysis-state cell order for aligned plotting');
+            }
+          } catch (stateAlignErr) {
+            console.warn('Gene expression state-order fallback failed:', stateAlignErr);
+          }
+        }
+      }
+
+      if (!realigned) {
+        // Last resort fallback: truncate/pad to avoid hard failure.
+        if (logExpression.length > coordinates.length) {
+          console.warn('Truncating expression array to match coordinates length');
+          finalExpression = logExpression.slice(0, coordinates.length);
+        } else {
+          console.warn('Padding expression array with zeros to match coordinates length');
+          const padded = new Float32Array(coordinates.length);
+          padded.set(logExpression);
+          finalExpression = padded;
+        }
+      }
+    }
+
+    // Compute percentile-based expression range for better color mapping.
+    // Without this, outlier max values cause most cells to map near the bottom of the
+    // color scale (appearing white/blue). Use 2nd-98th percentile like ATAC modules.
+    let expressionRange = null;
+    if (finalExpression.length > 0) {
+      const sorted = Array.from(finalExpression).sort((a, b) => a - b);
+      const p02 = sorted[Math.floor(0.02 * sorted.length)];
+      const p98 = sorted[Math.floor(0.98 * sorted.length)];
+      const exprMax = sorted[sorted.length - 1];
+      const rangeMax = (p98 > p02) ? p98 : exprMax;
+      if (Number.isFinite(rangeMax) && rangeMax > 0) {
+        expressionRange = [p02, rangeMax];
+      }
+    }
+
+    console.log('Sending gene expression results to UI');
+    console.log('Data summary:', {
+      geneName,
+      expressionLength: finalExpression.length,
+      coordinatesLength: coordinates.length,
+      hasSpatialCoordinates: !!spatialCoordinates,
+      colorMap,
+      expressionRange,
+    });
+
+    self.postMessage({
+      type: 'ANALYSIS_COMPLETE',
+      data: {
+        type: 'gene_expression',
+        coordinates: coordinates, // UMAP coordinates for UMAP view
+        spatialCoordinates: spatialCoordinates, // Spatial coordinates (spatial view uses spatialIndex instead)
+        expression: finalExpression,
+        geneName,
+        colorMap,
+        expressionRange: expressionRange || undefined,
+      }
+    });
+
+    console.log('Gene expression plot message sent successfully');
+
+    // Multiome: also compute ATAC gene activity (peak-derived) and send to ATAC view
+    // RNA view shows gene expression (already sent above); ATAC view shows gene activity from peak matrix (same as scATAC-seq).
+    if (loadedData?.info?.modality === 'multiome' && loadedData.peakAnnotation?.length > 0) {
+      try {
+        const atacCacheKey = (geneName || '').toLowerCase().trim();
+        const cachedAtac = atacGeneActivityCache.get(atacCacheKey);
+        if (cachedAtac) {
+          console.log('Multiome: serving ATAC gene activity from cache for', geneName);
+          self.postMessage({
+            type: 'ANALYSIS_COMPLETE',
+            data: {
+              ...cachedAtac,
+              expression: new Float32Array(cachedAtac.expression),
+            },
+          });
+          return;
+        }
+        console.log('Multiome: computing ATAC gene activity for', geneName);
+        const peakAnnotation = loadedData.peakAnnotation;
+        const multiomePeak = await getMultiomePeakMatrix();
+        // Always get peaksOnGene from peak annotation (works with or without peak matrix)
+        const peakNames = multiomePeak?.peakNames || [];
+        const { peakIndices, peaksOnGene } = getPeaksForGene(geneName, peakAnnotation, peakNames);
+
+        if (multiomePeak && peakIndices.length > 0) {
+          // Full path: gene activity UMAP coloring + region/barcodes/clusters for fragment-based coverage
+          // (same approach as scATAC: fragment-based coverage is computed in App.jsx via Electron IPC)
+          const { peakMatrix, fullBarcodeOrder } = multiomePeak;
+          const filteredBarcodes = loadedData.cellBarcodes || [];
+          const nFiltered = filteredBarcodes.length;
+          const barcodeToColIdx = new Map();
+          for (let i = 0; i < fullBarcodeOrder.length; i++) {
+            barcodeToColIdx.set(fullBarcodeOrder[i], i);
+          }
+
+            // Gene activity: sum raw peak counts per cell for peaks linked to the gene (same as scATAC plotAtacGeneActivity)
+            const atacExpression = new Float32Array(nFiltered);
+            for (let j = 0; j < nFiltered; j++) {
+              const colIdx = barcodeToColIdx.get(filteredBarcodes[j]);
+              if (colIdx === undefined) continue;
+              const col = peakMatrix.column(colIdx);
+              let sum = 0;
+              for (let p = 0; p < peakIndices.length; p++) {
+                sum += col[peakIndices[p]] || 0;
+              }
+              atacExpression[j] = sum;
+            }
+            // Use raw counts directly (linear scale) for ATAC gene activity
+            // Compute 2nd-98th percentile range for color scale (matching plot_gene_activity_linear.mjs)
+            let atacExpressionRange = null;
+            if (atacExpression.length > 0) {
+              const sortedAtac = Array.from(atacExpression).sort((a, b) => a - b);
+              const atacP02 = sortedAtac[Math.floor(0.02 * sortedAtac.length)];
+              const atacP98 = sortedAtac[Math.floor(0.98 * sortedAtac.length)];
+              const atacExprMax = sortedAtac[sortedAtac.length - 1];
+              const atacRangeMax = (atacP98 > atacP02) ? atacP98 : atacExprMax;
+              if (Number.isFinite(atacRangeMax) && atacRangeMax > 0) {
+                atacExpressionRange = [atacP02, atacRangeMax];
+              }
+            }
+
+            let atacCoordinates = loadedData.precomputed?.atacAligned?.coordinates || currentResults.umap;
+            let atacClusters = loadedData.precomputed?.atacAligned?.clusters || currentResults.clusters;
+            if (atacCoordinates && atacCoordinates.length !== nFiltered) {
+              console.warn('Multiome: ATAC coordinates length', atacCoordinates.length, '!= filtered', nFiltered, '- falling back');
+              atacCoordinates = currentResults.umap; // try RNA UMAP
+              if (atacCoordinates && atacCoordinates.length !== nFiltered) {
+                atacCoordinates = null;
+              }
+            }
+            // Ensure clusters are always available (needed for fragment query + coverage computation)
+            if (!atacClusters || atacClusters.length !== nFiltered) {
+              atacClusters = currentResults.clusters;
+            }
+
+            // Compute region from peaks (needed for fragment-based coverage query in App.jsx)
+            let region = null;
+            if (peaksOnGene.length > 0) {
+              const ATAC_EXTEND_UP = 5000;
+              const ATAC_EXTEND_DOWN = 5000;
+              const chrom = peaksOnGene[0].chrom;
+              const minStart = Math.min(...peaksOnGene.map(p => Number(p.start) || 0));
+              const maxEnd = Math.max(...peaksOnGene.map(p => Number(p.end) || 0));
+              region = { chrom, start: Math.max(0, minStart - ATAC_EXTEND_UP), end: maxEnd + ATAC_EXTEND_DOWN };
+            }
+
+            // Cache ATAC gene activity for same-gene repeat requests (copy so postMessage doesn't transfer away)
+            const atacPayload = {
+              type: 'gene_expression',
+              multiomeModality: 'atac',
+              coordinates: atacCoordinates ? atacCoordinates.map((c) => [...c]) : null,
+              expression: new Float32Array(atacExpression),
+              expressionRange: atacExpressionRange ? [...atacExpressionRange] : undefined,
+              geneName,
+              colorMap,
+              peaksOnGene: peaksOnGene.map((p) => ({ ...p })),
+              coverageByCluster: null,
+              region: region ? { ...region } : null,
+              genome: loadedData.info?.genome || 'hg38',
+              cellBarcodes: filteredBarcodes.length ? [...filteredBarcodes] : undefined,
+              clusters: atacClusters ? [...atacClusters] : null,
+              isAtac: true,
+            };
+            atacGeneActivityCache.set(atacCacheKey, atacPayload);
+
+            // Send ATAC data — coverage is computed via fragment query in App.jsx (same as scATAC)
+            self.postMessage({
+              type: 'ANALYSIS_COMPLETE',
+              data: {
+                type: 'gene_expression',
+                multiomeModality: 'atac',
+                coordinates: atacCoordinates,
+                expression: atacExpression,
+                expressionRange: atacExpressionRange || undefined,
+                geneName,
+                colorMap,
+                peaksOnGene: peaksOnGene,
+                coverageByCluster: null,
+                region: region,
+                genome: loadedData.info?.genome || 'hg38',
+                cellBarcodes: filteredBarcodes.length ? filteredBarcodes : undefined,
+                clusters: atacClusters,
+                isAtac: true,
+              },
+            });
+            console.log('Multiome: sent ATAC gene activity for', geneName, 'with', peakIndices.length, 'peaks');
+
+        } else if (peaksOnGene.length > 0 && params.showPeakView) {
+          // Coverage-only path: peak matrix unavailable or no matching indices, but peaks exist
+          // in annotation. Send peaksOnGene + region so frontend can query fragment-based coverage.
+          console.log('Multiome: no peak matrix indices, using coverage-only path for', geneName, '(', peaksOnGene.length, 'peaks from annotation)');
+          const filteredBarcodes = loadedData.cellBarcodes || [];
+          const nFiltered = filteredBarcodes.length;
+          let atacCoordinates = loadedData.precomputed?.atacAligned?.coordinates || currentResults.umap;
+          let atacClusters = loadedData.precomputed?.atacAligned?.clusters || currentResults.clusters;
+          if (atacCoordinates && atacCoordinates.length !== nFiltered) {
+            atacCoordinates = null;
+            atacClusters = null;
+          }
+
+          const ATAC_EXTEND_UP = 5000;
+          const ATAC_EXTEND_DOWN = 5000;
+          const chrom = peaksOnGene[0].chrom;
+          const minStart = Math.min(...peaksOnGene.map(p => Number(p.start) || 0));
+          const maxEnd = Math.max(...peaksOnGene.map(p => Number(p.end) || 0));
+          const region = { chrom, start: Math.max(0, minStart - ATAC_EXTEND_UP), end: maxEnd + ATAC_EXTEND_DOWN };
+
+          const coverageOnlyPayload = {
+            type: 'gene_expression',
+            multiomeModality: 'atac',
+            coordinates: atacCoordinates ? atacCoordinates.map((c) => [...c]) : null,
+            expression: new Float32Array(nFiltered),
+            geneName,
+            colorMap,
+            peaksOnGene: peaksOnGene.map((p) => ({ ...p })),
+            coverageByCluster: null,
+            region: { ...region },
+            genome: loadedData.info?.genome || 'hg38',
+            cellBarcodes: filteredBarcodes.length ? [...filteredBarcodes] : undefined,
+            clusters: atacClusters ? [...atacClusters] : null,
+            isAtac: true,
+          };
+          atacGeneActivityCache.set(atacCacheKey, coverageOnlyPayload);
+          self.postMessage({
+            type: 'ANALYSIS_COMPLETE',
+            data: {
+              type: 'gene_expression',
+              multiomeModality: 'atac',
+              coordinates: atacCoordinates,
+              expression: new Float32Array(nFiltered), // zeros — no gene activity without peak matrix
+              geneName,
+              colorMap,
+              peaksOnGene,
+              coverageByCluster: null, // frontend will query atac_fragments.tsv.gz
+              region,
+              genome: loadedData.info?.genome || 'hg38',
+              cellBarcodes: filteredBarcodes.length ? filteredBarcodes : undefined,
+              clusters: atacClusters,
+              isAtac: true,
+            },
+          });
+          console.log('Multiome: sent coverage-only ATAC data for', geneName);
+
+        } else if (peaksOnGene.length > 0) {
+          console.log('Multiome: peaks found for', geneName, 'but no peak matrix indices — skipping ATAC gene activity (use "coverage plot" for fragment-based view)');
+        } else {
+          console.log('Multiome: no peaks found for gene', geneName, '- skipping ATAC view');
+        }
+      } catch (atacError) {
+        console.warn('Multiome: ATAC gene activity failed (non-fatal):', atacError.message);
+      }
+    }
+
+  } catch (error) {
+    console.error('Gene expression plot failed:', error);
+    console.error('Error details:', error.stack);
+    // Send error message to UI
+    self.postMessage({
+      type: 'ANALYSIS_ERROR',
+      error: error.message,
+      action: 'plot_gene_expression',
+      gene: gene,
+    });
+    throw error;
+  }
+}
+
+async function plotGeneViolin(params) {
+  const { gene } = params || {};
+
+  if (!loadedData) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+
+  const isPeakId = /^chr\w+[:-]\d+[:-]\d+$/i.test(String(gene || '').trim());
+
+  // Multiome + peak ID: violin plot ATAC-only using peak matrix
+  if (loadedData?.info?.modality === 'multiome' && isPeakId) {
+    console.log('Multiome violin: plotting peak', gene, 'in ATAC view only');
+    const multiomePeak = await getMultiomePeakMatrix();
+    if (!multiomePeak) throw new Error('No peak matrix available for ATAC peak violin.');
+    const { peakMatrix, peakNames, fullBarcodeOrder } = multiomePeak;
+    const peakIdx = findPeakIndex(gene, peakNames);
+    if (peakIdx === -1) throw new Error(`Peak ${gene} not found in peak matrix.`);
+
+    // Extract peak values for filtered cells
+    const filteredBarcodes = loadedData.cellBarcodes || [];
+    const nFiltered = filteredBarcodes.length;
+    const barcodeToColIdx = new Map();
+    for (let i = 0; i < fullBarcodeOrder.length; i++) barcodeToColIdx.set(fullBarcodeOrder[i], i);
+
+    const fullRow = peakMatrix.row(peakIdx);
+    const peakValues = new Float32Array(nFiltered);
+    for (let j = 0; j < nFiltered; j++) {
+      const colIdx = barcodeToColIdx.get(filteredBarcodes[j]);
+      if (colIdx !== undefined) peakValues[j] = Math.log1p(fullRow[colIdx] || 0);
+    }
+
+    // Get ATAC clusters
+    let atacClusters = loadedData.precomputed?.atacAligned?.clusters || currentResults.clusters;
+    if (!atacClusters || atacClusters.length !== nFiltered) atacClusters = currentResults.clusters;
+    const clusters = Array.from(atacClusters || []);
+    let alignedClusters = clusters;
+    if (clusters.length > nFiltered) alignedClusters = clusters.slice(0, nFiltered);
+
+    const uniqueClusters = Array.from(new Set(alignedClusters))
+      .filter(c => c !== null && c !== undefined);
+    uniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+
+    const clusterIndex = new Map(uniqueClusters.map((id, idx) => [id, idx]));
+    const expressionByCluster = uniqueClusters.map(() => []);
+    for (let i = 0; i < alignedClusters.length; i++) {
+      const clusterId = alignedClusters[i];
+      if (clusterId === null || clusterId === undefined) continue;
+      const targetIndex = clusterIndex.get(clusterId);
+      if (targetIndex !== undefined) expressionByCluster[targetIndex].push(peakValues[i]);
+    }
+
+    const summaries = expressionByCluster.map((values) => summarizeDistribution(values));
+    const typedExpression = expressionByCluster.map((values) => Float32Array.from(values));
+    const transferableBuffers = typedExpression.map((arr) => arr.buffer);
+
+    self.postMessage({
+      type: 'ANALYSIS_COMPLETE',
+      data: {
+        type: 'gene_violin',
+        multiomeModality: 'atac',
+        geneName: peakNames[peakIdx],
+        clusterIds: uniqueClusters,
+        expressionByCluster: typedExpression,
+        summary: summaries,
+        totalCells: nFiltered,
+      }
+    }, transferableBuffers);
+    console.log('Multiome: sent ATAC peak violin for', peakNames[peakIdx]);
+    return;
+  }
+
+  // ── scATAC / atac-integration + peak ID: violin plot single peak ───────────
+  if ((loadedData.info?.modality === 'atac' || loadedData.info?.modality === 'atac-integration') && isPeakId && loadedData.atacPeakMatrix) {
+    const peakMatrix = loadedData.atacPeakMatrix;
+    const peakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
+    const peakIdx = findPeakIndex(gene, peakNames);
+    if (peakIdx === -1) throw new Error(`Peak ${gene} not found in peak matrix (${peakNames.length} peaks available).`);
+    const nCells = peakMatrix.numberOfColumns();
+    const fullRow = peakMatrix.row(peakIdx);
+    const expr = new Float32Array(nCells);
+    for (let c = 0; c < nCells; c++) expr[c] = Math.log1p(fullRow[c] || 0);
+    const clusters = currentResults.clusters;
+    if (!clusters || clusters.length === 0) throw new Error('No clustering results available. Please run analysis first.');
+    let alignedClusters = Array.from(clusters);
+    if (alignedClusters.length > nCells) alignedClusters = alignedClusters.slice(0, nCells);
+    const uniqueClusters = Array.from(new Set(alignedClusters)).filter(c => c !== null && c !== undefined);
+    uniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+    const clusterIndex = new Map(uniqueClusters.map((id, idx) => [id, idx]));
+    const expressionByCluster = uniqueClusters.map(() => []);
+    for (let i = 0; i < alignedClusters.length; i++) {
+      const cid = alignedClusters[i]; if (cid === null || cid === undefined) continue;
+      const ti = clusterIndex.get(cid); if (ti !== undefined) expressionByCluster[ti].push(expr[i]);
+    }
+    const summaries = expressionByCluster.map((vals) => summarizeDistribution(vals));
+    const typedExpression = expressionByCluster.map((vals) => Float32Array.from(vals));
+    const transferableBuffers = typedExpression.map((arr) => arr.buffer);
+    const atacIntegrationViews = getAtacIntegrationViewsForPlot();
+    if (atacIntegrationViews) {
+      const { integrationViews: iViews, datasetNames: iNames } = atacIntegrationViews;
+      const viewData = {};
+      let globalMin = Infinity, globalMax = -Infinity;
+      for (const viewName of iNames) {
+        const indices = iViews[viewName]?.indices;
+        if (!Array.isArray(indices) || indices.length === 0) continue;
+        const viewClusters = indices.map((i) => alignedClusters[i]);
+        const viewExpr = indices.map((i) => expr[i]);
+        const viewUniqueClusters = Array.from(new Set(viewClusters)).filter((c) => c != null);
+        viewUniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+        const clusterIdx = new Map(viewUniqueClusters.map((id, i) => [id, i]));
+        const viewExprByCluster = viewUniqueClusters.map(() => []);
+        for (let i = 0; i < viewClusters.length; i++) {
+          const cid = viewClusters[i]; if (cid == null) continue;
+          const ti = clusterIdx.get(cid); if (ti !== undefined) viewExprByCluster[ti].push(viewExpr[i]);
+        }
+        for (const vals of viewExprByCluster) {
+          for (const v of vals) { if (Number.isFinite(v)) { if (v < globalMin) globalMin = v; if (v > globalMax) globalMax = v; } }
+        }
+        const viewSummaries = viewExprByCluster.map((vals) => summarizeDistribution(vals));
+        const viewTyped = viewExprByCluster.map((vals) => Float32Array.from(vals));
+        viewData[viewName] = { clusterIds: viewUniqueClusters, expressionByCluster: viewTyped, summary: viewSummaries };
+      }
+      if (!Number.isFinite(globalMin)) globalMin = 0;
+      if (!Number.isFinite(globalMax)) globalMax = globalMin + 1e-6;
+      const allTransferables = [];
+      for (const vName of Object.keys(viewData)) { viewData[vName].expressionByCluster.forEach((arr) => allTransferables.push(arr.buffer)); }
+      self.postMessage({
+        type: 'ANALYSIS_COMPLETE',
+        data: { type: 'gene_violin', geneName: peakNames[peakIdx], integrationViews: iViews, datasetNames: iNames, viewData, globalExpressionRange: [globalMin, globalMax] }
+      }, allTransferables);
+      console.log('scATAC: sent peak violin for', peakNames[peakIdx]);
+      return;
+    }
+    self.postMessage({
+      type: 'ANALYSIS_COMPLETE',
+      data: {
+        type: 'gene_violin',
+        geneName: peakNames[peakIdx],
+        clusterIds: uniqueClusters,
+        expressionByCluster: typedExpression,
+        summary: summaries,
+        totalCells: nCells,
+      }
+    }, transferableBuffers);
+    console.log('scATAC: sent peak violin for', peakNames[peakIdx]);
+    return;
+  }
+
+  // ── scATAC-only (or atac-integration) violin via gene activity ────────────
+  if (loadedData.info?.modality === 'atac' || loadedData.info?.modality === 'atac-integration') {
+    const geneName = (gene && String(gene).trim()) || 'gene';
+    const peakMatrix = loadedData.atacPeakMatrix;
+    const peakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
+    const peakAnnotation = loadedData.peakAnnotation || [];
+
+    if (!peakMatrix) throw new Error('ATAC peak matrix not available for violin plot.');
+
+    let { peakIndices } = getPeaksForGene(geneName, peakAnnotation, peakNames);
+    if (peakIndices.length === 0) {
+      const genome = loadedData.info?.genome;
+      const tssResult = getPeaksForGeneByTSS(geneName, peakAnnotation, peakNames, undefined, genome);
+      if (tssResult.peakIndices.length > 0) {
+        peakIndices = tssResult.peakIndices;
+        console.log(`scATAC violin: ${geneName} linked via TSS (${peakIndices.length} peaks)`);
+      } else {
+        throw new Error(`No peaks found for gene "${geneName}". Try another gene or check spelling.`);
+      }
+    }
+
+    const nCells = peakMatrix.numberOfColumns();
+    const expr = new Float32Array(nCells);
+    for (let c = 0; c < nCells; c++) {
+      let sum = 0;
+      const col = peakMatrix.column(c);
+      for (let p = 0; p < peakIndices.length; p++) sum += col[peakIndices[p]] || 0;
+      expr[c] = sum;
+    }
+    // Use raw counts directly (linear scale) for ATAC gene activity
+
+    const clusters = currentResults.clusters;
+    if (!clusters || clusters.length === 0) {
+      throw new Error('No clustering results available. Please run analysis first.');
+    }
+    let alignedClusters = Array.from(clusters);
+    if (alignedClusters.length > nCells) alignedClusters = alignedClusters.slice(0, nCells);
+
+    const uniqueClusters = Array.from(new Set(alignedClusters)).filter(c => c !== null && c !== undefined);
+    uniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+
+    const clusterIndex = new Map(uniqueClusters.map((id, idx) => [id, idx]));
+    const expressionByCluster = uniqueClusters.map(() => []);
+    for (let i = 0; i < alignedClusters.length; i++) {
+      const cid = alignedClusters[i];
+      if (cid === null || cid === undefined) continue;
+      const ti = clusterIndex.get(cid);
+      if (ti !== undefined) expressionByCluster[ti].push(expr[i]);
+    }
+
+    const summaries = expressionByCluster.map((values) => summarizeDistribution(values));
+    const typedExpression = expressionByCluster.map((values) => Float32Array.from(values));
+    const transferableBuffers = typedExpression.map((arr) => arr.buffer);
+
+    const atacIntegrationViews = getAtacIntegrationViewsForPlot();
+    if (atacIntegrationViews) {
+      // Build per-view violin data for atac-integration
+      const { integrationViews: iViews, datasetNames: iNames } = atacIntegrationViews;
+      const viewData = {};
+      let globalMin = Infinity, globalMax = -Infinity;
+      for (const viewName of iNames) {
+        const indices = iViews[viewName]?.indices;
+        if (!Array.isArray(indices) || indices.length === 0) continue;
+        const viewClusters = indices.map((i) => alignedClusters[i]);
+        const viewExpr = indices.map((i) => expr[i]);
+        const viewUniqueClusters = Array.from(new Set(viewClusters)).filter((c) => c != null);
+        viewUniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+        const clusterIdx = new Map(viewUniqueClusters.map((id, i) => [id, i]));
+        const viewExprByCluster = viewUniqueClusters.map(() => []);
+        for (let i = 0; i < viewClusters.length; i++) {
+          const cid = viewClusters[i]; if (cid == null) continue;
+          const ti = clusterIdx.get(cid); if (ti !== undefined) viewExprByCluster[ti].push(viewExpr[i]);
+        }
+        for (const vals of viewExprByCluster) {
+          for (const v of vals) { if (Number.isFinite(v)) { if (v < globalMin) globalMin = v; if (v > globalMax) globalMax = v; } }
+        }
+        const viewSummaries = viewExprByCluster.map((vals) => summarizeDistribution(vals));
+        const viewTyped = viewExprByCluster.map((vals) => Float32Array.from(vals));
+        viewData[viewName] = { clusterIds: viewUniqueClusters, expressionByCluster: viewTyped, summary: viewSummaries };
+      }
+      if (!Number.isFinite(globalMin)) globalMin = 0;
+      if (!Number.isFinite(globalMax)) globalMax = globalMin + 1e-6;
+      const allTransferables = [];
+      for (const vName of Object.keys(viewData)) { viewData[vName].expressionByCluster.forEach((arr) => allTransferables.push(arr.buffer)); }
+      self.postMessage({
+        type: 'ANALYSIS_COMPLETE',
+        data: { type: 'gene_violin', geneName, integrationViews: iViews, datasetNames: iNames, viewData, globalExpressionRange: [globalMin, globalMax] }
+      }, allTransferables);
+      console.log('scATAC-integration violin: sent per-view violin for', geneName);
+      return;
+    }
+    self.postMessage({
+      type: 'ANALYSIS_COMPLETE',
+      data: {
+        type: 'gene_violin',
+        geneName,
+        clusterIds: uniqueClusters,
+        expressionByCluster: typedExpression,
+        summary: summaries,
+        totalCells: nCells,
+      }
+    }, transferableBuffers);
+    console.log('scATAC violin: sent gene activity violin for', geneName);
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  try {
+    const { geneName, logExpression } = await resolveGeneExpression(gene);
+    const state = loadedData.state;
+
+    console.log('plotGeneViolin - Expression length:', logExpression.length);
+    console.log('plotGeneViolin - Available cluster sources:', {
+      hasCurrentResultsClusters: !!currentResults.clusters,
+      currentResultsClustersLength: currentResults.clusters?.length,
+      hasStateChooseClustering: !!state?.choose_clustering,
+      hasPrecomputedClusters: !!loadedData.precomputed?.clusters,
+      precomputedClustersLength: loadedData.precomputed?.clusters?.length,
+    });
+
+    // Try to use existing clusters - for multiome RNA use precomputed RNA so RNA view is unchanged after ATAC-only update
+    let clusterArray = null;
+    if (loadedData?.info?.modality === 'multiome' && loadedData.precomputed?.rnaAligned?.clusters) {
+      clusterArray = loadedData.precomputed.rnaAligned.clusters;
+      console.log('Using RNA clusters for multiome RNA violin plot:', clusterArray.length);
+    }
+    if (!clusterArray && currentResults.clusters && Array.isArray(currentResults.clusters)) {
+      clusterArray = currentResults.clusters;
+      console.log('Using cached clusters for violin plot (aligned with filtered data):', clusterArray.length);
+    }
+
+    // Second, try fetching from state (if analysis was run)
+    if (!clusterArray && state) {
+      clusterArray = state.choose_clustering.fetchClusters();
+      if (clusterArray && clusterArray.length > 0) {
+        console.log('Using state clusters for violin plot:', clusterArray.length);
+      }
+    }
+
+    // Third, try precomputed clusters (for Xenium data) - only as fallback
+    // Note: These may not be aligned with filtered data, so only use if nothing else available
+    if (!clusterArray && loadedData.precomputed?.clusters && Array.isArray(loadedData.precomputed.clusters)) {
+      clusterArray = loadedData.precomputed.clusters;
+      console.log('Using precomputed clusters for violin plot (may need alignment):', clusterArray.length);
+    }
+
+    // Only if no clusters exist at all, run clustering (this should rarely happen)
+    if (!clusterArray || clusterArray.length === 0) {
+      if (!state) {
+        throw new Error('No clustering data available. Please run analysis first or wait for data to finish loading.');
+      }
+      console.log('No clusters available; running implicit clustering & UMAP for violin plot...');
+      await runClusteringAndUMAP(false); // false = don't send UMAP message
+      clusterArray = state.choose_clustering.fetchClusters();
+    }
+
+    const clusters = Array.from(clusterArray);
+
+    // Handle length mismatch (happens when cells are filtered during QC)
+    // Truncate clusters to match expression length (filtered cells)
+    let alignedClusters = clusters;
+    if (clusters.length !== logExpression.length) {
+      if (clusters.length > logExpression.length) {
+        // Expected: some cells filtered during QC, truncate clusters to match
+        alignedClusters = clusters.slice(0, logExpression.length);
+      } else {
+        console.error(`Expression array (${logExpression.length}) is longer than clusters (${clusters.length}) - this should not happen`);
+        throw new Error(`Cluster assignments length (${clusters.length}) is less than expression length (${logExpression.length})`);
+      }
+    }
+
+    // Filter out null/undefined clusters and get unique valid clusters
+    const uniqueClusters = Array.from(new Set(alignedClusters))
+      .filter(c => c !== null && c !== undefined);
+    uniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+
+    console.log(`Valid clusters for violin plot: ${uniqueClusters.length} clusters (filtered out null/undefined)`);
+
+    const clusterIndex = new Map(uniqueClusters.map((id, idx) => [id, idx]));
+    const expressionByCluster = uniqueClusters.map(() => []);
+    for (let i = 0; i < alignedClusters.length; i++) {
+      const clusterId = alignedClusters[i];
+      // Skip null/undefined clusters
+      if (clusterId === null || clusterId === undefined) {
+        continue;
+      }
+      const targetIndex = clusterIndex.get(clusterId);
+      if (targetIndex !== undefined) {
+        expressionByCluster[targetIndex].push(logExpression[i]);
+      }
+    }
+
+    const summaries = expressionByCluster.map((values) => summarizeDistribution(values));
+    const typedExpression = expressionByCluster.map((values) => Float32Array.from(values));
+    const transferableBuffers = typedExpression.map((arr) => arr.buffer);
+
+    // Integration: per-sample violin with global normalization (same gene expression scale across views)
+    const integrationMeta = getIntegrationViewsForPlot(logExpression.length);
+    if (integrationMeta) {
+      const { integrationViews, datasetNames } = integrationMeta;
+      const viewData = {};
+      let globalMin = Infinity;
+      let globalMax = -Infinity;
+      for (const viewName of datasetNames) {
+        const indices = integrationViews[viewName]?.indices;
+        if (!Array.isArray(indices) || indices.length === 0) continue;
+        const viewClusters = indices.map((i) => alignedClusters[i]);
+        const viewExpr = indices.map((i) => logExpression[i]);
+        const viewUniqueClusters = Array.from(new Set(viewClusters))
+          .filter((c) => c !== null && c !== undefined);
+        viewUniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+        const clusterIndex = new Map(viewUniqueClusters.map((id, idx) => [id, idx]));
+        const viewExprByCluster = viewUniqueClusters.map(() => []);
+        for (let i = 0; i < viewClusters.length; i++) {
+          const cid = viewClusters[i];
+          if (cid == null) continue;
+          const ti = clusterIndex.get(cid);
+          if (ti !== undefined) viewExprByCluster[ti].push(viewExpr[i]);
+        }
+        for (const vals of viewExprByCluster) {
+          for (let j = 0; j < vals.length; j++) {
+            const v = vals[j];
+            if (Number.isFinite(v)) {
+              if (v < globalMin) globalMin = v;
+              if (v > globalMax) globalMax = v;
+            }
+          }
+        }
+        const viewSummaries = viewExprByCluster.map((values) => summarizeDistribution(values));
+        const viewTyped = viewExprByCluster.map((values) => Float32Array.from(values));
+        viewData[viewName] = {
+          clusterIds: viewUniqueClusters,
+          expressionByCluster: viewTyped,
+          summary: viewSummaries,
+        };
+      }
+      if (!Number.isFinite(globalMin)) globalMin = 0;
+      if (!Number.isFinite(globalMax)) globalMax = globalMin + 1e-6;
+      const allTransferables = [];
+      for (const viewName of Object.keys(viewData)) {
+        viewData[viewName].expressionByCluster.forEach((arr) => allTransferables.push(arr.buffer));
+      }
+      self.postMessage({
+        type: 'ANALYSIS_COMPLETE',
+        data: {
+          type: 'gene_violin',
+          geneName,
+          integrationViews,
+          datasetNames,
+          viewData,
+          globalExpressionRange: [globalMin, globalMax],
+        }
+      }, allTransferables);
+      console.log('Integration: sent gene violin with per-view data for', geneName);
+      return;
+    }
+
+    // For spatial datasets, also include spatial coordinates so the spatial view can show gene expression scatter plot
+    let spatialCoordinates = null;
+    const spatialDataSource = loadedData?.spatialData || spatialData;
+    console.log('Checking for spatial coordinates in violin plot:', {
+      hasLoadedDataSpatialData: !!loadedData?.spatialData,
+      hasGlobalSpatialData: !!spatialData,
+      hasCoordinatesInLoadedData: Array.isArray(loadedData?.spatialData?.coordinates),
+      coordinatesLengthInLoadedData: loadedData?.spatialData?.coordinates?.length,
+      expressionLength: logExpression.length,
+    });
+
+    if (spatialDataSource && Array.isArray(spatialDataSource.coordinates) && spatialDataSource.coordinates.length > 0) {
+      let allSpatialCoords = spatialDataSource.coordinates.map(coord => {
+        if (coord == null) return [0, 0];
+        return Array.isArray(coord) ? [coord[0] ?? 0, coord[1] ?? 0] : [coord.x ?? 0, coord.y ?? 0];
+      });
+
+      // IMPORTANT: Truncate spatial coordinates to match expression length (same filtering as clusters)
+      if (allSpatialCoords.length > logExpression.length) {
+        console.log(`Truncating spatial coordinates from ${allSpatialCoords.length} to ${logExpression.length} to match expression (QC filtered)`);
+        spatialCoordinates = allSpatialCoords.slice(0, logExpression.length);
+      } else if (allSpatialCoords.length === logExpression.length) {
+        spatialCoordinates = allSpatialCoords;
+      } else {
+        console.warn(`Spatial coordinates (${allSpatialCoords.length}) is less than expression (${logExpression.length}) - skipping spatial coordinates`);
+        spatialCoordinates = null;
+      }
+
+      if (spatialCoordinates) {
+        console.log(`Including spatial coordinates for violin plot: ${spatialCoordinates.length} cells`);
+      }
+    } else {
+      console.log('No spatial coordinates available for violin plot');
+    }
+
+    self.postMessage({
+      type: 'ANALYSIS_COMPLETE',
+      data: {
+        type: 'gene_violin',
+        geneName,
+        clusterIds: uniqueClusters,
+        expressionByCluster: typedExpression,
+        summary: summaries,
+        totalCells: logExpression.length,
+        // Include expression and spatial coordinates for the spatial view
+        expression: logExpression,
+        spatialCoordinates: spatialCoordinates,
+      }
+    }, transferableBuffers);
+
+    // Multiome: also compute ATAC gene activity violin and send to ATAC view
+    if (loadedData?.info?.modality === 'multiome' && loadedData.peakAnnotation?.length > 0) {
+      try {
+        console.log('Multiome violin: computing ATAC gene activity violin for', geneName);
+        const peakAnnotation = loadedData.peakAnnotation;
+        const multiomePeak = await getMultiomePeakMatrix();
+        const peakNames = multiomePeak?.peakNames || [];
+
+        if (multiomePeak) {
+          const { peakIndices } = getPeaksForGene(geneName, peakAnnotation, peakNames);
+
+          if (peakIndices.length > 0) {
+            const { peakMatrix, fullBarcodeOrder } = multiomePeak;
+            const filteredBarcodes = loadedData.cellBarcodes || [];
+            const nFiltered = filteredBarcodes.length;
+            const barcodeToColIdx = new Map();
+            for (let i = 0; i < fullBarcodeOrder.length; i++) {
+              barcodeToColIdx.set(fullBarcodeOrder[i], i);
+            }
+
+            // Gene activity: sum peak counts per cell
+            const atacExpression = new Float32Array(nFiltered);
+            for (let j = 0; j < nFiltered; j++) {
+              const colIdx = barcodeToColIdx.get(filteredBarcodes[j]);
+              if (colIdx === undefined) continue;
+              const col = peakMatrix.column(colIdx);
+              let sum = 0;
+              for (let p = 0; p < peakIndices.length; p++) {
+                sum += col[peakIndices[p]] || 0;
+              }
+              atacExpression[j] = sum;
+            }
+            // Use raw counts directly (linear scale) for ATAC gene activity
+
+            // Use ATAC clusters
+            let atacClusters = loadedData.precomputed?.atacAligned?.clusters;
+            if (!atacClusters || atacClusters.length !== nFiltered) {
+              atacClusters = alignedClusters; // fallback to RNA clusters
+            }
+            let atacClusterArr = Array.from(atacClusters);
+            if (atacClusterArr.length > nFiltered) {
+              atacClusterArr = atacClusterArr.slice(0, nFiltered);
+            }
+
+            const atacUniqueClusters = Array.from(new Set(atacClusterArr))
+              .filter(c => c !== null && c !== undefined);
+            atacUniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+
+            const atacClusterIndex = new Map(atacUniqueClusters.map((id, idx) => [id, idx]));
+            const atacExprByCluster = atacUniqueClusters.map(() => []);
+            for (let i = 0; i < atacClusterArr.length; i++) {
+              const clusterId = atacClusterArr[i];
+              if (clusterId === null || clusterId === undefined) continue;
+              const targetIndex = atacClusterIndex.get(clusterId);
+              if (targetIndex !== undefined) {
+                atacExprByCluster[targetIndex].push(atacExpression[i]);
+              }
+            }
+
+            const atacSummaries = atacExprByCluster.map((values) => summarizeDistribution(values));
+            const atacTypedExpression = atacExprByCluster.map((values) => Float32Array.from(values));
+            const atacTransferables = atacTypedExpression.map((arr) => arr.buffer);
+
+            self.postMessage({
+              type: 'ANALYSIS_COMPLETE',
+              data: {
+                type: 'gene_violin',
+                multiomeModality: 'atac',
+                geneName,
+                clusterIds: atacUniqueClusters,
+                expressionByCluster: atacTypedExpression,
+                summary: atacSummaries,
+                totalCells: nFiltered,
+              }
+            }, atacTransferables);
+            console.log('Multiome violin: sent ATAC gene activity violin for', geneName);
+          } else {
+            console.log('Multiome violin: no peaks found for gene', geneName, '- skipping ATAC violin');
+          }
+        } else {
+          console.log('Multiome violin: no peak matrix available, skipping ATAC violin');
+        }
+      } catch (atacErr) {
+        console.warn('Multiome violin: ATAC gene activity violin failed (non-fatal):', atacErr);
+      }
+    }
+
+  } catch (error) {
+    console.error('Gene violin plot failed:', error);
+    console.error('Error details:', error.stack);
+    throw error;
+  }
+}
+
+const DEFAULT_DOTPLOT_COLORMAP = { type: 'custom', colors: ['lightgray', 'orange', 'red'] };
+
+function normalizeDotplotColorMap(colorMap) {
+  if (colorMap && typeof colorMap === 'object') {
+    if (colorMap.type === 'custom' && Array.isArray(colorMap.colors) && colorMap.colors.length >= 3) return colorMap;
+    if (colorMap.type === 'scheme' && colorMap.name) return colorMap;
+  }
+  return DEFAULT_DOTPLOT_COLORMAP;
+}
+
+async function plotGeneDotplot(params) {
+  try {
+    console.log('====== WORKER: plotGeneDotplot called ======');
+    console.log('Params:', params);
+    
+    const { genes, gene, colorMap } = params || {};
+    const appliedColorMap = normalizeDotplotColorMap(colorMap);
+
+    if (!loadedData) {
+      throw new Error('No data loaded. Please load data first.');
+    }
+
+    // ── scATAC-only (or atac-integration) dotplot via gene activity ──────────
+    if (loadedData.info?.modality === 'atac' || loadedData.info?.modality === 'atac-integration') {
+      const peakMatrix = loadedData.atacPeakMatrix;
+      const peakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
+      const peakAnnotation = loadedData.peakAnnotation || [];
+
+      if (!peakMatrix) {
+        throw new Error('ATAC peak matrix not available for dot plot.');
+      }
+
+      // Collect unique gene names from params
+      const scatacRequestedGenes = [];
+      const scatacCollect = (value) => {
+        if (typeof value !== 'string') return;
+        value.split(/[,;\s]+/).map(t => t.trim()).filter(t => t.length > 0)
+          .forEach(t => scatacRequestedGenes.push(t));
+      };
+      if (Array.isArray(genes)) genes.forEach(g => scatacCollect(g));
+      else scatacCollect(genes);
+      if (gene) scatacCollect(gene);
+
+      const scatacSeen = new Set();
+      const scatacUniqueGenes = scatacRequestedGenes.filter(g => {
+        const n = normalizeGeneName(g);
+        if (!n || scatacSeen.has(n)) return false;
+        scatacSeen.add(n);
+        return true;
+      });
+
+      if (!scatacUniqueGenes.length) {
+        throw new Error('No valid genes provided for dot plot.');
+      }
+
+      const nCells = peakMatrix.numberOfColumns();
+      const clusters = currentResults.clusters;
+      if (!clusters || clusters.length === 0) {
+        throw new Error('No clustering results available. Please run analysis first.');
+      }
+
+      const peakIdRegex = /^chr\w+[:-]\d+[:-]\d+$/i;
+      const resolvedGeneNames = [];
+      const geneActivityExprs = [];
+
+      for (const gName of scatacUniqueGenes) {
+        let peakIndices;
+        if (peakIdRegex.test(gName)) {
+          const peakIdx = findPeakIndex(gName, peakNames);
+          if (peakIdx === -1) {
+            console.warn(`scATAC dotplot: peak ${gName} not found in peak matrix, skipping`);
+            continue;
+          }
+          peakIndices = [peakIdx];
+        } else {
+          let result = getPeaksForGene(gName, peakAnnotation, peakNames);
+          if (result.peakIndices.length === 0) {
+            const genome = loadedData.info?.genome;
+            const tssResult = getPeaksForGeneByTSS(gName, peakAnnotation, peakNames, undefined, genome);
+            if (tssResult.peakIndices.length > 0) {
+              result = tssResult;
+              console.log(`scATAC dotplot: ${gName} linked via TSS (${result.peakIndices.length} peaks)`);
+            } else {
+              console.warn(`scATAC dotplot: no peaks found for gene ${gName}, skipping`);
+              continue;
+            }
+          }
+          peakIndices = result.peakIndices;
+        }
+        const expr = new Float32Array(nCells);
+        for (let c = 0; c < nCells; c++) {
+          let sum = 0;
+          const col = peakMatrix.column(c);
+          for (let p = 0; p < peakIndices.length; p++) sum += col[peakIndices[p]] || 0;
+          expr[c] = sum;
+        }
+        // Use raw counts directly (linear scale) for ATAC gene activity
+        resolvedGeneNames.push(peakIdRegex.test(gName) ? peakNames[peakIndices[0]] : gName);
+        geneActivityExprs.push(expr);
+      }
+
+      if (!resolvedGeneNames.length) {
+        throw new Error(`No peaks found for the requested gene(s). Try another gene or check spelling.`);
+      }
+
+      // Align clusters to nCells
+      let alignedClusters = Array.from(clusters);
+      if (alignedClusters.length > nCells) alignedClusters = alignedClusters.slice(0, nCells);
+      const nAligned = alignedClusters.length;
+
+      const uniqueClusters = Array.from(new Set(alignedClusters)).filter(c => c !== null && c !== undefined);
+      uniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+      const nClusters = uniqueClusters.length;
+      const nGenes = resolvedGeneNames.length;
+      const clusterIndexMap = new Map(uniqueClusters.map((id, idx) => [id, idx]));
+      const clusterCellCounts = new Array(nClusters).fill(0);
+      const clusterIndicesPerCell = new Int32Array(nAligned);
+      for (let i = 0; i < nAligned; i++) {
+        const idx = clusterIndexMap.get(alignedClusters[i]);
+        clusterIndicesPerCell[i] = idx !== undefined ? idx : -1;
+        if (idx !== undefined) clusterCellCounts[idx]++;
+      }
+
+      const percentExpressing = Array.from({ length: nClusters }, () => new Float32Array(nGenes));
+      const averageExpression = Array.from({ length: nClusters }, () => new Float32Array(nGenes));
+      let globalMin = Infinity, globalMax = -Infinity;
+
+      for (let gi = 0; gi < nGenes; gi++) {
+        const expr = geneActivityExprs[gi];
+        const detectedCounts = new Array(nClusters).fill(0);
+        const expressionSums = new Array(nClusters).fill(0);
+        for (let cell = 0; cell < nAligned; cell++) {
+          const ci = clusterIndicesPerCell[cell];
+          if (ci < 0) continue;
+          const value = expr[cell];
+          if (value > 0) { detectedCounts[ci]++; expressionSums[ci] += value; }
+        }
+        for (let ci = 0; ci < nClusters; ci++) {
+          const total = clusterCellCounts[ci];
+          const detected = detectedCounts[ci];
+          percentExpressing[ci][gi] = total > 0 ? detected / total : 0;
+          const avg = detected > 0 ? expressionSums[ci] / detected : 0;
+          averageExpression[ci][gi] = avg;
+          if (avg > 0) { if (avg < globalMin) globalMin = avg; if (avg > globalMax) globalMax = avg; }
+        }
+      }
+      if (!Number.isFinite(globalMin)) globalMin = 0;
+      if (!Number.isFinite(globalMax)) globalMax = 1;
+      else if (globalMin === globalMax) globalMax = globalMin + 1e-3;
+
+      const transferables = [];
+      for (let ci = 0; ci < nClusters; ci++) {
+        transferables.push(percentExpressing[ci].buffer, averageExpression[ci].buffer);
+      }
+      const atacIntegrationViewsDotplot = getAtacIntegrationViewsForPlot();
+      if (atacIntegrationViewsDotplot) {
+        // Build per-view dotplot data for atac-integration
+        const { integrationViews: iViews, datasetNames: iNames } = atacIntegrationViewsDotplot;
+        const viewData = {};
+        for (const viewName of iNames) {
+          const indices = iViews[viewName]?.indices;
+          if (!Array.isArray(indices) || indices.length === 0) continue;
+          const viewClusterArr = indices.map((i) => alignedClusters[i]);
+          const viewUnique = Array.from(new Set(viewClusterArr)).filter((c) => c != null);
+          viewUnique.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+          const viewClusterIdxMap = new Map(viewUnique.map((id, i) => [id, i]));
+          const nVC = viewUnique.length;
+          const vCellCounts = new Array(nVC).fill(0);
+          const vClusterIndices = new Int32Array(indices.length);
+          for (let i = 0; i < indices.length; i++) {
+            const ci = viewClusterIdxMap.get(viewClusterArr[i]);
+            vClusterIndices[i] = ci !== undefined ? ci : -1;
+            if (ci !== undefined) vCellCounts[ci]++;
+          }
+          const vPct = Array.from({ length: nVC }, () => new Float32Array(nGenes));
+          const vAvg = Array.from({ length: nVC }, () => new Float32Array(nGenes));
+          for (let gi = 0; gi < nGenes; gi++) {
+            const exprFull = geneActivityExprs[gi];
+            const detCounts = new Array(nVC).fill(0);
+            const exprSums = new Array(nVC).fill(0);
+            for (let i = 0; i < indices.length; i++) {
+              const ci = vClusterIndices[i]; if (ci < 0) continue;
+              const v = exprFull[indices[i]];
+              if (v > 0) { detCounts[ci]++; exprSums[ci] += v; }
+            }
+            for (let ci = 0; ci < nVC; ci++) {
+              const tot = vCellCounts[ci];
+              vPct[ci][gi] = tot > 0 ? detCounts[ci] / tot : 0;
+              vAvg[ci][gi] = detCounts[ci] > 0 ? exprSums[ci] / detCounts[ci] : 0;
+            }
+          }
+          const vTransfer = [];
+          for (let ci = 0; ci < nVC; ci++) { vTransfer.push(vPct[ci].buffer, vAvg[ci].buffer); }
+          viewData[viewName] = { clusterIds: viewUnique, percentExpressing: vPct, averageExpression: vAvg, clusterCellCounts: vCellCounts, totalCells: indices.length };
+        }
+        const allTransferables2 = [];
+        for (const vn of Object.keys(viewData)) {
+          for (let ci = 0; ci < viewData[vn].clusterIds.length; ci++) {
+            allTransferables2.push(viewData[vn].percentExpressing[ci].buffer, viewData[vn].averageExpression[ci].buffer);
+          }
+        }
+        self.postMessage({
+          type: 'ANALYSIS_COMPLETE',
+          data: { type: 'gene_dotplot', geneNames: resolvedGeneNames, integrationViews: iViews, datasetNames: iNames, viewData, expressionRange: [globalMin, globalMax], colorMap: appliedColorMap }
+        }, allTransferables2);
+        console.log('scATAC-integration dotplot: sent per-view dotplot for', resolvedGeneNames.join(', '));
+        return;
+      }
+      self.postMessage({
+        type: 'ANALYSIS_COMPLETE',
+        data: {
+          type: 'gene_dotplot',
+          geneNames: resolvedGeneNames,
+          clusterIds: uniqueClusters,
+          percentExpressing,
+          averageExpression,
+          clusterCellCounts,
+          totalCells: nAligned,
+          expressionRange: [globalMin, globalMax],
+          colorMap: appliedColorMap,
+        }
+      }, transferables);
+      console.log('scATAC dotplot: sent gene activity dot plot for', resolvedGeneNames.join(', '));
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
+    if (!loadedData.state) {
+      throw new Error('No data loaded. Please load data first.');
+    }
+
+    const requestedGenes = [];
+
+    const collectFromString = (value) => {
+      if (typeof value !== 'string') {
+        return;
+      }
+      value
+        .split(/[,;\s]+/)
+        .map((token) => token.trim())
+        .filter((token) => token.length > 0)
+        .forEach((token) => requestedGenes.push(token));
+    };
+
+    if (Array.isArray(genes)) {
+      genes.forEach((entry) => {
+        if (typeof entry === 'string') {
+          collectFromString(entry);
+        }
+      });
+    } else {
+      collectFromString(genes);
+    }
+
+    if (gene) {
+      collectFromString(gene);
+    }
+
+    const uniqueGenes = [];
+    const seen = new Set();
+    for (const g of requestedGenes) {
+      const normalized = normalizeGeneName(g);
+      if (!normalized) {
+        continue;
+      }
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        uniqueGenes.push(g);
+      }
+    }
+
+    if (!uniqueGenes.length) {
+      throw new Error('No valid genes provided for dot plot.');
+    }
+
+    // For spatial data (Xenium), only use the first gene
+    const modality = loadedData.info?.modality || loadedData.modality;
+    console.log('Dot plot: Detected modality:', modality);
+    const genesToPlot = (modality === 'spatial' && uniqueGenes.length > 1)
+      ? [uniqueGenes[0]]
+      : uniqueGenes;
+
+    if (modality === 'spatial' && uniqueGenes.length > 1) {
+      console.log(`Spatial data: using only first gene (${genesToPlot[0]}) out of ${uniqueGenes.length} requested genes`);
+    }
+
+    // Multiome + all peak IDs: dotplot ATAC-only using peak matrix
+    const peakIdRegex = /^chr\w+:\d+-\d+$/i;
+    const allPeakIds = genesToPlot.every(g => peakIdRegex.test(g.trim()));
+    if (modality === 'multiome' && allPeakIds) {
+      console.log('Multiome dotplot: all features are peaks, plotting ATAC-only');
+      const multiomePeak = await getMultiomePeakMatrix();
+      if (!multiomePeak) throw new Error('No peak matrix available for ATAC peak dotplot.');
+      const { peakMatrix, peakNames, fullBarcodeOrder } = multiomePeak;
+
+      // Resolve each peak
+      const resolvedPeakNames = [];
+      const peakExpressions = [];
+      for (const p of genesToPlot) {
+        const peakIdx = findPeakIndex(p, peakNames);
+        if (peakIdx === -1) {
+          console.warn(`Dotplot: peak ${p} not found in peak matrix, skipping`);
+          continue;
+        }
+        resolvedPeakNames.push(peakNames[peakIdx]);
+        const filteredBarcodes = loadedData.cellBarcodes || [];
+        const nFiltered = filteredBarcodes.length;
+        const barcodeToColIdx = new Map();
+        for (let i = 0; i < fullBarcodeOrder.length; i++) barcodeToColIdx.set(fullBarcodeOrder[i], i);
+        const fullRow = peakMatrix.row(peakIdx);
+        const vals = new Float32Array(nFiltered);
+        for (let j = 0; j < nFiltered; j++) {
+          const colIdx = barcodeToColIdx.get(filteredBarcodes[j]);
+          if (colIdx !== undefined) vals[j] = Math.log1p(fullRow[colIdx] || 0);
+        }
+        peakExpressions.push(vals);
+      }
+
+      if (!resolvedPeakNames.length) throw new Error('No valid peaks found in peak matrix.');
+
+      // Get ATAC clusters
+      const filteredBarcodes = loadedData.cellBarcodes || [];
+      const nFiltered = filteredBarcodes.length;
+      let atacClusters = loadedData.precomputed?.atacAligned?.clusters || currentResults.clusters;
+      if (!atacClusters || atacClusters.length !== nFiltered) atacClusters = currentResults.clusters;
+      const clusters = Array.from(atacClusters || []);
+      let alignedClusters = clusters;
+      if (clusters.length > nFiltered) alignedClusters = clusters.slice(0, nFiltered);
+      const nCells = Math.min(alignedClusters.length, nFiltered);
+
+      const uniqueClusters = Array.from(new Set(alignedClusters))
+        .filter(c => c !== null && c !== undefined);
+      uniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+      const nClusters = uniqueClusters.length;
+      const nPeaks = resolvedPeakNames.length;
+
+      const clusterIndexMap = new Map(uniqueClusters.map((id, idx) => [id, idx]));
+      const clusterCellCounts = new Array(nClusters).fill(0);
+      const clusterIndicesPerCell = new Int32Array(nCells);
+      for (let i = 0; i < nCells; i++) {
+        const cid = alignedClusters[i];
+        const idx = clusterIndexMap.get(cid);
+        clusterIndicesPerCell[i] = idx !== undefined ? idx : -1;
+        if (idx !== undefined) clusterCellCounts[idx]++;
+      }
+
+      const percentExpressing = Array.from({ length: nClusters }, () => new Float32Array(nPeaks));
+      const averageExpression = Array.from({ length: nClusters }, () => new Float32Array(nPeaks));
+      let globalMin = Infinity, globalMax = -Infinity;
+
+      for (let peakIdx = 0; peakIdx < nPeaks; peakIdx++) {
+        const expr = peakExpressions[peakIdx];
+        const detectedCounts = new Array(nClusters).fill(0);
+        const expressionSums = new Array(nClusters).fill(0);
+        for (let cell = 0; cell < nCells; cell++) {
+          const ci = clusterIndicesPerCell[cell];
+          if (ci < 0) continue;
+          const value = expr[cell];
+          if (value > 0) {
+            detectedCounts[ci]++;
+            expressionSums[ci] += value;
+          }
+        }
+        for (let ci = 0; ci < nClusters; ci++) {
+          const total = clusterCellCounts[ci];
+          const detected = detectedCounts[ci];
+          percentExpressing[ci][peakIdx] = total > 0 ? detected / total : 0;
+          const avg = detected > 0 ? expressionSums[ci] / detected : 0;
+          averageExpression[ci][peakIdx] = avg;
+          if (avg > 0) {
+            if (avg < globalMin) globalMin = avg;
+            if (avg > globalMax) globalMax = avg;
+          }
+        }
+      }
+      if (!Number.isFinite(globalMin)) globalMin = 0;
+      if (!Number.isFinite(globalMax)) globalMax = 1;
+
+      const transferables = [];
+      for (let ci = 0; ci < nClusters; ci++) {
+        transferables.push(percentExpressing[ci].buffer, averageExpression[ci].buffer);
+      }
+
+      self.postMessage({
+        type: 'ANALYSIS_COMPLETE',
+        data: {
+          type: 'gene_dotplot',
+          multiomeModality: 'atac',
+          geneNames: resolvedPeakNames,
+          clusterIds: uniqueClusters,
+          percentExpressing,
+          averageExpression,
+          clusterCellCounts,
+          totalCells: nCells,
+          expressionRange: [globalMin, globalMax],
+          colorMap: appliedColorMap,
+        }
+      }, transferables);
+      console.log('Multiome: sent ATAC peak dotplot for', resolvedPeakNames.join(', '));
+      return;
+    }
+
+    console.log('Dot plot: Resolving gene expressions for:', genesToPlot);
+    const { geneNames, logExpressions } = await resolveGeneExpressions(genesToPlot);
+    console.log('Dot plot: Gene names resolved:', geneNames);
+    console.log('Dot plot: Expression array lengths:', logExpressions.map(arr => arr.length));
+
+    const state = loadedData.state;
+
+    // Ensure clustering has been performed; for multiome RNA use precomputed RNA clusters so RNA view is unchanged after ATAC-only update
+    let clusters = currentResults.clusters;
+    if (loadedData?.info?.modality === 'multiome' && loadedData.precomputed?.rnaAligned?.clusters) {
+      clusters = loadedData.precomputed.rnaAligned.clusters;
+      console.log('Dot plot: using RNA clusters for multiome RNA view');
+    }
+    if (!clusters || clusters.length === 0) {
+      console.log('Dot plot: No cached clusters, fetching from state...');
+      let clusterArray = state.choose_clustering.fetchClusters();
+      if (!clusterArray || clusterArray.length === 0) {
+        console.log('Dot plot: No clusters in state, running clustering...');
+        await runClusteringAndUMAP(false); // false = don't send UMAP message
+        clusterArray = state.choose_clustering.fetchClusters();
+      }
+      clusters = Array.from(clusterArray);
+    }
+
+    console.log('Dot plot: Using clusters, length:', clusters.length);
+
+    // Get the number of cells in the normalized matrix
+    const normMatrix = state.rna_normalization.fetchNormalizedMatrix();
+    const nCellsInMatrix = normMatrix.numberOfColumns();
+    console.log('Dot plot: Normalized matrix columns:', nCellsInMatrix);
+
+    // If clusters array is longer than the normalized matrix, it means some cells were filtered
+    // We need to match the lengths - assume the first nCellsInMatrix cells are retained
+    if (clusters.length > nCellsInMatrix) {
+      console.log(`Dot plot: Trimming clusters array from ${clusters.length} to ${nCellsInMatrix} to match filtered cells`);
+      clusters = clusters.slice(0, nCellsInMatrix);
+    }
+
+  const uniqueClusters = Array.from(new Set(clusters));
+  uniqueClusters.sort((a, b) => {
+    if (typeof a === 'number' && typeof b === 'number') {
+      return a - b;
+    }
+    return String(a).localeCompare(String(b));
+  });
+
+  const clusterIndexLookup = new Map(uniqueClusters.map((id, idx) => [id, idx]));
+  const nClusters = uniqueClusters.length;
+  const nGenes = geneNames.length;
+
+  if (!nClusters) {
+    throw new Error('No clusters available for dot plot.');
+  }
+
+  const clusterCellCounts = new Array(nClusters).fill(0);
+  const clusterIndicesPerCell = new Array(clusters.length);
+  for (let i = 0; i < clusters.length; i++) {
+    const idx = clusterIndexLookup.get(clusters[i]);
+    clusterIndicesPerCell[i] = idx;
+    if (idx !== undefined) {
+      clusterCellCounts[idx] += 1;
+    }
+  }
+
+  const percentExpressing = Array.from({ length: nClusters }, () => new Float32Array(nGenes));
+  const averageExpression = Array.from({ length: nClusters }, () => new Float32Array(nGenes));
+
+  let globalMin = Infinity;
+  let globalMax = -Infinity;
+
+  const nCells = clusters.length;
+
+  for (let geneIdx = 0; geneIdx < nGenes; geneIdx++) {
+    const logExpr = logExpressions[geneIdx];
+    if (!logExpr || logExpr.length !== nCells) {
+      throw new Error(`Expression vector length mismatch for gene index ${geneIdx}`);
+    }
+
+    const detectedCounts = new Array(nClusters).fill(0);
+    const expressionSums = new Array(nClusters).fill(0);
+
+    for (let cell = 0; cell < nCells; cell++) {
+      const clusterIdx = clusterIndicesPerCell[cell];
+      if (clusterIdx === undefined || clusterIdx === null) {
+        continue;
+      }
+      const value = logExpr[cell];
+      if (value > 0) {
+        detectedCounts[clusterIdx] += 1;
+        expressionSums[clusterIdx] += value;
+      }
+    }
+
+    for (let clusterIdx = 0; clusterIdx < nClusters; clusterIdx++) {
+      const totalCells = clusterCellCounts[clusterIdx];
+      const detected = detectedCounts[clusterIdx];
+      const percent = totalCells > 0 ? detected / totalCells : 0;
+      const mean = detected > 0 ? expressionSums[clusterIdx] / detected : 0;
+
+      percentExpressing[clusterIdx][geneIdx] = percent;
+      averageExpression[clusterIdx][geneIdx] = mean;
+
+      if (detected > 0) {
+        if (mean < globalMin) {
+          globalMin = mean;
+        }
+        if (mean > globalMax) {
+          globalMax = mean;
+        }
+      }
+    }
+  }
+
+  if (!Number.isFinite(globalMin) || !Number.isFinite(globalMax)) {
+    globalMin = 0;
+    globalMax = 1;
+  } else if (globalMin === globalMax) {
+    globalMax = globalMin + 1e-3;
+  }
+
+  // Integration: per-sample dotplot with global normalization (same expression scale across views)
+  const integrationMeta = getIntegrationViewsForPlot(nCells);
+  if (integrationMeta) {
+    const { integrationViews, datasetNames } = integrationMeta;
+    const viewData = {};
+    const transferables = [];
+    for (const viewName of datasetNames) {
+      const indices = integrationViews[viewName]?.indices;
+      if (!Array.isArray(indices) || indices.length === 0) continue;
+      const viewClusters = indices.map((i) => clusters[i]);
+      const viewUniqueClusters = Array.from(new Set(viewClusters))
+        .filter((c) => c !== null && c !== undefined);
+      viewUniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
+      const clusterIndexMap = new Map(viewUniqueClusters.map((id, idx) => [id, idx]));
+      const nViewClusters = viewUniqueClusters.length;
+      const viewClusterCellCounts = new Array(nViewClusters).fill(0);
+      const viewClusterIndicesPerCell = indices.map((i) => clusterIndexMap.get(clusters[i]));
+      for (let i = 0; i < viewClusterIndicesPerCell.length; i++) {
+        const idx = viewClusterIndicesPerCell[i];
+        if (idx !== undefined && idx !== null) viewClusterCellCounts[idx]++;
+      }
+      const viewPercentExpressing = Array.from({ length: nViewClusters }, () => new Float32Array(nGenes));
+      const viewAverageExpression = Array.from({ length: nViewClusters }, () => new Float32Array(nGenes));
+      for (let geneIdx = 0; geneIdx < nGenes; geneIdx++) {
+        const logExpr = logExpressions[geneIdx];
+        const detectedCounts = new Array(nViewClusters).fill(0);
+        const expressionSums = new Array(nViewClusters).fill(0);
+        for (let k = 0; k < indices.length; k++) {
+          const cell = indices[k];
+          const clusterIdx = viewClusterIndicesPerCell[k];
+          if (clusterIdx === undefined || clusterIdx === null) continue;
+          const value = logExpr[cell];
+          if (value > 0) {
+            detectedCounts[clusterIdx]++;
+            expressionSums[clusterIdx] += value;
+          }
+        }
+        for (let ci = 0; ci < nViewClusters; ci++) {
+          const total = viewClusterCellCounts[ci];
+          const detected = detectedCounts[ci];
+          viewPercentExpressing[ci][geneIdx] = total > 0 ? detected / total : 0;
+          viewAverageExpression[ci][geneIdx] = detected > 0 ? expressionSums[ci] / detected : 0;
+        }
+      }
+      viewData[viewName] = {
+        clusterIds: viewUniqueClusters,
+        percentExpressing: viewPercentExpressing,
+        averageExpression: viewAverageExpression,
+        clusterCellCounts: viewClusterCellCounts,
+        totalCells: indices.length,
+      };
+      viewPercentExpressing.forEach((row) => transferables.push(row.buffer));
+      viewAverageExpression.forEach((row) => transferables.push(row.buffer));
+    }
+    self.postMessage({
+      type: 'ANALYSIS_COMPLETE',
+      data: {
+        type: 'gene_dotplot',
+        geneNames,
+        integrationViews,
+        datasetNames,
+        viewData,
+        expressionRange: [globalMin, globalMax],
+        colorMap: appliedColorMap,
+      }
+    }, transferables);
+    console.log('Integration: sent gene dotplot with per-view data for', geneNames.join(', '));
+    return;
+  }
+
+  const transferables = [];
+  percentExpressing.forEach((row) => transferables.push(row.buffer));
+  averageExpression.forEach((row) => transferables.push(row.buffer));
+
+  // For spatial data, also include gene expression data for the first gene
+  // so the spatial view can show the scatter plot
+  let spatialGeneExpression = null;
+  if (modality === 'spatial' && geneNames.length > 0) {
+    spatialGeneExpression = {
+      geneName: geneNames[0],
+      expression: logExpressions[0],
+      colorMap: appliedColorMap,
+    };
+    transferables.push(logExpressions[0].buffer);
+  }
+
+  console.log('====== DOT PLOT: About to send message ======');
+  console.log('Dot plot: Sending results to UI with', geneNames.length, 'genes and', uniqueClusters.length, 'clusters');
+  console.log('percentExpressing array length:', percentExpressing.length);
+  console.log('averageExpression array length:', averageExpression.length);
+  console.log('transferables count:', transferables.length);
+  console.log('colorMap:', colorMap);
+  console.log('spatialGeneExpression:', spatialGeneExpression ? `gene ${spatialGeneExpression.geneName}` : 'none');
+
+  const messageData = {
+    type: 'ANALYSIS_COMPLETE',
+    data: {
+      type: 'gene_dotplot',
+      geneNames,
+      clusterIds: uniqueClusters,
+      percentExpressing,
+      averageExpression,
+      clusterCellCounts,
+      totalCells: nCells,
+      expressionRange: [globalMin, globalMax],
+      colorMap: appliedColorMap,
+      spatialGeneExpression, // Include gene expression for spatial view
+    }
+  };
+  
+  console.log('Message data structure:', {
+    type: messageData.type,
+    dataType: messageData.data.type,
+    hasGeneNames: !!messageData.data.geneNames,
+    hasClusterIds: !!messageData.data.clusterIds,
+    hasPercentExpressing: !!messageData.data.percentExpressing,
+    hasAverageExpression: !!messageData.data.averageExpression,
+    colorMap: messageData.data.colorMap,
+  });
+  
+  self.postMessage(messageData, transferables);
+  console.log('====== DOT PLOT: Message sent successfully ======');
+
+  // Multiome: also compute ATAC gene activity dotplot and send to ATAC view
+  if (loadedData?.info?.modality === 'multiome' && loadedData.peakAnnotation?.length > 0) {
+    try {
+      console.log('Multiome dotplot: computing ATAC gene activity dotplot for', geneNames);
+      const peakAnnotation = loadedData.peakAnnotation;
+      const multiomePeak = await getMultiomePeakMatrix();
+      const peakNames = multiomePeak?.peakNames || [];
+
+      if (multiomePeak) {
+        const { peakMatrix, fullBarcodeOrder } = multiomePeak;
+        const filteredBarcodes = loadedData.cellBarcodes || [];
+        const nFiltered = filteredBarcodes.length;
+        const barcodeToColIdx = new Map();
+        for (let i = 0; i < fullBarcodeOrder.length; i++) {
+          barcodeToColIdx.set(fullBarcodeOrder[i], i);
+        }
+
+        // Compute gene activity (sum peak counts) for each gene
+        const atacLogExpressions = [];
+        const atacResolvedGenes = [];
+        for (let gIdx = 0; gIdx < geneNames.length; gIdx++) {
+          const gName = geneNames[gIdx];
+          const { peakIndices } = getPeaksForGene(gName, peakAnnotation, peakNames);
+          if (peakIndices.length === 0) {
+            console.log('Multiome dotplot: no peaks found for gene', gName, '- skipping');
+            continue;
+          }
+          const atacExpr = new Float32Array(nFiltered);
+          for (let j = 0; j < nFiltered; j++) {
+            const colIdx = barcodeToColIdx.get(filteredBarcodes[j]);
+            if (colIdx === undefined) continue;
+            const col = peakMatrix.column(colIdx);
+            let sum = 0;
+            for (let p = 0; p < peakIndices.length; p++) {
+              sum += col[peakIndices[p]] || 0;
+            }
+            atacExpr[j] = sum;
+          }
+          // Use raw counts directly (linear scale) for ATAC gene activity
+          atacLogExpressions.push(atacExpr);
+          atacResolvedGenes.push(gName);
+        }
+
+        if (atacResolvedGenes.length > 0) {
+          // Use ATAC clusters
+          let atacClusters = loadedData.precomputed?.atacAligned?.clusters;
+          if (!atacClusters || atacClusters.length !== nFiltered) {
+            atacClusters = clusters; // fallback to RNA clusters
+          }
+          let atacClusterArr = Array.from(atacClusters);
+          if (atacClusterArr.length > nFiltered) {
+            atacClusterArr = atacClusterArr.slice(0, nFiltered);
+          }
+
+          const atacUniqueClusters = Array.from(new Set(atacClusterArr));
+          atacUniqueClusters.sort((a, b) => {
+            if (typeof a === 'number' && typeof b === 'number') return a - b;
+            return String(a).localeCompare(String(b));
+          });
+          const atacClusterLookup = new Map(atacUniqueClusters.map((id, idx) => [id, idx]));
+          const atacNClusters = atacUniqueClusters.length;
+          const atacNGenes = atacResolvedGenes.length;
+
+          const atacClusterCellCounts = new Array(atacNClusters).fill(0);
+          const atacClusterIndicesPerCell = new Array(atacClusterArr.length);
+          for (let i = 0; i < atacClusterArr.length; i++) {
+            const idx = atacClusterLookup.get(atacClusterArr[i]);
+            atacClusterIndicesPerCell[i] = idx;
+            if (idx !== undefined) atacClusterCellCounts[idx] += 1;
+          }
+
+          const atacPercentExpressing = Array.from({ length: atacNClusters }, () => new Float32Array(atacNGenes));
+          const atacAverageExpression = Array.from({ length: atacNClusters }, () => new Float32Array(atacNGenes));
+          let atacGlobalMin = Infinity;
+          let atacGlobalMax = -Infinity;
+          const atacNCells = atacClusterArr.length;
+
+          for (let geneIdx = 0; geneIdx < atacNGenes; geneIdx++) {
+            const logExpr = atacLogExpressions[geneIdx];
+            const detectedCounts = new Array(atacNClusters).fill(0);
+            const expressionSums = new Array(atacNClusters).fill(0);
+
+            for (let cell = 0; cell < atacNCells; cell++) {
+              const clusterIdx = atacClusterIndicesPerCell[cell];
+              if (clusterIdx === undefined || clusterIdx === null) continue;
+              const value = logExpr[cell];
+              if (value > 0) {
+                detectedCounts[clusterIdx] += 1;
+                expressionSums[clusterIdx] += value;
+              }
+            }
+
+            for (let clusterIdx = 0; clusterIdx < atacNClusters; clusterIdx++) {
+              const totalCells = atacClusterCellCounts[clusterIdx];
+              const detected = detectedCounts[clusterIdx];
+              const percent = totalCells > 0 ? detected / totalCells : 0;
+              const mean = detected > 0 ? expressionSums[clusterIdx] / detected : 0;
+              atacPercentExpressing[clusterIdx][geneIdx] = percent;
+              atacAverageExpression[clusterIdx][geneIdx] = mean;
+              if (detected > 0) {
+                if (mean < atacGlobalMin) atacGlobalMin = mean;
+                if (mean > atacGlobalMax) atacGlobalMax = mean;
+              }
+            }
+          }
+
+          if (!Number.isFinite(atacGlobalMin) || !Number.isFinite(atacGlobalMax)) {
+            atacGlobalMin = 0; atacGlobalMax = 1;
+          } else if (atacGlobalMin === atacGlobalMax) {
+            atacGlobalMax = atacGlobalMin + 1e-3;
+          }
+
+          const atacTransferables = [];
+          atacPercentExpressing.forEach((row) => atacTransferables.push(row.buffer));
+          atacAverageExpression.forEach((row) => atacTransferables.push(row.buffer));
+
+          self.postMessage({
+            type: 'ANALYSIS_COMPLETE',
+            data: {
+              type: 'gene_dotplot',
+              multiomeModality: 'atac',
+              geneNames: atacResolvedGenes,
+              clusterIds: atacUniqueClusters,
+              percentExpressing: atacPercentExpressing,
+              averageExpression: atacAverageExpression,
+              clusterCellCounts: atacClusterCellCounts,
+              totalCells: atacNCells,
+              expressionRange: [atacGlobalMin, atacGlobalMax],
+              colorMap,
+            }
+          }, atacTransferables);
+          console.log('Multiome dotplot: sent ATAC gene activity dotplot for', atacResolvedGenes.join(', '));
+        } else {
+          console.log('Multiome dotplot: no genes had matching peaks, skipping ATAC dotplot');
+        }
+      } else {
+        console.log('Multiome dotplot: no peak matrix available, skipping ATAC dotplot');
+      }
+    } catch (atacErr) {
+      console.warn('Multiome dotplot: ATAC gene activity dotplot failed (non-fatal):', atacErr);
+    }
+  }
+
+  } catch (error) {
+    console.error('====== DOT PLOT: ERROR CAUGHT ======');
+    console.error('Gene dot plot failed:', error);
+    console.error('Error details:', error.stack);
+    throw error;
+  }
+}
+
+const cellChatDbCache = new Map();
+
+async function fetchJsonFromPublic(paths) {
+  let lastError = null;
+  for (const path of paths) {
+    try {
+      const response = await fetch(path);
+      if (!response.ok) {
+        lastError = new Error(`${path}: HTTP ${response.status}`);
+        continue;
+      }
+      const text = await response.text();
+      const trimmed = text.trim();
+      if (trimmed.startsWith('<')) {
+        lastError = new Error(`${path}: received HTML instead of JSON`);
+        continue;
+      }
+      return JSON.parse(text);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error('Could not load JSON asset');
+}
+
+async function loadCellChatLrDatabase(species) {
+  const key = species === 'mouse' ? 'mouse' : 'human';
+  if (cellChatDbCache.has(key)) return cellChatDbCache.get(key);
+  const fileName = `cellchatdb_${key}_lr.json`;
+  const workerHref = self?.location?.href || '';
+  const origin = self?.location?.origin || '';
+  const candidates = [];
+  try {
+    if (workerHref) candidates.push(new URL('../../cellchatdb/' + fileName, workerHref).href);
+  } catch (e) {
+    // Ignore malformed worker URLs and try simpler fallbacks below.
+  }
+  if (origin && origin !== 'null') {
+    candidates.push(`${origin}/cellchatdb/${fileName}`);
+  }
+  candidates.push(
+    `cellchatdb/${fileName}`,
+    `/cellchatdb/${fileName}`,
+    `./cellchatdb/${fileName}`,
+  );
+  const db = await fetchJsonFromPublic([
+    ...new Set(candidates),
+  ]);
+  cellChatDbCache.set(key, db);
+  return db;
+}
+
+function inferSpeciesFromGenome() {
+  const genome = String(loadedData?.info?.genome || loadedData?.info?.species || '').toLowerCase();
+  if (genome.includes('mm') || genome.includes('mouse') || genome.includes('grcm')) return 'mouse';
+  if (genome.includes('hg') || genome.includes('human') || genome.includes('grch')) return 'human';
+  return null;
+}
+
+function countDbGeneMatches(db, lookup) {
+  const genes = new Set();
+  for (const item of db?.interactions || []) {
+    (item.ligand_genes || []).forEach(g => genes.add(normalizeGeneName(g)));
+    (item.receptor_genes || []).forEach(g => genes.add(normalizeGeneName(g)));
+  }
+  let count = 0;
+  genes.forEach(g => {
+    if (lookup.has(g)) count += 1;
+  });
+  return count;
+}
+
+async function chooseCellChatLrDatabase() {
+  const species = inferSpeciesFromGenome();
+  if (species) {
+    const db = await loadCellChatLrDatabase(species);
+    return { db, species, matchCount: null };
+  }
+
+  const { lookup } = await ensureGeneLookup();
+  const [humanDb, mouseDb] = await Promise.all([
+    loadCellChatLrDatabase('human'),
+    loadCellChatLrDatabase('mouse'),
+  ]);
+  const humanMatches = countDbGeneMatches(humanDb, lookup);
+  const mouseMatches = countDbGeneMatches(mouseDb, lookup);
+  return mouseMatches > humanMatches
+    ? { db: mouseDb, species: 'mouse', matchCount: mouseMatches }
+    : { db: humanDb, species: 'human', matchCount: humanMatches };
+}
+
+async function getNormalizedGeneRowByName(gene) {
+  const { geneNames, lookup } = await ensureGeneLookup();
+  const idx = lookup.get(normalizeGeneName(gene));
+  if (idx === undefined) return { row: null, geneName: null };
+  let row = null;
+  if (loadedData?.state?.rna_normalization) {
+    row = loadedData.state.rna_normalization.fetchNormalizedMatrix().row(idx, { asTypedArray: true });
+  } else if (loadedData?.jsNormMatrix || loadedData?.jsH5TmpFile) {
+    const expressions = await resolveGeneExpressions([geneNames[idx]]);
+    row = expressions.logExpressions?.[0] || null;
+  }
+  return { row, geneName: geneNames[idx] || gene };
+}
+
+function summarizeRowForIndices(row, indices) {
+  let sum = 0;
+  let detected = 0;
+  for (const idx of indices) {
+    const value = row?.[idx] || 0;
+    sum += value;
+    if (value > 0) detected += 1;
+  }
+  const n = Math.max(1, indices.length);
+  return { mean: sum / n, pct: detected / n };
+}
+
+function createSeededRandom(seed = 1) {
+  let state = (Number(seed) >>> 0) || 1;
+  return () => {
+    state = (1664525 * state + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+function shuffledCopy(values, random) {
+  const out = values.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    const tmp = out[i];
+    out[i] = out[j];
+    out[j] = tmp;
+  }
+  return out;
+}
+
+async function runSpatialCellInteraction(params = {}) {
+  if (!loadedData) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+  const rawRegions = Array.isArray(params.regions) ? params.regions : [];
+  if (rawRegions.length < 2) {
+    throw new Error('Cell-cell interaction analysis needs at least two selected spatial areas. Please select two regions in Spatial View, then ask again.');
+  }
+  const inferredCellCount =
+    loadedData.cellBarcodes?.length ||
+    loadedData.spatialData?.coordinates?.length ||
+    loadedData.nCells ||
+    loadedData.state?.rna_normalization?.fetchNormalizedMatrix?.()?.numberOfColumns?.() ||
+    0;
+  const regions = rawRegions.map((region, index) => {
+    const indices = Array.from(new Set((region.selectedCellIndices || region.globalIndices || [])
+      .map(v => Number(v))
+      .filter(v => Number.isInteger(v) && v >= 0 && v < inferredCellCount)));
+    return { id: region.id || `Region ${index + 1}`, indices };
+  });
+  if (regions.some(region => region.indices.length < 3)) {
+    throw new Error('Each selected area needs at least 3 cells for ligand-receptor analysis. Please select larger regions.');
+  }
+
+  self.postMessage({ type: 'STATUS_UPDATE', message: 'Computing region ligand-receptor gene summaries...' });
+  const regionSets = regions.map(region => new Set(region.indices));
+  const allSelectedSet = new Set(regions.flatMap(region => region.indices));
+  const otherForRegion = regions.map((region, idx) => {
+    const out = [];
+    for (let i = 0; i < inferredCellCount; i++) {
+      if (!regionSets[idx].has(i) && !allSelectedSet.has(i)) out.push(i);
+    }
+    return out.length ? out : regions.filter((_, otherIdx) => otherIdx !== idx).flatMap(other => other.indices);
+  });
+
+  const { db: lrDb, species: lrSpecies, matchCount: lrDbMatchCount } = await chooseCellChatLrDatabase();
+  const lrInteractions = Array.isArray(lrDb?.interactions) ? lrDb.interactions : [];
+  const lrGenes = Array.from(new Set(lrInteractions.flatMap((item) => [
+    ...(item.ligand_genes || []),
+    ...(item.receptor_genes || []),
+  ]).filter(Boolean)));
+  if (!lrGenes.length) {
+    throw new Error('CellChat ligand-receptor database is empty or unavailable.');
+  }
+  const nboot = Math.max(10, Math.min(1000, Number(params.nboot || 100)));
+  const pValueThreshold = Number.isFinite(Number(params.pValueThreshold))
+    ? Number(params.pValueThreshold)
+    : 0.05;
+  const selectedPool = regions.flatMap(region => region.indices);
+  const regionSizes = regions.map(region => region.indices.length);
+  const random = createSeededRandom(params.seed || 1);
+  const bootRegionIndices = [];
+  for (let b = 0; b < nboot; b++) {
+    const shuffled = shuffledCopy(selectedPool, random);
+    let offset = 0;
+    bootRegionIndices.push(regionSizes.map((size) => {
+      const slice = shuffled.slice(offset, offset + size);
+      offset += size;
+      return slice;
+    }));
+  }
+
+  const regionCount = regions.length;
+  const markerResults = regions.map(() => ({ markers: [] }));
+  const geneStats = new Map();
+  const uniqueLrGenes = Array.from(new Set(lrGenes.map(g => String(g || '').trim()).filter(Boolean)));
+  for (let geneIdx = 0; geneIdx < uniqueLrGenes.length; geneIdx++) {
+    if (geneIdx % 100 === 0) {
+      self.postMessage({
+        type: 'STATUS_UPDATE',
+        message: `Summarizing CellChatDB genes ${geneIdx + 1}-${Math.min(geneIdx + 100, uniqueLrGenes.length)} of ${uniqueLrGenes.length.toLocaleString()}...`
+      });
+    }
+    const gene = uniqueLrGenes[geneIdx];
+    const { row, geneName } = await getNormalizedGeneRowByName(gene);
+    if (!row) continue;
+    const actual = regions.map(region => summarizeRowForIndices(row, region.indices));
+    const background = otherForRegion.map(indices => summarizeRowForIndices(row, indices));
+    const bootMean = new Float32Array(nboot * regionCount);
+    const bootPct = new Float32Array(nboot * regionCount);
+    for (let b = 0; b < nboot; b++) {
+      for (let regionIdx = 0; regionIdx < regionCount; regionIdx++) {
+        const stats = summarizeRowForIndices(row, bootRegionIndices[b][regionIdx]);
+        const offset = b * regionCount + regionIdx;
+        bootMean[offset] = stats.mean;
+        bootPct[offset] = stats.pct;
+      }
+    }
+    const displayGene = geneName || gene;
+    geneStats.set(normalizeGeneName(gene), { gene: displayGene, actual, background, bootMean, bootPct });
+    geneStats.set(normalizeGeneName(displayGene), { gene: displayGene, actual, background, bootMean, bootPct });
+    actual.forEach((inStats, regionIdx) => {
+      const outStats = background[regionIdx] || { mean: 0, pct: 0 };
+      const logFC = Math.log((inStats.mean + 1e-6) / (outStats.mean + 1e-6));
+      if (logFC <= 0) return;
+      markerResults[regionIdx].markers.push({
+        gene: displayGene,
+        avg_logFC: logFC,
+        pct1: inStats.pct,
+        pct2: outStats.pct,
+        mean_in: inStats.mean,
+        mean_out: outStats.mean,
+        markerScore: logFC * Math.max(inStats.pct, 0.01),
+      });
+    });
+  }
+  markerResults.forEach(result => result.markers.sort((a, b) => b.markerScore - a.markerScore));
+  const markerMaps = markerResults.map(result => new Map(result.markers.map(row => [normalizeGeneName(row.gene), row])));
+
+  function getGeneSummary(gene) {
+    return geneStats.get(normalizeGeneName(gene));
+  }
+
+  function complexStats(genes, regionIdx) {
+    let minMean = Infinity;
+    let minPct = Infinity;
+    for (const gene of genes) {
+      const stats = getGeneSummary(gene);
+      const regionStats = stats?.actual?.[regionIdx] || { mean: 0, pct: 0 };
+      minMean = Math.min(minMean, regionStats.mean);
+      minPct = Math.min(minPct, regionStats.pct);
+    }
+    return {
+      mean: minMean === Infinity ? 0 : minMean,
+      pct: minPct === Infinity ? 0 : minPct,
+      genes,
+    };
+  }
+
+  function complexBootStats(genes, bootIdx, regionIdx) {
+    let minMean = Infinity;
+    let minPct = Infinity;
+    const offset = bootIdx * regionCount + regionIdx;
+    for (const gene of genes) {
+      const stats = getGeneSummary(gene);
+      minMean = Math.min(minMean, stats?.bootMean?.[offset] || 0);
+      minPct = Math.min(minPct, stats?.bootPct?.[offset] || 0);
+    }
+    return {
+      mean: minMean === Infinity ? 0 : minMean,
+      pct: minPct === Infinity ? 0 : minPct,
+      genes,
+    };
+  }
+
+  const communicationScore = (ligandGenes, receptorGenes, sourceIdx, targetIdx, bootIdx = null) => {
+    const ligStats = bootIdx == null
+      ? complexStats(ligandGenes, sourceIdx)
+      : complexBootStats(ligandGenes, bootIdx, sourceIdx);
+    const recStats = bootIdx == null
+      ? complexStats(receptorGenes, targetIdx)
+      : complexBootStats(receptorGenes, bootIdx, targetIdx);
+    const probability = Math.sqrt(Math.max(ligStats.mean, 0) * Math.max(recStats.mean, 0)) *
+      Math.sqrt(Math.max(ligStats.pct, 0) * Math.max(recStats.pct, 0));
+    return { probability, ligStats, recStats };
+  };
+
+  self.postMessage({ type: 'STATUS_UPDATE', message: `Scoring ${lrInteractions.length.toLocaleString()} CellChatDB ligand-receptor pairs with ${nboot} permutations...` });
+  const allInteractions = [];
+  for (const lr of lrInteractions) {
+    const ligandGenes = Array.isArray(lr.ligand_genes) ? lr.ligand_genes.filter(Boolean) : [];
+    const receptorGenes = Array.isArray(lr.receptor_genes) ? lr.receptor_genes.filter(Boolean) : [];
+    if (!ligandGenes.length || !receptorGenes.length) continue;
+    for (let sourceIdx = 0; sourceIdx < regions.length; sourceIdx++) {
+      for (let targetIdx = 0; targetIdx < regions.length; targetIdx++) {
+        if (sourceIdx === targetIdx) continue;
+        const dir = { sourceIdx, targetIdx };
+        const ligandMarker = ligandGenes.every(g => markerMaps[dir.sourceIdx].has(normalizeGeneName(g)));
+        const receptorMarker = receptorGenes.every(g => markerMaps[dir.targetIdx].has(normalizeGeneName(g)));
+        if (!ligandMarker || !receptorMarker) continue;
+        const { probability: communicationProbability, ligStats, recStats } = communicationScore(
+          ligandGenes,
+          receptorGenes,
+          dir.sourceIdx,
+          dir.targetIdx,
+        );
+        if (!(communicationProbability > 0)) continue;
+        let nReject = 0;
+        for (let b = 0; b < nboot; b++) {
+          const bootScore = communicationScore(
+            ligandGenes,
+            receptorGenes,
+            dir.sourceIdx,
+            dir.targetIdx,
+            b,
+          ).probability;
+          if (bootScore - communicationProbability > 0) nReject += 1;
+        }
+        const pValue = nReject / nboot;
+        allInteractions.push({
+          source: regions[dir.sourceIdx].id,
+          target: regions[dir.targetIdx].id,
+          ligand: lr.ligand || ligandGenes.join('_'),
+          receptor: lr.receptor || receptorGenes.join('_'),
+          ligandGenes,
+          receptorGenes,
+          pair: `${lr.ligand || ligandGenes.join('_')} - ${lr.receptor || receptorGenes.join('_')}`,
+          pathway: lr.pathway || 'Unknown',
+          category: lr.category || lr.annotation || 'Unknown',
+          annotation: lr.annotation || lr.category || null,
+          evidence: lr.evidence || null,
+          interactionName: lr.interaction_name || null,
+          probability: communicationProbability,
+          p_value: pValue,
+          significant: pValue <= pValueThreshold,
+          ligandMean: ligStats.mean,
+          receptorMean: recStats.mean,
+          ligandPct: ligStats.pct,
+          receptorPct: recStats.pct,
+        });
+      }
+    }
+  }
+  const interactions = allInteractions.filter(item => item.significant);
+  interactions.sort((a, b) => b.probability - a.probability);
+  allInteractions.sort((a, b) => {
+    if (a.p_value !== b.p_value) return a.p_value - b.p_value;
+    return b.probability - a.probability;
+  });
+
+  const pathways = Array.from(new Set(interactions.map(item => item.pathway)));
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: {
+      type: 'spatial_cell_interaction',
+      method: 'cellchatdb_ligand_receptor_marker_filter_cellchat_like_score',
+      significance: {
+        method: 'cellchat_style_label_permutation',
+        nboot,
+        threshold: pValueThreshold,
+        definition: 'p_value = fraction of permuted communication scores greater than observed score',
+      },
+      lrDatabase: {
+        source: lrDb.source || `CellChatDB.${lrSpecies}`,
+        species: lrSpecies,
+        interactionCount: lrDb.interaction_count || lrInteractions.length,
+        categories: lrDb.categories || [],
+        matchedGenes: lrDbMatchCount,
+      },
+      regions: regions.map(region => ({ id: region.id, cellCount: region.indices.length })),
+      markerGenes: Object.fromEntries(regions.map((region, idx) => [region.id, markerResults[idx].markers.slice(0, 50)])),
+      interactions,
+      allInteractions: allInteractions.slice(0, 200),
+      summary: {
+        interactionCount: interactions.length,
+        testedInteractionCount: allInteractions.length,
+        pathwayCount: pathways.length,
+        pathways,
+        topInteractions: interactions.slice(0, 8).map(item => ({
+          source: item.source,
+          target: item.target,
+          pair: item.pair,
+          pathway: item.pathway,
+          score: item.probability,
+        })),
+      },
+    },
+  });
+}
+
+async function findMarkers(params = {}) {
+  if (!loadedData) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+  const isAtacIntegration = loadedData.info?.modality === 'atac-integration';
+  if (!loadedData.state && !isAtacIntegration) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+
+  // Support both single cluster and array of clusters (for merged/renamed clusters)
+  const { cluster, clusters: mergedClusters, multiomeTarget, spatialRegionMode = false } = params;
+  const rawSelectedCellIndices = Array.isArray(params.selectedCellIndices)
+    ? params.selectedCellIndices
+    : Array.isArray(params.cellIndices)
+      ? params.cellIndices
+      : [];
+  const state = loadedData.state;
+
+  // For atac-integration: no bakana state; use currentResults.clusters from runAtacIntegrationPipeline
+  let clusterAssignments = currentResults.clusters;
+  if (isAtacIntegration) {
+    if (!clusterAssignments || !clusterAssignments.length) {
+      throw new Error('Cluster assignments are unavailable. Please load and run ATAC integration first.');
+    }
+    clusterAssignments = Array.from(clusterAssignments);
+  } else {
+    // For multiome: use RNA or ATAC precomputed clusters so RNA view is unchanged after ATAC-only update
+    if (loadedData?.info?.modality === 'multiome' && loadedData.precomputed) {
+      if (multiomeTarget === 'atac' && loadedData.precomputed.atacAligned) {
+        clusterAssignments = loadedData.precomputed.atacAligned.clusters;
+        console.log('Multiome: using ATAC clusters for find_markers');
+      } else if (multiomeTarget !== 'atac' && loadedData.precomputed.rnaAligned?.clusters) {
+        clusterAssignments = loadedData.precomputed.rnaAligned.clusters;
+        console.log('Multiome: using RNA clusters for find_markers');
+      }
+    }
+    if (!clusterAssignments || !clusterAssignments.length) {
+      let fetched = state.choose_clustering.fetchClusters();
+      if (!fetched || !fetched.length) {
+        await runClusteringAndUMAP(false);
+        fetched = state.choose_clustering.fetchClusters();
+      }
+      clusterAssignments = Array.from(fetched);
+      currentResults.clusters = clusterAssignments;
+    }
+  }
+
+  if ((!clusterAssignments || !clusterAssignments.length) && !spatialRegionMode) {
+    throw new Error('Cluster assignments are unavailable.');
+  }
+
+  if (spatialRegionMode) {
+    const inferredCellCount =
+      (Array.isArray(clusterAssignments) && clusterAssignments.length) ||
+      loadedData.cellBarcodes?.length ||
+      loadedData.spatialData?.coordinates?.length ||
+      loadedData.nCells ||
+      0;
+    if (!inferredCellCount) {
+      throw new Error('Could not determine the cell count for the selected spatial region.');
+    }
+    const selectedSet = new Set(
+      rawSelectedCellIndices
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value >= 0 && value < inferredCellCount)
+    );
+    if (selectedSet.size < 3) {
+      throw new Error('The selected spatial region contains too few cells for marker analysis.');
+    }
+    clusterAssignments = Array.from({ length: inferredCellCount }, (_, idx) => selectedSet.has(idx) ? 1 : 0);
+    currentResults.clusters = currentResults.clusters || clusterAssignments;
+    console.log('findMarkers: spatial region request', {
+      selectedCells: selectedSet.size,
+      totalCells: inferredCellCount,
+      regionFormat: params.regionFormat,
+    });
+  }
+
+  const uniqueClusters = Array.from(new Set(clusterAssignments));
+  uniqueClusters.sort((a, b) => {
+    if (typeof a === 'number' && typeof b === 'number') {
+      return a - b;
+    }
+    return String(a).localeCompare(String(b));
+  });
+
+  // Handle merged clusters (multiple cluster IDs renamed to the same label)
+  let targetClusterIds = [];
+  let isMergedClusterRequest = false;
+
+  if (Array.isArray(mergedClusters) && mergedClusters.length > 1) {
+    // Multiple clusters merged to the same label - treat as one group
+    isMergedClusterRequest = true;
+    targetClusterIds = mergedClusters.map(c => {
+      // Match each cluster ID against uniqueClusters
+      const numVal = typeof c === 'number' ? c : parseInt(c);
+      const matched = uniqueClusters.find(uc =>
+        uc === c || uc === numVal || String(uc) === String(c) || Number(uc) === numVal
+      );
+      return matched !== undefined ? matched : c;
+    });
+    console.log('findMarkers: Merged cluster request, target IDs:', targetClusterIds);
+  }
+
+  // Debug: Log cluster types and values
+  console.log('findMarkers: Cluster debug info:', {
+    requestedClusterInput: cluster,
+    mergedClustersInput: mergedClusters,
+    isMergedClusterRequest,
+    targetClusterIds,
+    requestedClusterType: typeof cluster,
+    uniqueClustersCount: uniqueClusters.length,
+    uniqueClustersSample: uniqueClusters.slice(0, 10),
+    uniqueClustersTypes: uniqueClusters.slice(0, 5).map(c => typeof c),
+  });
+
+  let requestedCluster = spatialRegionMode ? 1 : cluster;
+  if (requestedCluster === undefined || requestedCluster === null || requestedCluster === '') {
+    requestedCluster = uniqueClusters[0];
+  }
+
+  // Try to find the matching cluster in uniqueClusters
+  // First, check if the exact value exists
+  let matchedCluster = uniqueClusters.find(c => c === requestedCluster);
+
+  // If not found and requestedCluster is a string, try parsing as number
+  if (matchedCluster === undefined && typeof requestedCluster === 'string') {
+    const trimmed = requestedCluster.trim();
+    const numMatch = trimmed.match(/(\d+)/);
+    if (numMatch) {
+      const numValue = Number(numMatch[1]);
+      // Try to find matching cluster as number or string
+      matchedCluster = uniqueClusters.find(c =>
+        c === numValue || c === String(numValue) || String(c) === String(numValue)
+      );
+      if (matchedCluster !== undefined) {
+        requestedCluster = matchedCluster;
+      }
+    }
+  }
+
+  // If requestedCluster is a number, try to find matching cluster
+  if (matchedCluster === undefined && typeof requestedCluster === 'number') {
+    matchedCluster = uniqueClusters.find(c =>
+      c === requestedCluster || c === String(requestedCluster) || Number(c) === requestedCluster
+    );
+    if (matchedCluster !== undefined) {
+      requestedCluster = matchedCluster;
+    }
+  }
+
+  console.log('findMarkers: After matching:', {
+    requestedCluster,
+    requestedClusterType: typeof requestedCluster,
+    matchedCluster,
+    matchedClusterType: typeof matchedCluster,
+    isMergedClusterRequest,
+    targetClusterIds,
+  });
+
+  if (matchedCluster === undefined && !isMergedClusterRequest) {
+    throw new Error(
+      `Cluster ${cluster} not found. Available clusters: ${uniqueClusters.join(', ')}`
+    );
+  }
+
+  // Use the matched cluster value for all subsequent comparisons
+  requestedCluster = matchedCluster;
+
+  // For merged clusters, use targetClusterIds instead of single requestedCluster
+  const targetClustersSet = isMergedClusterRequest
+    ? new Set(targetClusterIds.map(c => String(c)))
+    : new Set([String(requestedCluster)]);
+
+  // ATAC marker detection: use peak matrix (multiome ATAC or atac-integration)
+  const isAtacMarkers = (loadedData?.info?.modality === 'multiome' && multiomeTarget === 'atac') || isAtacIntegration;
+  let markerState = null;
+  let normMatrix = null;
+  let geneNames = [];
+  let nGenes = 0;
+  let atacPeakMatrixRef = null;
+  let atacFilteredColIndices = null;
+  let atacFilteredCellCount = 0;
+
+  if (isAtacMarkers) {
+    if (isAtacIntegration) {
+      // atac-integration: peak matrix and cell order from loadedData (set by runAtacIntegrationPipeline)
+      console.log('findMarkers: ATAC integration mode - using unified peak matrix');
+      const peakMatrix = loadedData.atacPeakMatrix;
+      const atacPeakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
+      const nCells = loadedData.cellBarcodes?.length ?? peakMatrix?.numberOfColumns() ?? 0;
+      if (!peakMatrix || !atacPeakNames.length || nCells === 0) {
+        throw new Error('No peak matrix available for ATAC integration marker detection.');
+      }
+      atacPeakMatrixRef = peakMatrix;
+      geneNames = atacPeakNames;
+      nGenes = atacPeakNames.length;
+      atacFilteredCellCount = nCells;
+      // Matrix columns are in same order as loadedData.cellBarcodes
+      atacFilteredColIndices = new Int32Array(nCells);
+      for (let j = 0; j < nCells; j++) atacFilteredColIndices[j] = j;
+    } else {
+      // Multiome ATAC: use getMultiomePeakMatrix and map filtered barcodes to matrix columns
+      console.log('findMarkers: ATAC mode - using peak matrix directly');
+      const multiomePeak = await getMultiomePeakMatrix();
+      if (!multiomePeak) {
+        throw new Error('No peak matrix available for ATAC marker detection.');
+      }
+      const { peakMatrix, peakNames: atacPeakNames, fullBarcodeOrder } = multiomePeak;
+      const filteredBarcodes = loadedData.cellBarcodes || [];
+      const nCells = filteredBarcodes.length;
+
+      const barcodeToColIdx = new Map();
+      for (let i = 0; i < fullBarcodeOrder.length; i++) {
+        barcodeToColIdx.set(fullBarcodeOrder[i], i);
+      }
+      atacFilteredColIndices = new Int32Array(nCells);
+      for (let j = 0; j < nCells; j++) {
+        const colIdx = barcodeToColIdx.get(filteredBarcodes[j]);
+        atacFilteredColIndices[j] = colIdx !== undefined ? colIdx : -1;
+      }
+      atacPeakMatrixRef = peakMatrix;
+      atacFilteredCellCount = nCells;
+      geneNames = atacPeakNames;
+      nGenes = atacPeakNames.length;
+    }
+
+    console.log(`findMarkers: ATAC mode - ${nGenes} peaks in peak matrix`);
+    self.postMessage({
+      type: 'STATUS_UPDATE',
+      message: `Finding marker peaks across ${nGenes} peaks...`,
+    });
+  } else if (state && state.marker_detection && state.rna_normalization) {
+    markerState = state.marker_detection;
+    normMatrix = state.rna_normalization.fetchNormalizedMatrix();
+    const lookup = await ensureGeneLookup();
+    geneNames = lookup.geneNames;
+    nGenes = geneNames.length;
+  } else if ((loadedData.jsNormMatrix || loadedData.jsH5TmpFile) && loadedData.jsGeneNames) {
+    // Pure-JS streaming pipeline: restrict markers to HVG genes for performance
+    // (non-HVG genes would require full H5 re-scan per gene — too slow for marker detection)
+    const hvgIndices = loadedData.jsHvgIndices;
+    if (hvgIndices && hvgIndices.length > 0) {
+      const allNames = loadedData.jsGeneNames;
+      geneNames = hvgIndices.map(i => allNames[i]);
+      nGenes = geneNames.length;
+    } else {
+      const lookup = await ensureGeneLookup();
+      geneNames = lookup.geneNames;
+      nGenes = geneNames.length;
+    }
+    // normMatrix stays null — getGeneRow below handles jsNormMatrix or H5 fallback
+  } else {
+    throw new Error('No normalized matrix available for marker detection');
+  }
+
+  // Helper: get feature values (RNA normalized expression or ATAC peak counts)
+  async function getGeneRow(geneIndex) {
+    if (atacPeakMatrixRef) {
+      // Extract peak row from peak matrix, filtered to cells in the dataset
+      const fullRow = atacPeakMatrixRef.row(geneIndex);
+      const filtered = new Float32Array(atacFilteredCellCount);
+      for (let j = 0; j < atacFilteredCellCount; j++) {
+        if (atacFilteredColIndices[j] >= 0) {
+          filtered[j] = fullRow[atacFilteredColIndices[j]] || 0;
+        }
+      }
+      return filtered;
+    }
+    if (normMatrix) {
+      return normMatrix.row(geneIndex, { asTypedArray: true });
+    }
+    // Pure-JS streaming pipeline: geneIndex is the HVG row index
+    // (findMarkers already restricted geneNames to HVG, so index maps directly)
+    if (loadedData.jsNormMatrix) {
+      const jsMatrix = loadedData.jsNormMatrix;
+      const row = new Float32Array(jsMatrix.ncols);
+      for (let j = 0; j < jsMatrix.ncols; j++) {
+        for (let p = jsMatrix.colPtr[j]; p < jsMatrix.colPtr[j + 1]; p++) {
+          if (jsMatrix.rowIdx[p] === geneIndex) {
+            row[j] = jsMatrix.values[p];
+            break;
+          }
+        }
+      }
+      return row;
+    }
+    // H5 fallback: geneIndex is HVG index, map back to original gene index
+    if (loadedData.jsH5TmpFile && loadedData.jsHvgIndices) {
+      const origGeneIdx = loadedData.jsHvgIndices[geneIndex];
+      const nKeptCells = loadedData.jsFilteredBarcodes?.length || 0;
+      const { readSingleGeneFromH5 } = await import('../scatac/h5sparse.js');
+      const row = await readSingleGeneFromH5(
+        loadedData.jsH5TmpFile,
+        origGeneIdx,
+        loadedData.jsKeepCellFlags,
+        loadedData.jsCellTotals,
+        loadedData.jsNOrigCells,
+        nKeptCells,
+      );
+      return row;
+    }
+    throw new Error('No matrix available for gene expression lookup');
+  }
+
+  // Check if bakana's marker detection has been computed
+  let markerResults = markerState?.fetchResults?.();
+  let rnaMarkers = markerResults?.RNA;
+
+  // For ATAC markers, skip bakana's RNA marker results - compute from peak matrix instead
+  if (isAtacMarkers) {
+    rnaMarkers = null;
+  }
+
+  // Determine if we should use precomputed clusters for marker detection
+  // This is true ONLY for spatial/Xenium data that loaded with precomputed UMAP/clusters
+  // and hasn't been fully processed through bakana's pipeline yet.
+  // For single-cell data, we always use bakana's marker statistics even after cluster merges,
+  // because the Wilcoxon test (which determines gene ranking) uses the current cluster
+  // assignments from currentResults.clusters anyway.
+  const hasPrecomputedData = loadedData.precomputed &&
+                              loadedData.precomputed.umap &&
+                              loadedData.precomputed.clusters;
+  const usePrecomputedClusters = hasPrecomputedData && !rnaMarkers;
+
+  let meanTarget, detectedTarget, meanOther, detectedOther;
+  let groupCount = uniqueClusters.length;
+  const totalCells = clusterAssignments.length;
+
+  // Build cluster counts using precomputed clusters
+  const clusterCounts = new Map();
+  for (const c of uniqueClusters) {
+    clusterCounts.set(c, 0);
+  }
+  for (const value of clusterAssignments) {
+    if (clusterCounts.has(value)) {
+      clusterCounts.set(value, clusterCounts.get(value) + 1);
+    }
+  }
+
+  // For merged clusters, sum up all cluster sizes
+  let targetClusterSize;
+  if (isMergedClusterRequest) {
+    targetClusterSize = 0;
+    for (const clusterId of targetClusterIds) {
+      targetClusterSize += clusterCounts.get(clusterId) || 0;
+    }
+    console.log('findMarkers: Merged cluster total size:', targetClusterSize, 'from clusters:', targetClusterIds);
+  } else {
+    targetClusterSize = clusterCounts.get(requestedCluster) || 0;
+  }
+  const otherCells = Math.max(0, totalCells - targetClusterSize);
+
+  // Log the decision path
+  console.log('findMarkers: Decision path', {
+    usePrecomputedClusters,
+    hasRnaMarkers: !!rnaMarkers,
+    targetClusterSize,
+    otherCells,
+  });
+
+  if (usePrecomputedClusters || !rnaMarkers) {
+    // Compute marker statistics directly from expression matrix using current cluster assignments
+    // This is used when:
+    // 1. Using precomputed clusters (e.g., Xenium data) without bakana marker detection
+    // 2. Marker detection hasn't been run yet
+    // Note: For single-cell data with merged clusters, we still use bakana's marker statistics
+    // because the Wilcoxon test (which determines gene ranking) uses the current merged
+    // cluster assignments from currentResults.clusters.
+    const reason = usePrecomputedClusters ? 'precomputed clusters' : 'no marker detection';
+    console.log(`Computing marker statistics from expression matrix (reason: ${reason})...`);
+    self.postMessage({
+      type: 'STATUS_UPDATE',
+      message: 'Computing marker genes from expression data...',
+    });
+
+    // Initialize arrays for mean and detection statistics
+    meanTarget = new Float64Array(nGenes);
+    detectedTarget = new Float64Array(nGenes);
+    meanOther = new Float64Array(nGenes);
+    detectedOther = new Float64Array(nGenes);
+
+    // Compute mean expression and detection rate per cluster directly from matrix
+    // For each gene, iterate through cells and accumulate statistics
+    const targetCellCount = targetClusterSize;
+    const otherCellCount = otherCells;
+
+    // Build cell index lists for target and other clusters
+    // Use flexible matching to handle type differences (number vs string)
+    // For merged clusters, match against all cluster IDs in the target set
+    const targetIndices = [];
+    const otherIndices = [];
+    clusterAssignments.forEach((value, index) => {
+      // Match if value is in the target clusters set (handles merged clusters)
+      const matches = targetClustersSet.has(String(value));
+      if (matches) {
+        targetIndices.push(index);
+      } else {
+        otherIndices.push(index);
+      }
+    });
+
+    const matrixCols = isAtacMarkers ? atacFilteredCellCount : (normMatrix?.numberOfColumns?.() ?? 0);
+    const matrixRows = isAtacMarkers ? nGenes : (normMatrix?.numberOfRows?.() ?? 0);
+    console.log('findMarkers: Cell index counts:', {
+      targetIndices: targetIndices.length,
+      otherIndices: otherIndices.length,
+      requestedCluster,
+      sampleClusterValues: JSON.stringify(clusterAssignments.slice(0, 20)),
+      sampleTargetIndices: JSON.stringify(targetIndices.slice(0, 20)),
+      clustersLength: clusterAssignments.length,
+      normMatrixCols: matrixCols,
+      normMatrixRows: matrixRows,
+      MISMATCH: clusterAssignments.length !== matrixCols ? `CLUSTERS(${clusterAssignments.length}) != MATRIX(${matrixCols})` : 'OK',
+    });
+
+    // ATAC: single-pass over CSC for O(nnz) stats (avoids N row extractions)
+    if (isAtacMarkers && atacPeakMatrixRef?.getCSC) {
+      const csc = atacPeakMatrixRef.getCSC();
+      const { colPtr, rowIdx, values: cscValues } = csc;
+      const ncols = csc.ncols ?? (csc.numberOfColumns ? csc.numberOfColumns() : 0);
+
+      const colToCellIdx = new Int32Array(ncols);
+      colToCellIdx.fill(-1);
+      for (let i = 0; i < atacFilteredCellCount; i++) {
+        const col = atacFilteredColIndices[i];
+        if (col >= 0 && col < ncols) colToCellIdx[col] = i;
+      }
+
+      for (let j = 0; j < ncols; j++) {
+        const cellIdx = colToCellIdx[j];
+        if (cellIdx < 0) continue;
+        const inTarget = targetClustersSet.has(String(clusterAssignments[cellIdx]));
+        for (let p = colPtr[j]; p < colPtr[j + 1]; p++) {
+          const r = rowIdx[p];
+          const v = cscValues[p];
+          if (inTarget) {
+            meanTarget[r] += v;
+            if (v > 0) detectedTarget[r] += 1;
+          } else {
+            meanOther[r] += v;
+            if (v > 0) detectedOther[r] += 1;
+          }
+        }
+      }
+      for (let i = 0; i < nGenes; i++) {
+        meanTarget[i] = targetCellCount > 0 ? meanTarget[i] / targetCellCount : 0;
+        detectedTarget[i] = targetCellCount > 0 ? detectedTarget[i] / targetCellCount : 0;
+        meanOther[i] = otherCellCount > 0 ? meanOther[i] / otherCellCount : 0;
+        detectedOther[i] = otherCellCount > 0 ? detectedOther[i] / otherCellCount : 0;
+      }
+      console.log(`Computed ATAC marker statistics (single-pass over ${csc.values?.length ?? 0} nnz)`);
+    } else {
+      // Process each gene (RNA or when CSC single-pass not available)
+      for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
+        const row = await getGeneRow(geneIndex);
+
+        let sumTarget = 0;
+        let detectedCountTarget = 0;
+        for (const idx of targetIndices) {
+          const val = row[idx];
+          sumTarget += val;
+          if (val > 0) detectedCountTarget++;
+        }
+        meanTarget[geneIndex] = targetCellCount > 0 ? sumTarget / targetCellCount : 0;
+        detectedTarget[geneIndex] = targetCellCount > 0 ? detectedCountTarget / targetCellCount : 0;
+
+        let sumOther = 0;
+        let detectedCountOther = 0;
+        for (const idx of otherIndices) {
+          const val = row[idx];
+          sumOther += val;
+          if (val > 0) detectedCountOther++;
+        }
+        meanOther[geneIndex] = otherCellCount > 0 ? sumOther / otherCellCount : 0;
+        detectedOther[geneIndex] = otherCellCount > 0 ? detectedCountOther / otherCellCount : 0;
+      }
+    }
+
+    console.log(`Computed marker statistics: ${targetIndices.length} cells in cluster ${requestedCluster}, ${otherIndices.length} in other clusters`);
+
+    // Debug: Log stats for first few genes to verify computation
+    console.log('findMarkers DEBUG - First 5 genes stats:', {
+      gene0: { mean: meanTarget[0], detected: detectedTarget[0], meanOther: meanOther[0] },
+      gene1: { mean: meanTarget[1], detected: detectedTarget[1], meanOther: meanOther[1] },
+      gene2: { mean: meanTarget[2], detected: detectedTarget[2], meanOther: meanOther[2] },
+    });
+  } else {
+    // Use bakana's pre-computed marker statistics
+    // But check if clusters have been merged - if so, compute stats from matrix
+    // to get accurate pct.1/pct.2 values for the merged population
+    const bakanaGroupCount = typeof rnaMarkers.numberOfGroups === 'function'
+      ? rnaMarkers.numberOfGroups()
+      : uniqueClusters.length;
+
+    const clustersWereMerged = bakanaGroupCount !== uniqueClusters.length;
+
+    // Also treat as merged if multiple cluster IDs were passed (visual merge without data merge)
+    const needsRecomputation = clustersWereMerged || isMergedClusterRequest;
+
+    if (needsRecomputation) {
+      // Clusters were merged OR multiple clusters renamed to same label - compute statistics
+      // directly from expression matrix to get accurate values for the merged population
+      const reason = isMergedClusterRequest ? 'multiple clusters renamed to same label' : 'clusters were merged';
+      console.log(`Computing stats from expression matrix (reason: ${reason})`);
+
+      meanTarget = new Float64Array(nGenes);
+      detectedTarget = new Float64Array(nGenes);
+      meanOther = new Float64Array(nGenes);
+      detectedOther = new Float64Array(nGenes);
+
+      // Build cell indices for the merged cluster
+      // For merged clusters (multiple IDs renamed to same label), match against all target IDs
+      const targetIndices = [];
+      const otherIndicesForStats = [];
+      clusterAssignments.forEach((value, index) => {
+        const matches = targetClustersSet.has(String(value));
+        if (matches) {
+          targetIndices.push(index);
+        } else {
+          otherIndicesForStats.push(index);
+        }
+      });
+
+      const targetCellCount = targetIndices.length;
+      const otherCellCount = otherIndicesForStats.length;
+
+      // Process each gene to compute actual statistics
+      for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
+        const row = await getGeneRow(geneIndex);
+
+        // Compute statistics for target (merged) cluster
+        let sumTarget = 0;
+        let detectedCountTarget = 0;
+        for (const idx of targetIndices) {
+          const val = row[idx];
+          sumTarget += val;
+          if (val > 0) detectedCountTarget++;
+        }
+        meanTarget[geneIndex] = targetCellCount > 0 ? sumTarget / targetCellCount : 0;
+        detectedTarget[geneIndex] = targetCellCount > 0 ? detectedCountTarget / targetCellCount : 0;
+
+        // Compute statistics for other clusters combined
+        let sumOther = 0;
+        let detectedCountOther = 0;
+        for (const idx of otherIndicesForStats) {
+          const val = row[idx];
+          sumOther += val;
+          if (val > 0) detectedCountOther++;
+        }
+        meanOther[geneIndex] = otherCellCount > 0 ? sumOther / otherCellCount : 0;
+        detectedOther[geneIndex] = otherCellCount > 0 ? detectedCountOther / otherCellCount : 0;
+      }
+
+      console.log(`Computed merged cluster stats: ${targetCellCount} cells in cluster, ${otherCellCount} in other clusters`);
+    } else {
+      // No merge - use bakana's pre-computed statistics directly
+      groupCount = bakanaGroupCount;
+
+      if (
+        typeof requestedCluster !== 'number' ||
+        requestedCluster < 0 ||
+        requestedCluster >= groupCount
+      ) {
+        throw new Error(`Requested cluster ${requestedCluster} is out of range of computed markers.`);
+      }
+
+      meanTarget = rnaMarkers.mean(requestedCluster, { copy: true });
+      detectedTarget = rnaMarkers.detected(requestedCluster, { copy: true });
+
+      meanOther = new Float64Array(nGenes);
+      detectedOther = new Float64Array(nGenes);
+
+      for (let g = 0; g < groupCount; g++) {
+        if (g === requestedCluster || String(g) === String(requestedCluster)) {
+          continue;
+        }
+        const weight = clusterCounts.get(g) || 0;
+        if (!weight) {
+          continue;
+        }
+        const meanG = rnaMarkers.mean(g, { copy: true });
+        const detectedG = rnaMarkers.detected(g, { copy: true });
+        for (let i = 0; i < nGenes; i++) {
+          meanOther[i] += meanG[i] * weight;
+          detectedOther[i] += detectedG[i] * weight;
+        }
+      }
+
+      if (otherCells > 0) {
+        for (let i = 0; i < nGenes; i++) {
+          meanOther[i] /= otherCells;
+          detectedOther[i] /= otherCells;
+        }
+      }
+    }
+  }
+
+  // Build cell index lists for Wilcoxon test
+  // Use flexible matching to handle type differences (number vs string)
+  // For merged clusters, match against all cluster IDs in the target set
+  const inIndices = [];
+  const outIndices = [];
+  clusterAssignments.forEach((value, index) => {
+    const matches = targetClustersSet.has(String(value));
+    if (matches) {
+      inIndices.push(index);
+    } else {
+      outIndices.push(index);
+    }
+  });
+
+  console.log('findMarkers: Wilcoxon indices:', {
+    inIndices: inIndices.length,
+    outIndices: outIndices.length,
+  });
+
+  const wilcoxonWorkspace = createWilcoxonWorkspace(inIndices.length, outIndices.length);
+  const pValues = new Float64Array(nGenes);
+  pValues.fill(1); // Default for skipped peaks
+
+  // ATAC: pre-filter to peaks with >0.1% detection to avoid Wilcoxon on 100k+ peaks
+  const MIN_DETECTION = 0.001;
+  let genesToIterate;
+  if (isAtacMarkers && nGenes > 10000) {
+    const peakIndicesToTest = [];
+    for (let i = 0; i < nGenes; i++) {
+      if ((detectedTarget[i] ?? 0) > MIN_DETECTION || (detectedOther[i] ?? 0) > MIN_DETECTION) {
+        peakIndicesToTest.push(i);
+      }
+    }
+    console.log(`findMarkers: ATAC pre-filter: testing ${peakIndicesToTest.length}/${nGenes} peaks (detection > ${MIN_DETECTION * 100}%)`);
+    genesToIterate = peakIndicesToTest;
+  } else {
+    genesToIterate = Array.from({ length: nGenes }, (_, i) => i);
+  }
+  const BATCH_SIZE = 2000;
+  const featureLabel = isAtacMarkers ? 'peaks' : 'genes';
+
+  for (let k = 0; k < genesToIterate.length; k++) {
+    if (k > 0 && k % BATCH_SIZE === 0) {
+      await new Promise((r) => setTimeout(r, 0));
+      self.postMessage({
+        type: 'STATUS_UPDATE',
+        message: `Finding marker ${featureLabel}... ${k}/${genesToIterate.length}`,
+      });
+    }
+    const geneIndex = genesToIterate[k];
+    const row = await getGeneRow(geneIndex);
+    const p = wilcoxonRankSumPValue(row, inIndices, outIndices, wilcoxonWorkspace);
+    pValues[geneIndex] = Number.isFinite(p) && p > 0 ? p : Number.MIN_VALUE;
+  }
+
+  const adjustedP = benjaminiHochberg(Array.from(pValues));
+  const pseudoCount = 1e-6;
+  const rows = new Array(nGenes);
+
+  for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
+    const meanIn = meanTarget[geneIndex];
+    const meanOut = otherCells > 0 ? meanOther[geneIndex] : 0;
+    const pctIn = detectedTarget[geneIndex];
+    const pctOut = otherCells > 0 ? detectedOther[geneIndex] : 0;
+
+    const avgLogFC = Math.log((meanIn + pseudoCount) / (meanOut + pseudoCount));
+
+    rows[geneIndex] = {
+      gene: geneNames[geneIndex] ?? `Gene ${geneIndex}`,
+      p_val: pValues[geneIndex],
+      avg_logFC: avgLogFC,
+      pct1: pctIn,
+      pct2: pctOut,
+      p_val_adj: adjustedP[geneIndex],
+      mean_in: meanIn,
+      mean_out: meanOut,
+    };
+  }
+
+  // Keep only upregulated markers (positive logFC = higher in target cluster).
+  // The Wilcoxon test floors p-values of strongly downregulated genes to
+  // Number.MIN_VALUE. Because that is strictly smaller than the p-values of
+  // moderately upregulated genes, downregulated markers sort first even though
+  // they have negative logFC — the opposite of what "find markers" means.
+  const positiveRows = rows.filter(r => r.avg_logFC > 0);
+  positiveRows.sort((a, b) => {
+    if (a.p_val !== b.p_val) return a.p_val - b.p_val;
+    return b.avg_logFC - a.avg_logFC;
+  });
+
+  // Debug: Log top 5 markers being returned
+  console.log('findMarkers DEBUG - Top 5 markers:', positiveRows.slice(0, 5).map(r => ({
+    gene: r.gene,
+    pval: r.p_val,
+    logFC: r.avg_logFC,
+    pct1: r.pct1,
+    pct2: r.pct2,
+  })));
+
+  const maxRows = 200;
+  let pathwayEnrichment = null;
+  let structureEnrichment = null;
+  if (spatialRegionMode && !isAtacMarkers) {
+    try {
+      self.postMessage({
+        type: 'STATUS_UPDATE',
+        message: 'Running structure and pathway enrichment for selected-region markers...',
+      });
+      const geneSetEnrichment = await computeSelectedRegionGeneSetEnrichments(positiveRows, geneNames, state);
+      structureEnrichment = geneSetEnrichment.structureEnrichment;
+      pathwayEnrichment = geneSetEnrichment.pathwayEnrichment;
+    } catch (pathwayError) {
+      console.warn('Selected-region gene-set enrichment failed:', pathwayError);
+      structureEnrichment = {
+        available: false,
+        reason: 'structure_enrichment_failed',
+        error: pathwayError.message,
+        pathways: [],
+        themes: [],
+      };
+      pathwayEnrichment = {
+        available: false,
+        reason: 'pathway_enrichment_failed',
+        error: pathwayError.message,
+        pathways: [],
+        themes: [],
+      };
+    }
+  }
+
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: {
+      type: 'markers',
+      comparison: spatialRegionMode ? 'selected_spatial_region_vs_other_cells' : undefined,
+      selectedRegion: spatialRegionMode ? {
+        cellCount: targetClusterSize,
+        otherCells,
+        format: params.regionFormat || loadedData.info?.format || loadedData.info?.modality || null,
+        hasHistologyImage: !!params.hasHistologyImage,
+      } : undefined,
+      suppressNeutralSummary: spatialRegionMode ? !!params.suppressNeutralSummary : undefined,
+      multiomeTarget: multiomeTarget || null,
+      featureType: isAtacMarkers ? 'peak' : 'gene',
+      cluster: spatialRegionMode ? 'Selected spatial region' : requestedCluster,
+      // Include info about merged clusters
+      mergedClusters: isMergedClusterRequest ? targetClusterIds : null,
+      isMergedCluster: isMergedClusterRequest,
+      totalCells,
+      clusterSize: targetClusterSize,
+      otherCells,
+      totalGenes: nGenes,
+      method: 'wilcoxon_rank_sum',
+      logFCPseudoCount: pseudoCount,
+      structureEnrichment,
+      pathwayEnrichment,
+      markers: positiveRows.slice(0, maxRows),
+      availableClusters: uniqueClusters,
+    },
+  });
+}
+
+async function computeSelectedRegionGeneSetEnrichments(markerRows, geneNames, state) {
+  const selectedMarkerNames = [];
+  for (const row of markerRows.slice(0, 100)) {
+    if (!row?.gene || !(row.avg_logFC > 0)) continue;
+    if (Number.isFinite(row.p_val_adj) && row.p_val_adj > 0.1 && selectedMarkerNames.length >= 25) continue;
+    const gene = String(row.gene).trim();
+    if (gene) selectedMarkerNames.push(gene);
+  }
+
+  const queryGenes = Array.from(new Set(selectedMarkerNames.map(normalizePathwayGene).filter(Boolean)));
+  if (queryGenes.length < 5) {
+    const notEnough = {
+      available: false,
+      reason: 'not_enough_mapped_marker_genes',
+      queryGenes,
+      pathways: [],
+      themes: [],
+    };
+    return { structureEnrichment: notEnough, pathwayEnrichment: notEnough };
+  }
+
+  const enrichrUserListId = await submitEnrichrGeneList(queryGenes, 'CellPilot selected spatial region markers');
+
+  return {
+    structureEnrichment: await computeEnrichrLibraryEnrichment(enrichrUserListId, queryGenes, {
+      libraryName: SELECTED_REGION_CELLMARKER_LIBRARY,
+      displayName: 'CellMarker 2024',
+      reasonPrefix: 'cellmarker',
+      method: 'enrichr_overrepresentation',
+      source: 'Enrichr CellMarker 2024',
+      maxThemes: 8,
+      maxRawTerms: 80,
+    }),
+    pathwayEnrichment: await computeEnrichrLibraryEnrichment(enrichrUserListId, queryGenes, {
+      libraryName: SELECTED_REGION_WIKIPATHWAYS_LIBRARY,
+      displayName: 'WikiPathways 2024 Human',
+      reasonPrefix: 'wikipathways',
+      method: 'enrichr_overrepresentation',
+      source: 'Enrichr WikiPathways 2024 Human',
+      maxThemes: 8,
+      maxRawTerms: 80,
+    }),
+  };
+}
+
+async function computeEnrichrLibraryEnrichment(userListId, queryGenes, options) {
+  try {
+    const url = `${ENRICHR_BASE_URL}/enrich?userListId=${encodeURIComponent(userListId)}&backgroundType=${encodeURIComponent(options.libraryName)}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Enrichr ${options.displayName} request failed (${response.status})`);
+    }
+
+    const payload = await response.json();
+    const rows = Array.isArray(payload?.[options.libraryName]) ? payload[options.libraryName] : [];
+    if (!rows.length) {
+      return {
+        available: false,
+        reason: `no_enrichr_${options.reasonPrefix}_results`,
+        method: options.method,
+        source: options.source,
+        queryGenes,
+        collections: [options.displayName],
+        pathways: [],
+        themes: [],
+      };
+    }
+
+    const raw = rows.map(row => ({
+      collection: options.displayName,
+      term: row[1],
+      description: '',
+      pValue: Number(row[2]),
+      enrichrAdjustedPValue: Number(row[6]),
+      combinedScore: Number(row[4]),
+      overlapGenes: Array.isArray(row[5])
+        ? row[5].map(gene => String(gene).trim()).filter(Boolean)
+        : String(row[5] || '').split(/[;,]/).map(gene => gene.trim()).filter(Boolean),
+      overlapCount: Array.isArray(row[5]) ? row[5].length : String(row[5] || '').split(/[;,]/).filter(Boolean).length,
+      querySize: queryGenes.length,
+      geneSetSize: null,
+      backgroundSize: null,
+    })).filter(item => item.term && Number.isFinite(item.pValue));
+
+    return summarizePathwayEnrichment(raw, {
+      method: options.method,
+      source: options.source,
+      queryGenes,
+      backgroundSize: null,
+      collections: [options.displayName],
+      maxThemes: options.maxThemes,
+      maxRawTerms: options.maxRawTerms,
+    });
+  } catch (error) {
+    console.warn(`Selected-region Enrichr ${options.displayName} enrichment failed:`, error);
+    return {
+      available: false,
+      reason: `enrichr_${options.reasonPrefix}_failed`,
+      error: error.message,
+      method: options.method,
+      source: options.source,
+      queryGenes,
+      collections: [options.displayName],
+      pathways: [],
+      themes: [],
+    };
+  }
+}
+
+async function submitEnrichrGeneList(queryGenes, description) {
+  const body = new FormData();
+  body.append('list', queryGenes.join('\n'));
+  body.append('description', description);
+
+  const response = await fetch(`${ENRICHR_BASE_URL}/addList`, {
+    method: 'POST',
+    body,
+  });
+  if (!response.ok) {
+    throw new Error(`Enrichr addList failed (${response.status})`);
+  }
+
+  const payload = await response.json();
+  if (payload?.userListId == null) {
+    throw new Error('Enrichr addList response did not include a userListId');
+  }
+  return payload.userListId;
+}
+
+function computeGeneSetEnrichmentForCollections(context, options) {
+  const wantedCollections = new Set();
+  for (let i = 0; i < context.collectionNames.length; i++) {
+    const text = `${context.collectionNames[i] || ''} ${context.collectionDescriptions[i] || ''}`;
+    if (options.collectionPredicate(text)) {
+      wantedCollections.add(i);
+    }
+  }
+
+  if (!wantedCollections.size) {
+    return {
+      available: false,
+      reason: `requested_${options.reasonPrefix}_collections_not_found`,
+      collections: context.collectionNames,
+      pathways: [],
+      themes: [],
+    };
+  }
+
+  const geneSets = [];
+  const retainedSetIds = [];
+  const universeSet = new Set();
+  for (let setId = 0; setId < context.setNames.length; setId++) {
+    if (!wantedCollections.has(context.setCollections[setId])) continue;
+    const indices = Array.from(context.featureSetState.fetchFeatureSetIndices(setId) || []);
+    if (indices.length < 5 || indices.length > options.maxSetSize) continue;
+    geneSets.push(Int32Array.from(indices));
+    retainedSetIds.push(setId);
+    for (const index of indices) universeSet.add(index);
+  }
+
+  const queryInUniverse = context.selectedMarkerIndices.filter(index => universeSet.has(index));
+  const retainedCollectionNames = context.collectionNames.filter((_, index) => wantedCollections.has(index));
+  if (queryInUniverse.length < 8 || !geneSets.length) {
+    return {
+      available: false,
+      reason: `not_enough_marker_genes_in_${options.reasonPrefix}_universe`,
+      queryGenes: context.selectedMarkerNames,
+      backgroundSize: universeSet.size || context.featureSetState.fetchUniverseSize?.() || null,
+      collections: retainedCollectionNames,
+      pathways: [],
+      themes: [],
+    };
+  }
+
+  const tested = scran.testGeneSetEnrichment(
+    Int32Array.from(Array.from(new Set(queryInUniverse))),
+    geneSets,
+    Math.max(context.geneNames.length, ...Array.from(universeSet)) + 1
+  );
+  const querySet = new Set(queryInUniverse);
+  const raw = [];
+  for (let i = 0; i < retainedSetIds.length; i++) {
+    const overlapCount = tested.count[i];
+    if (overlapCount < 3) continue;
+    const setId = retainedSetIds[i];
+    const overlapGenes = Array.from(geneSets[i])
+      .filter(index => querySet.has(index))
+      .map(index => context.geneNames[index])
+      .filter(Boolean);
+    raw.push({
+      collection: context.collectionNames[context.setCollections[setId]] || 'Gene set collection',
+      term: context.setNames[setId],
+      description: context.setDescriptions[setId] || '',
+      pValue: tested.pvalue[i],
+      overlapCount,
+      querySize: queryInUniverse.length,
+      geneSetSize: tested.size[i],
+      backgroundSize: universeSet.size || context.featureSetState.fetchUniverseSize?.() || null,
+      overlapGenes,
+    });
+  }
+
+  return summarizePathwayEnrichment(raw, {
+    method: options.method,
+    source: options.source,
+    queryGenes: context.selectedMarkerNames,
+    backgroundSize: universeSet.size || context.featureSetState.fetchUniverseSize?.() || null,
+    collections: retainedCollectionNames,
+    maxThemes: options.maxThemes,
+    maxRawTerms: options.maxRawTerms,
+  });
+}
+
+function isFunctionalPathwayCollection(text) {
+  return /hallmark/i.test(text) ||
+    /reactome/i.test(text) ||
+    /(go|gene ontology).*biological process/i.test(text) ||
+    /biological process/i.test(text);
+}
+
+function isCellStructureCollection(text) {
+  return /\bc8\b/i.test(text) ||
+    /cell[\s_-]*type/i.test(text) ||
+    /cell[\s_-]*marker/i.test(text) ||
+    /single[\s_-]*cell/i.test(text) ||
+    /tissue[\s_-]*(signature|marker|specific|structure|atlas)/i.test(text) ||
+    /human protein atlas/i.test(text) ||
+    /panglao/i.test(text) ||
+    /tabula/i.test(text);
+}
+
+function normalizePathwayGene(gene) {
+  return String(gene || '').trim().toUpperCase();
+}
+
+/**
+ * Differential gene expression between two samples within a cluster (integration only).
+ * Uses Wilcoxon rank-sum test; returns DEG table and data for volcano plot.
+ */
+async function degBetweenSamples(params = {}) {
+  if (!loadedData || !loadedData.state) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+  const modality = loadedData.info?.modality;
+  if (modality !== 'integration' && modality !== 'xenium-integration' && modality !== 'visium-hd-integration' && modality !== 'merfish-integration') {
+    throw new Error('DEG between samples is only available for multi-sample integration data (scRNA, Xenium, Visium HD, or MERFISH integration).');
+  }
+
+  const { cluster, sample1, sample2 } = params;
+  const datasetNames = loadedData.info?.datasetNames;
+  if (!Array.isArray(datasetNames) || datasetNames.length < 2) {
+    throw new Error('Integration dataset names are missing or insufficient.');
+  }
+
+  const state = loadedData.state;
+  const normMatrix = state.rna_normalization.fetchNormalizedMatrix();
+  const nCells = normMatrix.numberOfColumns();
+  const nGenes = normMatrix.numberOfRows();
+  const integrationMeta = getIntegrationViewsForPlot(nCells);
+  if (!integrationMeta) {
+    throw new Error('Could not get per-sample cell indices for integration.');
+  }
+  const { integrationViews, datasetNames: names } = integrationMeta;
+
+  const resolveSampleName = (s) => {
+    if (!s || typeof s !== 'string') return null;
+    const t = s.trim().toLowerCase();
+    const m1 = t.match(/sample\s*1/);
+    const m2 = t.match(/sample\s*2/);
+    if (m1) return names[0];
+    if (m2) return names[1];
+    const idx = names.findIndex((n) => n.toLowerCase() === t);
+    if (idx >= 0) return names[idx];
+    if (t === '1') return names[0];
+    if (t === '2') return names[1];
+    return null;
+  };
+
+  const s1 = resolveSampleName(sample1) || names[0];
+  const s2 = resolveSampleName(sample2) || names[1];
+  if (s1 === s2) {
+    throw new Error(`Sample 1 and sample 2 must be different. Got: "${s1}". Available: ${names.join(', ')}`);
+  }
+
+  const indices1 = integrationViews[s1]?.indices ?? [];
+  const indices2 = integrationViews[s2]?.indices ?? [];
+  if (!indices1.length || !indices2.length) {
+    throw new Error(`Missing cell indices for samples. Available: ${Object.keys(integrationViews).join(', ')}`);
+  }
+
+  let clusterAssignments = currentResults.clusters;
+  if (!clusterAssignments || !clusterAssignments.length) {
+    const fetched = state.choose_clustering.fetchClusters();
+    if (!fetched || !fetched.length) {
+      await runClusteringAndUMAP(false);
+      clusterAssignments = Array.from(state.choose_clustering.fetchClusters());
+    } else {
+      clusterAssignments = Array.from(fetched);
+    }
+    currentResults.clusters = clusterAssignments;
+  }
+  if (!clusterAssignments || clusterAssignments.length !== nCells) {
+    throw new Error('Cluster assignments unavailable or length mismatch.');
+  }
+
+  const uniqueClusters = Array.from(new Set(clusterAssignments));
+  uniqueClusters.sort((a, b) => {
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    return String(a).localeCompare(String(b));
+  });
+
+  let requestedCluster = cluster;
+  if (requestedCluster === undefined || requestedCluster === null || requestedCluster === '') {
+    requestedCluster = uniqueClusters[0];
+  }
+  let matchedCluster = uniqueClusters.find((c) => c === requestedCluster || String(c) === String(requestedCluster));
+  if (matchedCluster === undefined && typeof requestedCluster === 'string') {
+    const numMatch = requestedCluster.trim().match(/(\d+)/);
+    if (numMatch) {
+      const numVal = Number(numMatch[1]);
+      matchedCluster = uniqueClusters.find((c) => c === numVal || String(c) === String(numVal));
+      if (matchedCluster !== undefined) requestedCluster = matchedCluster;
+    }
+  }
+  if (matchedCluster === undefined && typeof requestedCluster === 'number') {
+    matchedCluster = uniqueClusters.find((c) => c === requestedCluster || Number(c) === requestedCluster);
+    if (matchedCluster !== undefined) requestedCluster = matchedCluster;
+  }
+  if (matchedCluster === undefined) {
+    throw new Error(`Cluster ${cluster} not found. Available: ${uniqueClusters.join(', ')}`);
+  }
+  requestedCluster = matchedCluster;
+  const targetClusterSet = new Set([String(requestedCluster)]);
+
+  const inClusterIndices = [];
+  for (let i = 0; i < nCells; i++) {
+    if (targetClusterSet.has(String(clusterAssignments[i]))) inClusterIndices.push(i);
+  }
+
+  const set1 = new Set(indices1);
+  const set2 = new Set(indices2);
+  const inIndices = inClusterIndices.filter((i) => set1.has(i));
+  const outIndices = inClusterIndices.filter((i) => set2.has(i));
+  if (inIndices.length === 0 || outIndices.length === 0) {
+    throw new Error(
+      `Not enough cells in cluster ${requestedCluster} for both samples. ` +
+      `Sample "${s1}": ${inIndices.length} cells. Sample "${s2}": ${outIndices.length} cells.`
+    );
+  }
+
+  self.postMessage({ type: 'STATUS_UPDATE', message: `Computing DEG in cluster ${requestedCluster} (${s1} vs ${s2})...` });
+
+  const { geneNames } = await ensureGeneLookup();
+  const pseudoCount = 1e-6;
+  const mean1 = new Float64Array(nGenes);
+  const mean2 = new Float64Array(nGenes);
+  const detected1 = new Float64Array(nGenes);
+  const detected2 = new Float64Array(nGenes);
+
+  for (let g = 0; g < nGenes; g++) {
+    const row = normMatrix.row(g, { asTypedArray: true });
+    let sum1 = 0, sum2 = 0;
+    let d1 = 0, d2 = 0;
+    for (const i of inIndices) {
+      sum1 += row[i];
+      if (row[i] > 0) d1++;
+    }
+    for (const i of outIndices) {
+      sum2 += row[i];
+      if (row[i] > 0) d2++;
+    }
+    mean1[g] = inIndices.length ? sum1 / inIndices.length : 0;
+    mean2[g] = outIndices.length ? sum2 / outIndices.length : 0;
+    detected1[g] = inIndices.length ? d1 / inIndices.length : 0;
+    detected2[g] = outIndices.length ? d2 / outIndices.length : 0;
+  }
+
+  const wilcoxonWorkspace = createWilcoxonWorkspace(inIndices.length, outIndices.length);
+  const pValues = new Float64Array(nGenes);
+  for (let g = 0; g < nGenes; g++) {
+    const row = normMatrix.row(g, { asTypedArray: true });
+    const p = wilcoxonRankSumPValue(row, inIndices, outIndices, wilcoxonWorkspace);
+    pValues[g] = Number.isFinite(p) && p > 0 ? p : Number.MIN_VALUE;
+  }
+  const adjustedP = benjaminiHochberg(Array.from(pValues));
+
+  const rows = [];
+  for (let g = 0; g < nGenes; g++) {
+    const m1 = mean1[g];
+    const m2 = mean2[g];
+    const avgLogFC = Math.log((m1 + pseudoCount) / (m2 + pseudoCount));
+    rows.push({
+      gene: geneNames[g] ?? `Gene_${g}`,
+      p_val: pValues[g],
+      avg_logFC: avgLogFC,
+      pct1: detected1[g],
+      pct2: detected2[g],
+      p_val_adj: adjustedP[g],
+      mean_in: m1,
+      mean_out: m2,
+    });
+  }
+  // DEG between samples: keep both directions but sort by descending logFC
+  // so upregulated genes in sample1 appear first.
+  rows.sort((a, b) => {
+    if (a.p_val !== b.p_val) return a.p_val - b.p_val;
+    return b.avg_logFC - a.avg_logFC;
+  });
+
+  const maxRows = 200;
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: {
+      type: 'deg_between_samples',
+      cluster: requestedCluster,
+      sample1: s1,
+      sample2: s2,
+      markers: rows.slice(0, maxRows),
+      allMarkers: rows,
+      totalGenes: nGenes,
+      method: 'wilcoxon_rank_sum',
+      clusterSizeSample1: inIndices.length,
+      clusterSizeSample2: outIndices.length,
+      datasetNames: names,
+    },
+  });
+}
+
+/**
+ * Differential peak accessibility between two samples within a cluster (atac-integration only).
+ * Same interface as degBetweenSamples but uses peak matrix; returns table + volcano data with featureType: 'peak'.
+ */
+async function degPeaksBetweenSamples(params = {}) {
+  if (!loadedData) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+  if (loadedData.info?.modality !== 'atac-integration') {
+    throw new Error('Differential peaks between samples is only available for scATAC-seq multi-sample integration.');
+  }
+
+  const peakMatrix = loadedData.atacPeakMatrix;
+  const peakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
+  const nCells = loadedData.cellBarcodes?.length ?? peakMatrix?.numberOfColumns?.() ?? 0;
+  const integrationViews = loadedData.integrationViews;
+  const datasetNames = loadedData.info?.datasetNames;
+
+  if (!peakMatrix || !peakNames.length || nCells === 0) {
+    throw new Error('Peak matrix not available for differential peak analysis.');
+  }
+  if (!integrationViews || typeof integrationViews !== 'object' || !Array.isArray(datasetNames) || datasetNames.length < 2) {
+    throw new Error('Integration views or dataset names missing for differential peak analysis.');
+  }
+
+  const names = datasetNames;
+  const { cluster, sample1, sample2 } = params;
+
+  const resolveSampleName = (s) => {
+    if (!s || typeof s !== 'string') return null;
+    const t = s.trim().toLowerCase();
+    const m1 = t.match(/sample\s*1/);
+    const m2 = t.match(/sample\s*2/);
+    if (m1) return names[0];
+    if (m2) return names[1];
+    const idx = names.findIndex((n) => n.toLowerCase() === t);
+    if (idx >= 0) return names[idx];
+    if (t === '1') return names[0];
+    if (t === '2') return names[1];
+    return null;
+  };
+
+  const s1 = resolveSampleName(sample1) || names[0];
+  const s2 = resolveSampleName(sample2) || names[1];
+  if (s1 === s2) {
+    throw new Error(`Sample 1 and sample 2 must be different. Got: "${s1}". Available: ${names.join(', ')}`);
+  }
+
+  const indices1 = integrationViews[s1]?.indices ?? [];
+  const indices2 = integrationViews[s2]?.indices ?? [];
+  if (!indices1.length || !indices2.length) {
+    throw new Error(`Missing cell indices for samples. Available: ${Object.keys(integrationViews).join(', ')}`);
+  }
+
+  let clusterAssignments = currentResults.clusters;
+  if (!clusterAssignments || !clusterAssignments.length || clusterAssignments.length !== nCells) {
+    throw new Error('Cluster assignments unavailable or length mismatch. Please run ATAC integration first.');
+  }
+
+  const uniqueClusters = Array.from(new Set(clusterAssignments));
+  uniqueClusters.sort((a, b) => {
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    return String(a).localeCompare(String(b));
+  });
+
+  let requestedCluster = cluster;
+  if (requestedCluster === undefined || requestedCluster === null || requestedCluster === '') {
+    requestedCluster = uniqueClusters[0];
+  }
+  let matchedCluster = uniqueClusters.find((c) => c === requestedCluster || String(c) === String(requestedCluster));
+  if (matchedCluster === undefined && typeof requestedCluster === 'string') {
+    const numMatch = requestedCluster.trim().match(/(\d+)/);
+    if (numMatch) {
+      const numVal = Number(numMatch[1]);
+      matchedCluster = uniqueClusters.find((c) => c === numVal || String(c) === String(numVal));
+      if (matchedCluster !== undefined) requestedCluster = matchedCluster;
+    }
+  }
+  if (matchedCluster === undefined && typeof requestedCluster === 'number') {
+    matchedCluster = uniqueClusters.find((c) => c === requestedCluster || Number(c) === requestedCluster);
+    if (matchedCluster !== undefined) requestedCluster = matchedCluster;
+  }
+  if (matchedCluster === undefined) {
+    throw new Error(`Cluster ${cluster} not found. Available: ${uniqueClusters.join(', ')}`);
+  }
+  requestedCluster = matchedCluster;
+  const targetClusterSet = new Set([String(requestedCluster)]);
+
+  const inClusterIndices = [];
+  for (let i = 0; i < nCells; i++) {
+    if (targetClusterSet.has(String(clusterAssignments[i]))) inClusterIndices.push(i);
+  }
+
+  const set1 = new Set(indices1);
+  const set2 = new Set(indices2);
+  const inIndices = inClusterIndices.filter((i) => set1.has(i));
+  const outIndices = inClusterIndices.filter((i) => set2.has(i));
+  if (inIndices.length === 0 || outIndices.length === 0) {
+    throw new Error(
+      `Not enough cells in cluster ${requestedCluster} for both samples. ` +
+      `Sample "${s1}": ${inIndices.length} cells. Sample "${s2}": ${outIndices.length} cells.`
+    );
+  }
+
+  const nGenes = peakNames.length;
+  self.postMessage({ type: 'STATUS_UPDATE', message: `Computing differential peaks in cluster ${requestedCluster} (${s1} vs ${s2})...` });
+
+  const pseudoCount = 1e-6;
+  const mean1 = new Float64Array(nGenes);
+  const mean2 = new Float64Array(nGenes);
+  const detected1 = new Float64Array(nGenes);
+  const detected2 = new Float64Array(nGenes);
+
+  for (let g = 0; g < nGenes; g++) {
+    const row = peakMatrix.row(g);
+    let sum1 = 0, sum2 = 0;
+    let d1 = 0, d2 = 0;
+    for (const i of inIndices) {
+      const v = row[i] ?? 0;
+      sum1 += v;
+      if (v > 0) d1++;
+    }
+    for (const i of outIndices) {
+      const v = row[i] ?? 0;
+      sum2 += v;
+      if (v > 0) d2++;
+    }
+    mean1[g] = inIndices.length ? sum1 / inIndices.length : 0;
+    mean2[g] = outIndices.length ? sum2 / outIndices.length : 0;
+    detected1[g] = inIndices.length ? d1 / inIndices.length : 0;
+    detected2[g] = outIndices.length ? d2 / outIndices.length : 0;
+  }
+
+  const wilcoxonWorkspace = createWilcoxonWorkspace(inIndices.length, outIndices.length);
+  const pValues = new Float64Array(nGenes);
+  for (let g = 0; g < nGenes; g++) {
+    const row = peakMatrix.row(g);
+    const p = wilcoxonRankSumPValue(row, inIndices, outIndices, wilcoxonWorkspace);
+    pValues[g] = Number.isFinite(p) && p > 0 ? p : Number.MIN_VALUE;
+  }
+  const adjustedP = benjaminiHochberg(Array.from(pValues));
+
+  const rows = [];
+  for (let g = 0; g < nGenes; g++) {
+    const m1 = mean1[g];
+    const m2 = mean2[g];
+    const avgLogFC = Math.log((m1 + pseudoCount) / (m2 + pseudoCount));
+    rows.push({
+      gene: peakNames[g] ?? `Peak_${g}`,
+      p_val: pValues[g],
+      avg_logFC: avgLogFC,
+      pct1: detected1[g],
+      pct2: detected2[g],
+      p_val_adj: adjustedP[g],
+      mean_in: m1,
+      mean_out: m2,
+    });
+  }
+  rows.sort((a, b) => {
+    if (a.p_val !== b.p_val) return a.p_val - b.p_val;
+    return b.avg_logFC - a.avg_logFC;
+  });
+
+  const maxRows = 200;
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: {
+      type: 'deg_between_samples',
+      featureType: 'peak',
+      cluster: requestedCluster,
+      sample1: s1,
+      sample2: s2,
+      markers: rows.slice(0, maxRows),
+      allMarkers: rows,
+      totalGenes: nGenes,
+      method: 'wilcoxon_rank_sum',
+      clusterSizeSample1: inIndices.length,
+      clusterSizeSample2: outIndices.length,
+      datasetNames: names,
+    },
+  });
+}
+
+/**
+ * Cell fraction (proportion) per cluster per sample for integration. Returns counts and % for bar charts.
+ */
+async function plotCellFraction(params = {}) {
+  if (!loadedData || !loadedData.state) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+  if (loadedData.info?.modality !== 'integration') {
+    throw new Error('Cell fraction plot is only available for multi-sample integration data.');
+  }
+
+  const datasetNames = loadedData.info?.datasetNames;
+  if (!Array.isArray(datasetNames) || datasetNames.length === 0) {
+    throw new Error('Integration dataset names are missing.');
+  }
+
+  let clusterAssignments = currentResults.clusters;
+  if (!clusterAssignments || !clusterAssignments.length) {
+    const state = loadedData.state;
+    let fetched = state.choose_clustering.fetchClusters();
+    if (!fetched || !fetched.length) {
+      await runClusteringAndUMAP(false);
+      fetched = state.choose_clustering.fetchClusters();
+    }
+    clusterAssignments = Array.from(fetched);
+    currentResults.clusters = clusterAssignments;
+  }
+
+  const nCells = clusterAssignments.length;
+  const integrationMeta = getIntegrationViewsForPlot(nCells);
+  if (!integrationMeta) {
+    throw new Error('Could not get per-sample cell indices for integration.');
+  }
+  const { integrationViews, datasetNames: names } = integrationMeta;
+
+  self.postMessage({ type: 'STATUS_UPDATE', message: 'Computing cell fraction per cluster per sample...' });
+
+  const uniqueClusters = Array.from(new Set(clusterAssignments));
+  uniqueClusters.sort((a, b) => {
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    return String(a).localeCompare(String(b));
+  });
+
+  const perSample = {};
+  for (const sampleName of names) {
+    const indices = integrationViews[sampleName]?.indices ?? [];
+    const totalCells = indices.length;
+    const countByCluster = {};
+    for (const id of uniqueClusters) countByCluster[String(id)] = 0;
+    for (const i of indices) {
+      const c = String(clusterAssignments[i]);
+      if (countByCluster[c] !== undefined) countByCluster[c]++;
+    }
+    const entries = uniqueClusters.map((id) => ({
+      clusterId: typeof id === 'number' ? id : Number(id),
+      count: countByCluster[String(id)] ?? 0,
+    }));
+    perSample[sampleName] = { entries, totalCells };
+  }
+
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: {
+      type: 'cell_fraction',
+      datasetNames: names,
+      perSample,
+      clusterColorDomain: uniqueClusters.slice(),
+    },
+  });
+}
+
+async function regionComposition(params = {}) {
+  if (!loadedData || !loadedData.state) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+
+  const regionClusters = currentResults.regionClusters;
+  if (!regionClusters || !regionClusters.length) {
+    throw new Error('No region segmentation data available. Please run BANKSY region segmentation first.');
+  }
+
+  let clusterAssignments = currentResults.clusters;
+  if (!clusterAssignments || !clusterAssignments.length) {
+    const state = loadedData.state;
+    let fetched = state.choose_clustering.fetchClusters();
+    if (!fetched || !fetched.length) {
+      await runClusteringAndUMAP(false);
+      fetched = state.choose_clustering.fetchClusters();
+    }
+    clusterAssignments = Array.from(fetched);
+    currentResults.clusters = clusterAssignments;
+  }
+
+  const regionId = params.regionId != null ? Number(params.regionId) : null;
+  const availableRegions = Array.from(new Set(regionClusters.filter(r => r >= 0))).sort((a, b) => a - b);
+
+  if (regionId === null || !availableRegions.includes(regionId)) {
+    throw new Error(
+      `Invalid region ID "${params.regionId}". Available regions: ${availableRegions.join(', ')}`
+    );
+  }
+
+  self.postMessage({ type: 'STATUS_UPDATE', message: `Computing cell type composition for region ${regionId}...` });
+
+  const cellIndices = [];
+  for (let i = 0; i < regionClusters.length; i++) {
+    if (regionClusters[i] === regionId) cellIndices.push(i);
+  }
+
+  const countByCluster = {};
+  for (const i of cellIndices) {
+    if (i < clusterAssignments.length) {
+      const c = String(clusterAssignments[i]);
+      countByCluster[c] = (countByCluster[c] || 0) + 1;
+    }
+  }
+
+  const uniqueClusters = Object.keys(countByCluster)
+    .map(Number)
+    .sort((a, b) => a - b);
+
+  const totalCells = cellIndices.length;
+  const entries = uniqueClusters.map((id) => ({
+    clusterId: id,
+    count: countByCluster[String(id)] || 0,
+    fraction: totalCells > 0 ? (countByCluster[String(id)] || 0) / totalCells : 0,
+  }));
+
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: {
+      type: 'region_composition',
+      regionId,
+      entries,
+      totalCells,
+      availableRegions,
+      clusterColorDomain: uniqueClusters.slice(),
+    },
+  });
+}
+
+async function getClusterInfo(params = {}) {
+  if (!loadedData || !loadedData.state) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+
+  // Support both single cluster and array of clusters (for merged/renamed clusters)
+  const { cluster, clusters: mergedClusters, multiomeTarget } = params;
+  const state = loadedData.state;
+
+  // Get clusters – for multiome use RNA or ATAC precomputed so RNA view is unchanged after ATAC-only update
+  let clusterAssignments = currentResults.clusters;
+  if (loadedData?.info?.modality === 'multiome' && loadedData.precomputed) {
+    if (multiomeTarget === 'atac' && loadedData.precomputed.atacAligned) {
+      clusterAssignments = loadedData.precomputed.atacAligned.clusters;
+      console.log('Multiome: using ATAC clusters for cluster_info');
+    } else if (multiomeTarget !== 'atac' && loadedData.precomputed.rnaAligned?.clusters) {
+      clusterAssignments = loadedData.precomputed.rnaAligned.clusters;
+      console.log('Multiome: using RNA clusters for cluster_info');
+    }
+  }
+  if (!clusterAssignments || !clusterAssignments.length) {
+    let fetched = state.choose_clustering.fetchClusters();
+    if (!fetched || !fetched.length) {
+      await runClusteringAndUMAP(false);
+      fetched = state.choose_clustering.fetchClusters();
+    }
+    clusterAssignments = Array.from(fetched);
+    currentResults.clusters = clusterAssignments;
+  }
+
+  if (!clusterAssignments || !clusterAssignments.length) {
+    throw new Error('Cluster assignments are unavailable.');
+  }
+
+  const totalCells = clusterAssignments.length;
+  const uniqueClusters = Array.from(new Set(clusterAssignments));
+  uniqueClusters.sort((a, b) => {
+    if (typeof a === 'number' && typeof b === 'number') {
+      return a - b;
+    }
+    return String(a).localeCompare(String(b));
+  });
+
+  // Handle merged clusters (multiple cluster IDs renamed to the same label)
+  let targetClusterIds = [];
+  let isMergedClusterRequest = false;
+
+  if (Array.isArray(mergedClusters) && mergedClusters.length > 1) {
+    // Multiple clusters merged to the same label - treat as one group
+    isMergedClusterRequest = true;
+    targetClusterIds = mergedClusters.map(c => {
+      const numVal = typeof c === 'number' ? c : parseInt(c);
+      const matched = uniqueClusters.find(uc =>
+        uc === c || uc === numVal || String(uc) === String(c) || Number(uc) === numVal
+      );
+      return matched !== undefined ? matched : c;
+    });
+    console.log('getClusterInfo: Merged cluster request, target IDs:', targetClusterIds);
+  }
+
+  // Determine the requested cluster
+  let requestedCluster = cluster;
+  if (requestedCluster === undefined || requestedCluster === null || requestedCluster === '') {
+    requestedCluster = uniqueClusters[0];
+  }
+
+  // Match the cluster (handle number/string type differences)
+  let matchedCluster = uniqueClusters.find(c => c === requestedCluster);
+  if (matchedCluster === undefined && typeof requestedCluster === 'string') {
+    const numMatch = requestedCluster.trim().match(/(\d+)/);
+    if (numMatch) {
+      const numValue = Number(numMatch[1]);
+      matchedCluster = uniqueClusters.find(c =>
+        c === numValue || c === String(numValue) || String(c) === String(numValue)
+      );
+      if (matchedCluster !== undefined) {
+        requestedCluster = matchedCluster;
+      }
+    }
+  }
+  if (matchedCluster === undefined && typeof requestedCluster === 'number') {
+    matchedCluster = uniqueClusters.find(c =>
+      c === requestedCluster || c === String(requestedCluster) || Number(c) === requestedCluster
+    );
+    if (matchedCluster !== undefined) {
+      requestedCluster = matchedCluster;
+    }
+  }
+
+  if (matchedCluster === undefined && !isMergedClusterRequest) {
+    throw new Error(
+      `Cluster ${cluster} not found. Available clusters: ${uniqueClusters.join(', ')}`
+    );
+  }
+
+  requestedCluster = matchedCluster;
+
+  // For merged clusters, use targetClusterIds instead of single requestedCluster
+  const targetClustersSet = isMergedClusterRequest
+    ? new Set(targetClusterIds.map(c => String(c)))
+    : new Set([String(requestedCluster)]);
+
+  // Count cells in the target cluster(s)
+  let clusterCellCount = 0;
+  clusterAssignments.forEach((value) => {
+    if (targetClustersSet.has(String(value))) {
+      clusterCellCount++;
+    }
+  });
+
+  const clusterFraction = clusterCellCount / totalCells;
+
+  // Now get top 10 markers for this cluster
+  // We'll call findMarkers internally and extract the top 10
+  console.log(`getClusterInfo: Getting top markers for cluster ${requestedCluster}`);
+
+  // Get marker detection state
+  const markerState = state.marker_detection;
+  const normMatrix = state.rna_normalization.fetchNormalizedMatrix();
+  const { geneNames } = await ensureGeneLookup();
+  const nGenes = geneNames.length;
+
+  let markerResults = markerState?.fetchResults?.();
+  let rnaMarkers = markerResults?.RNA;
+
+  // Check if we need to compute from matrix or can use bakana stats
+  const hasPrecomputedData = loadedData.precomputed &&
+                              loadedData.precomputed.umap &&
+                              loadedData.precomputed.clusters;
+  const usePrecomputedClusters = hasPrecomputedData && !rnaMarkers;
+
+  let meanTarget, detectedTarget, meanOther, detectedOther;
+  const otherCells = totalCells - clusterCellCount;
+
+  if (usePrecomputedClusters || !rnaMarkers) {
+    // Compute from matrix
+    meanTarget = new Float64Array(nGenes);
+    detectedTarget = new Float64Array(nGenes);
+    meanOther = new Float64Array(nGenes);
+    detectedOther = new Float64Array(nGenes);
+
+    const targetIndices = [];
+    const otherIndices = [];
+    clusterAssignments.forEach((value, index) => {
+      if (targetClustersSet.has(String(value))) {
+        targetIndices.push(index);
+      } else {
+        otherIndices.push(index);
+      }
+    });
+
+    for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
+      const row = normMatrix.row(geneIndex, { asTypedArray: true });
+      let sumTarget = 0, detectedCountTarget = 0;
+      for (const idx of targetIndices) {
+        const val = row[idx];
+        sumTarget += val;
+        if (val > 0) detectedCountTarget++;
+      }
+      meanTarget[geneIndex] = targetIndices.length > 0 ? sumTarget / targetIndices.length : 0;
+      detectedTarget[geneIndex] = targetIndices.length > 0 ? detectedCountTarget / targetIndices.length : 0;
+
+      let sumOther = 0, detectedCountOther = 0;
+      for (const idx of otherIndices) {
+        const val = row[idx];
+        sumOther += val;
+        if (val > 0) detectedCountOther++;
+      }
+      meanOther[geneIndex] = otherIndices.length > 0 ? sumOther / otherIndices.length : 0;
+      detectedOther[geneIndex] = otherIndices.length > 0 ? detectedCountOther / otherIndices.length : 0;
+    }
+  } else {
+    // Use bakana stats (with merge detection)
+    const bakanaGroupCount = typeof rnaMarkers.numberOfGroups === 'function'
+      ? rnaMarkers.numberOfGroups()
+      : uniqueClusters.length;
+    const clustersWereMerged = bakanaGroupCount !== uniqueClusters.length || isMergedClusterRequest;
+
+    if (clustersWereMerged) {
+      // Compute from matrix for merged clusters
+      meanTarget = new Float64Array(nGenes);
+      detectedTarget = new Float64Array(nGenes);
+      meanOther = new Float64Array(nGenes);
+      detectedOther = new Float64Array(nGenes);
+
+      const targetIndices = [];
+      const otherIndices = [];
+      clusterAssignments.forEach((value, index) => {
+        if (targetClustersSet.has(String(value))) {
+          targetIndices.push(index);
+        } else {
+          otherIndices.push(index);
+        }
+      });
+
+      for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
+        const row = normMatrix.row(geneIndex, { asTypedArray: true });
+        let sumTarget = 0, detectedCountTarget = 0;
+        for (const idx of targetIndices) {
+          const val = row[idx];
+          sumTarget += val;
+          if (val > 0) detectedCountTarget++;
+        }
+        meanTarget[geneIndex] = targetIndices.length > 0 ? sumTarget / targetIndices.length : 0;
+        detectedTarget[geneIndex] = targetIndices.length > 0 ? detectedCountTarget / targetIndices.length : 0;
+
+        let sumOther = 0, detectedCountOther = 0;
+        for (const idx of otherIndices) {
+          const val = row[idx];
+          sumOther += val;
+          if (val > 0) detectedCountOther++;
+        }
+        meanOther[geneIndex] = otherIndices.length > 0 ? sumOther / otherIndices.length : 0;
+        detectedOther[geneIndex] = otherIndices.length > 0 ? detectedCountOther / otherIndices.length : 0;
+      }
+    } else {
+      // Use bakana pre-computed stats
+      if (typeof requestedCluster !== 'number' || requestedCluster < 0 || requestedCluster >= bakanaGroupCount) {
+        throw new Error(`Requested cluster ${requestedCluster} is out of range.`);
+      }
+      meanTarget = rnaMarkers.mean(requestedCluster, { copy: true });
+      detectedTarget = rnaMarkers.detected(requestedCluster, { copy: true });
+      meanOther = new Float64Array(nGenes);
+      detectedOther = new Float64Array(nGenes);
+    }
+  }
+
+  // Compute Wilcoxon p-values for ranking
+  // For merged clusters, match against all cluster IDs in the target set
+  const inIndices = [];
+  const outIndices = [];
+  clusterAssignments.forEach((value, index) => {
+    if (targetClustersSet.has(String(value))) {
+      inIndices.push(index);
+    } else {
+      outIndices.push(index);
+    }
+  });
+
+  const wilcoxonWorkspace = createWilcoxonWorkspace(inIndices.length, outIndices.length);
+  const pValues = new Float64Array(nGenes);
+
+  for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
+    const row = normMatrix.row(geneIndex, { asTypedArray: true });
+    const p = wilcoxonRankSumPValue(row, inIndices, outIndices, wilcoxonWorkspace);
+    pValues[geneIndex] = Number.isFinite(p) && p > 0 ? p : Number.MIN_VALUE;
+  }
+
+  // Build marker rows and sort
+  const pseudoCount = 1e-6;
+  const rows = [];
+  for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
+    const meanIn = meanTarget[geneIndex];
+    const meanOut = otherCells > 0 ? meanOther[geneIndex] : 0;
+    const avgLogFC = Math.log((meanIn + pseudoCount) / (meanOut + pseudoCount));
+
+    rows.push({
+      gene: geneNames[geneIndex] ?? `Gene ${geneIndex}`,
+      p_val: pValues[geneIndex],
+      avg_logFC: avgLogFC,
+      pct1: detectedTarget[geneIndex],
+      pct2: detectedOther[geneIndex],
+    });
+  }
+
+  // Only positive logFC markers (same reasoning as findMarkers)
+  const positiveMarkerRows = rows.filter(r => r.avg_logFC > 0);
+  positiveMarkerRows.sort((a, b) => {
+    if (a.p_val !== b.p_val) return a.p_val - b.p_val;
+    return b.avg_logFC - a.avg_logFC;
+  });
+
+  // Get top 10 markers for the summary text
+  const topMarkers = positiveMarkerRows.slice(0, 10);
+  // Get more markers for the full table display (same as find_markers)
+  const maxRows = 200;
+  const allMarkers = positiveMarkerRows.slice(0, maxRows);
+
+  console.log(`getClusterInfo: Cluster ${requestedCluster} has ${clusterCellCount} cells (${(clusterFraction * 100).toFixed(1)}%)`);
+  console.log('Top 10 markers:', topMarkers.map(m => m.gene));
+
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: {
+      type: 'cluster_info',
+      cluster: requestedCluster,
+      cellCount: clusterCellCount,
+      totalCells: totalCells,
+      fraction: clusterFraction,
+      topMarkers: topMarkers,
+      requestAnnotation: !!params.annotateCellType,
+      // Include full marker data for table display (same format as 'markers' type)
+      markers: allMarkers,
+      totalGenes: nGenes,
+      method: 'wilcoxon_rank_sum',
+      availableClusters: uniqueClusters,
+    },
+  });
+}
+
+async function runQC() {
+  if (!loadedData || !loadedData.state) {
+    throw new Error('No data loaded');
+  }
+
+  try {
+    const state = loadedData.state;
+
+    // Get QC metrics from bakana
+    const qcMetrics = state.rna_quality_control.fetchMetrics();
+    
+    const sums = Array.from(qcMetrics.sum());
+    const detected = Array.from(qcMetrics.detected());
+    let mitoPercent = null;
+    try {
+      const mito = qcMetrics.subsetProportion(0);
+      mitoPercent = Array.from(mito).map(x => x * 100);
+    } catch (e) {
+      console.warn('Unable to fetch mitochondrial proportion:', e);
+      mitoPercent = new Array(sums.length).fill(NaN);
+    }
+    
+    // Calculate medians
+    const median = (arr) => {
+      const sorted = arr.slice().sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+
+    const metrics = {
+      nCells: loadedData.nCells,
+      nGenes: loadedData.nGenes,
+      medianGenesPerCell: Math.round(median(detected)),
+      medianUMIsPerCell: Math.round(median(sums)),
+      meanGenesPerCell: Math.round(detected.reduce((a, b) => a + b, 0) / detected.length),
+      meanUMIsPerCell: Math.round(sums.reduce((a, b) => a + b, 0) / sums.length),
+      medianMitoPercent: Math.round(median(mitoPercent) * 10) / 10,
+      meanMitoPercent: Math.round((mitoPercent.reduce((a, b) => a + b, 0) / mitoPercent.length) * 10) / 10,
+    };
+
+    currentResults.qc = metrics;
+
+    console.log('QC metrics:', metrics);
+
+    self.postMessage({
+      type: 'ANALYSIS_COMPLETE',
+      data: {
+        type: 'qc',
+        metrics: metrics,
+        perCell: {
+          genesPerCell: detected,
+          umiPerCell: sums,
+          mitoPercent: mitoPercent,
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('QC failed:', error);
+    throw error;
+  }
+}
+
+async function mergeClusters(params = {}) {
+  console.log('====== mergeClusters called ======');
+  console.log('Params:', params);
+
+  const isAtacIntegration = loadedData?.info?.modality === 'atac-integration';
+  if (!loadedData || (!loadedData.state && !isAtacIntegration)) {
+    throw new Error('No data loaded. Please load data first.');
+  }
+
+  const { sourceClusterIds, targetClusterId } = params;
+
+  if (!Array.isArray(sourceClusterIds) || sourceClusterIds.length === 0) {
+    throw new Error('sourceClusterIds must be a non-empty array');
+  }
+
+  if (targetClusterId === undefined || targetClusterId === null) {
+    throw new Error('targetClusterId is required');
+  }
+
+  const state = loadedData.state;
+
+  // Get current clusters
+  let clusters = currentResults.clusters;
+  if (!clusters || !clusters.length) {
+    if (!state) throw new Error('No cluster assignments available');
+    const fetched = state.choose_clustering.fetchClusters();
+    if (!fetched || !fetched.length) {
+      throw new Error('No cluster assignments available');
+    }
+    clusters = Array.from(fetched);
+    currentResults.clusters = clusters;
+  }
+
+  console.log('Original clusters sample:', clusters.slice(0, 10));
+  console.log('Merging clusters', sourceClusterIds, 'into', targetClusterId);
+
+  // Merge: replace all occurrences of sourceClusterIds with targetClusterId
+  let mergedCount = 0;
+  for (let i = 0; i < clusters.length; i++) {
+    const currentCluster = clusters[i];
+    // Check if current cluster is one of the source clusters
+    const shouldMerge = sourceClusterIds.some(srcId => {
+      // Handle both numeric and string comparisons
+      if (typeof currentCluster === 'number' && typeof srcId === 'number') {
+        return currentCluster === srcId;
+      }
+      return String(currentCluster) === String(srcId);
+    });
+
+    if (shouldMerge) {
+      clusters[i] = targetClusterId;
+      mergedCount++;
+    }
+  }
+
+  console.log(`Merged ${mergedCount} cells from clusters ${sourceClusterIds} into cluster ${targetClusterId}`);
+  console.log('Updated clusters sample:', clusters.slice(0, 10));
+
+  // Update the cached clusters
+  currentResults.clusters = clusters;
+
+  // Store the updated clusters back into the state (skip for atac-integration: no bakana state)
+  if (state) {
+    try {
+      state.choose_clustering.storeClusters(clusters);
+      console.log('Stored updated clusters back to state');
+    } catch (error) {
+      console.warn('Could not store clusters back to state:', error);
+    }
+  }
+
+  // Get updated unique clusters
+  const uniqueClusters = Array.from(new Set(clusters));
+  uniqueClusters.sort((a, b) => {
+    if (typeof a === 'number' && typeof b === 'number') {
+      return a - b;
+    }
+    return String(a).localeCompare(String(b));
+  });
+
+  console.log('New unique clusters:', uniqueClusters);
+
+  // Re-fetch UMAP coordinates to send back
+  let umapCoordinates = currentResults.umap;
+  if (!umapCoordinates && state) {
+    const umapResults = await state.umap.fetchResults();
+    umapCoordinates = [];
+    for (let i = 0; i < umapResults.x.length; i++) {
+      umapCoordinates.push([umapResults.x[i], umapResults.y[i]]);
+    }
+    currentResults.umap = umapCoordinates;
+  }
+
+  // Build the response message
+  const uniqueAfterMerge = new Set(clusters.filter((c) => c !== null && c !== undefined));
+  const messageData = {
+    type: 'umap',
+    coordinates: umapCoordinates,
+    clusters: clusters,
+    nClusters: uniqueAfterMerge.size,
+    source: 'merged',
+  };
+
+  // Include spatial coordinates if available (for spatial modality)
+  if (spatialData && Array.isArray(spatialData.coordinates)) {
+    messageData.spatialCoordinates = spatialData.coordinates;
+    messageData.spatialMatched = spatialData.matched;
+    console.log('Including spatialCoordinates in merge response:', spatialData.coordinates.length);
+  } else if (loadedData.spatialData && Array.isArray(loadedData.spatialData.coordinates)) {
+    messageData.spatialCoordinates = loadedData.spatialData.coordinates;
+    messageData.spatialMatched = loadedData.spatialData.matched;
+    console.log('Including spatialCoordinates from loadedData in merge response:', loadedData.spatialData.coordinates.length);
+  }
+
+  // Include clusterLabelMap if it exists, so App can preserve cluster merges
+  if (currentClusterLabelMap && Object.keys(currentClusterLabelMap).length > 0) {
+    messageData.clusterLabelMap = currentClusterLabelMap;
+    console.log('Including clusterLabelMap in merge response:', currentClusterLabelMap);
+  }
+
+  // atac-integration: include integrationViews + datasetNames so per-sample cards keep their cell indices
+  if (loadedData?.info?.modality === 'atac-integration' && loadedData.integrationViews) {
+    messageData.integrationViews = loadedData.integrationViews;
+    messageData.datasetNames = loadedData.info.datasetNames;
+  }
+
+  // Clear gene-activity cache so re-plots use updated cluster assignments
+  scAtacGeneActivityCache.clear();
+  atacGeneActivityCache.clear();
+
+  // Send the updated UMAP with merged clusters
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: messageData,
+  });
+
+  console.log('mergeClusters complete - sent updated UMAP data');
+}
+
+async function runGeneralAnalysis(params) {
+  // Run a default analysis pipeline
+  await runClusteringAndUMAP();
+}
+
+async function showAnalysisParameters(params = {}) {
+  if (!currentParameters) {
+    throw new Error('No analysis has been run yet. Please run analysis first.');
+  }
+
+  const { step } = params; // Optional step filter: 'umap', 'clustering', 'pca', etc.
+
+  // Extract and format key parameters from each analysis step
+  const allParams = {
+    cellFiltering: {},
+    geneFiltering: {},
+    featureSelection: {},
+    pca: {},
+    clustering: {},
+    umap: {}
+  };
+
+  // Cell filtering (QC) parameters
+  if (currentParameters.rna_quality_control) {
+    const qc = currentParameters.rna_quality_control;
+    allParams.cellFiltering = {
+      minGenes: qc.detected_threshold ?? 'N/A',
+      minUMIs: qc.sum_threshold ?? 'N/A',
+      maxMito: qc.mito_threshold ?? 'N/A'
+    };
+  }
+
+  // Gene filtering parameters
+  if (currentParameters.feature_selection) {
+    const fs = currentParameters.feature_selection;
+    allParams.geneFiltering = {
+      minCounts: fs.min_counts ?? 'N/A'
+    };
+  }
+
+  // Variable genes (feature selection) parameters
+  if (currentParameters.rna_pca) {
+    allParams.featureSelection = {
+      numVariableGenes: currentParameters.rna_pca.num_hvgs ?? 'N/A'
+    };
+  }
+
+  // PCA parameters
+  if (currentParameters.rna_pca) {
+    allParams.pca = {
+      numPCs: currentParameters.rna_pca.num_pcs ?? 'N/A'
+    };
+  }
+
+  // Clustering parameters
+  if (currentParameters.snn_graph_cluster) {
+    const cluster = currentParameters.snn_graph_cluster;
+    allParams.clustering = {
+      algorithm: cluster.algorithm ?? 'N/A',
+      resolution: cluster.leiden_resolution ?? cluster.multilevel_resolution ?? cluster.walktrap_steps ?? 'N/A'
+    };
+  }
+
+  // UMAP parameters
+  if (currentParameters.umap) {
+    const umap = currentParameters.umap;
+    allParams.umap = {
+      minDist: umap.min_dist ?? 'N/A',
+      numNeighbors: umap.num_neighbors ?? 'N/A'
+    };
+  }
+
+  // Filter to specific step if requested
+  let filteredParams = allParams;
+  if (step) {
+    filteredParams = {};
+    if (allParams[step]) {
+      filteredParams[step] = allParams[step];
+    }
+  }
+
+  console.log('Analysis parameters retrieved:', filteredParams);
+
+  self.postMessage({
+    type: 'ANALYSIS_COMPLETE',
+    data: {
+      type: 'parameters',
+      parameters: filteredParams,
+      step: step || null
+    }
+  });
+}
+
+console.log('Analysis worker loaded');
