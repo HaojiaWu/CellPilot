@@ -1,4 +1,4 @@
-# CellPilot
+# CellPilot **[cellpilot.humphreyslab.com](https://cellpilot.humphreyslab.com)**
 
 https://github.com/user-attachments/assets/39fd7834-2d85-4b4c-bbce-f617393a6f9a
 
