@@ -18,19 +18,11 @@ import { runSpaGE } from '../spatial/spage.js';
 import { runSketchClustering, SKETCH_MIN_CELLS } from '../spatial/sketchClustering.js';
 import { summarizePathwayEnrichment } from '../utils/pathwayEnrichment.js';
 
-/** scATAC-seq: keep only cells with peak count > this (single-sample and multi-sample). */
 const MIN_PEAKS_ATAC = 1500;
 const ENRICHR_BASE_URL = 'https://maayanlab.cloud/Enrichr';
 const SELECTED_REGION_CELLMARKER_LIBRARY = 'CellMarker_2024';
 const SELECTED_REGION_WIKIPATHWAYS_LIBRARY = 'WikiPathways_2024_Human';
 
-/**
- * Filter cells by minimum number of peaks (non-zero entries per column).
- * @param {import('../scatac/sparse.js').SparseMatrixCSC} countMatrix: peaks x cells
- * @param {string[]} barcodes: cell barcodes, length = ncols
- * @param {number} minPeaks: keep cells with peak count > minPeaks
- * @returns {{ filteredMatrix: import('../scatac/sparse.js').SparseMatrixCSC, filteredBarcodes: string[], nRemoved: number }}
- */
 function filterAtacCellsByMinPeaks(countMatrix, barcodes, minPeaks = MIN_PEAKS_ATAC) {
   const { colPtr, ncols } = countMatrix;
   const keepIndices = [];
@@ -43,15 +35,12 @@ function filterAtacCellsByMinPeaks(countMatrix, barcodes, minPeaks = MIN_PEAKS_A
   return { filteredMatrix, filteredBarcodes, nRemoved: ncols - keepIndices.length };
 }
 
+console.log('=== Worker module loaded === BUILD 2026-0207-V3');
 
-// Catch unhandled errors in the worker, especially WASM abort() from OOM
-let wasmAbortSent = false; // prevent sending duplicate WASM OOM messages
+let wasmAbortSent = false;
 self.addEventListener('error', (e) => {
   const msg = e.message || '';
   console.error('Worker unhandled error:', msg, e.filename, e.lineno);
-  // Prevent the empty/opaque ErrorEvent from propagating to the parent thread:
-  // the parent's onerror would receive an uninformative Event with no message,
-  // causing the worker to appear dead while the UI hangs indefinitely.
   e.preventDefault();
   if (wasmAbortSent) return;
   wasmAbortSent = true;
@@ -79,10 +68,8 @@ self.addEventListener('unhandledrejection', (e) => {
   }
 });
 
-// hyparquet-compressors loaded dynamically when needed
 let hyparquetCompressors = null;
 
-// State variables
 let analysisState = null;
 let loadedData = null;
 let currentResults = {
@@ -95,17 +82,12 @@ let currentResults = {
 let cachedGeneNames = null;
 let cachedGeneLookup = null;
 let currentParameters = null;
-let spatialData = null; // Store spatial coordinates and metadata
-let currentClusterLabelMap = null; // Stores cluster rename/merge mapping from App
-// Cache for multiome ATAC gene activity (plot gene in ATAC view), key: normalized gene name
+let spatialData = null;
+let currentClusterLabelMap = null;
 let atacGeneActivityCache = new Map();
-// Cache for scATAC gene activity (plot gene activity / coverage plot in peak view), key: normalized gene name
 let scAtacGeneActivityCache = new Map();
-// Cache for SpaGE-imputed gene expressions, key: lowercase gene name, value: Float32Array
-// These are for plotting only and must NEVER be used in reanalysis (PCA/clustering/UMAP).
 let imputedGeneCache = new Map();
 
-// Pending ATAC matrix stream (large matrix sent in chunks to avoid renderer OOM)
 let pendingAtacPayload = null;
 let pendingAtacMatrixData = null;
 let pendingAtacReceivedLength = 0;
@@ -182,9 +164,6 @@ function applyMemoryFriendlyParameters(params = {}, { aggressive = false } = {})
     params.umap.num_neighbors = maxNeighbors;
   }
   
-  // Note: When approximate=true, neighbor_index doesn't accept 'k' parameter.
-  // The neighbor count will be inferred from UMAP's num_neighbors automatically.
-  // Only set 'k' if approximate is false.
   if (!params.neighbor_index.approximate) {
     params.neighbor_index.k = params.umap.num_neighbors;
   }
@@ -193,7 +172,6 @@ function applyMemoryFriendlyParameters(params = {}, { aggressive = false } = {})
     params.umap.min_dist = Math.max(0.15, Number.isFinite(params.umap.min_dist) ? params.umap.min_dist : 0.2);
   }
   
-  // Fewer epochs than the default 500, UMAP converges well for large datasets
   if (!Number.isFinite(params.umap.num_epochs)) {
     params.umap.num_epochs = aggressive ? 200 : 300;
   }
@@ -212,12 +190,11 @@ function applyMemoryFriendlyParameters(params = {}, { aggressive = false } = {})
   }
 }
 
-// Sync neighbor_index.k to umap.num_neighbors; 'k' is only accepted when approximate=false.
 function synchronizeNeighborCounts(params = {}) {
   if (!params.umap || !params.neighbor_index) {
     return;
   }
-
+  
   if (!params.neighbor_index.approximate) {
     const umapNeighbors = params.umap.num_neighbors;
     if (Number.isFinite(umapNeighbors)) {
@@ -226,7 +203,6 @@ function synchronizeNeighborCounts(params = {}) {
   }
 }
 
-// Scale num_epochs by cell count; min_dist is preserved to avoid the "single blob" collapse issue.
 function applyFastUmapParameters(params = {}, cellCount = 0) {
   if (!params.umap) {
     params.umap = {};
@@ -234,19 +210,22 @@ function applyFastUmapParameters(params = {}, cellCount = 0) {
 
   if (cellCount > 300000) {
     params.umap.num_epochs = 300;
+    console.log('Applied fast UMAP settings for very large dataset (>300K cells): epochs=300');
   } else if (cellCount > 200000) {
     params.umap.num_epochs = 250;
+    console.log('Applied fast UMAP settings for very large dataset (>200K cells): epochs=250');
   } else if (cellCount > 100000) {
     params.umap.num_epochs = 200;
+    console.log('Applied fast UMAP settings for very large dataset (>100K cells): epochs=200');
   } else if (cellCount > 50000) {
     params.umap.num_epochs = 200;
+    console.log('Applied fast UMAP settings for large dataset (>50K cells): epochs=200');
   } else if (cellCount > 20000) {
     params.umap.num_epochs = 250;
+    console.log('Applied fast UMAP settings for medium dataset (>20K cells): epochs=250');
   }
-  // < 20K cells: use default settings
 }
 
-// Leiden is ~2-3x faster than Louvain for large graphs; resolution 0.4 gives ~15-30 clusters.
 function applyFastClusteringParameters(params = {}, cellCount = 0) {
   if (!params.snn_graph_cluster) {
     params.snn_graph_cluster = {};
@@ -262,8 +241,10 @@ function applyFastClusteringParameters(params = {}, cellCount = 0) {
     if (!Number.isFinite(currentMultilevelRes) || currentMultilevelRes >= 0.8) {
       params.snn_graph_cluster.multilevel_resolution = 0.4;
     }
+    console.log('Applied Leiden clustering algorithm for very large dataset (>200K cells), resolution:', params.snn_graph_cluster.leiden_resolution);
   } else if (cellCount > 50000) {
     params.snn_graph_cluster.algorithm = 'leiden';
+    console.log('Applied Leiden clustering algorithm for faster clustering (>50K cells)');
   }
 }
 
@@ -279,23 +260,15 @@ function isInvalidTypedArrayLength(error) {
   return INVALID_TYPED_ARRAY_REGEX.test(String(error?.message ?? error));
 }
 
-/**
- * Detect WASM abort errors (typically caused by out-of-memory in the WASM heap).
- * When the scran.js / bakana WASM module runs out of its 4 GiB address space,
- * Emscripten calls abort() which throws a RuntimeError with "Aborted()".
- * This is FATAL, once aborted, the WASM module cannot be reused.
- */
 function isWasmAbort(error) {
   if (!error) return false;
   const msg = String(error?.message ?? error);
   if (/Aborted\(\)/.test(msg)) return true;
   if (error instanceof Error && error.name === 'RuntimeError' && /abort/i.test(msg)) return true;
-  // Also detect OOM-related WASM traps
   if (/out of memory|memory access out of bounds|unreachable|table index is out of bounds/i.test(msg)) return true;
   return false;
 }
 
-/** Human-readable error message for WASM OOM. */
 const WASM_OOM_MESSAGE =
   'Out of memory: the dataset is too large for the browser-based analysis engine ' +
   '(WebAssembly 4 GB memory limit). Please subsample your dataset to ~200K cells ' +
@@ -308,8 +281,6 @@ function buildDefaultParameters({ fastMode = false, aggressive = false } = {}) {
 
   if (defaults?.rna_quality_control) {
     defaults.rna_quality_control.mito_threshold = 0.5;
-    // Use prefix to identify mitochondrial genes (Human: MT-, Mouse: mt-)
-    // For ATAC peaks (chr1:1234-5678), this won't match anything, which is correct
     const genome = loadedData?.info?.genome?.toLowerCase() || '';
     const isMouse = genome.includes('mm') || genome.includes('mouse');
     defaults.rna_quality_control.mito_prefix = isMouse ? 'mt-' : 'MT-';
@@ -368,6 +339,7 @@ async function runRnaOnlyAnalysis(state, datasets, params, { startFun = null, fi
   for (const step of preprocessingOrder) {
     await runStep(step, () => state[step].compute(filteredParams[step]));
     if (stopAfterStep && step === stopAfterStep) {
+      console.log(`Pipeline stopped early after step: ${stopAfterStep}`);
       return null;
     }
   }
@@ -376,6 +348,7 @@ async function runRnaOnlyAnalysis(state, datasets, params, { startFun = null, fi
     await runStep('umap', () => state.umap.compute(filteredParams.umap));
   }
   if (stopAfterStep === 'umap') {
+    console.log('Pipeline stopped early after step: umap');
     return null;
   }
 
@@ -390,7 +363,6 @@ async function runRnaOnlyAnalysis(state, datasets, params, { startFun = null, fi
   return null;
 }
 
-// Initialize bakana and scran.js
 async function ensureAnalysisEngineInitialized() {
   if (analysisEngineReady) {
     return;
@@ -412,24 +384,31 @@ async function ensureAnalysisEngineInitialized() {
 self.onmessage = async (event) => {
   const { type, ...payload } = event.data;
 
+  console.log('Worker received message:', type);
 
   try {
     switch (type) {
       case 'INIT':
+        console.log('Worker: Initializing analysis...');
         await ensureAnalysisEngineInitialized();
+        console.log('Worker: Initialization complete');
         self.postMessage({ type: 'INIT_SUCCESS' });
         break;
 
       case 'LOAD_DATA': {
+        console.log('Worker: Loading data...');
+        console.log('Worker: Payload keys:', Object.keys(payload));
         await ensureAnalysisEngineInitialized();
         const matrixFile = payload.files?.matrix;
         if (matrixFile?._chunkKey != null && matrixFile?._matrixSize != null) {
           pendingAtacPayload = payload;
           pendingAtacMatrixData = new Uint8Array(matrixFile._matrixSize);
           pendingAtacReceivedLength = 0;
+          console.log('Worker: ATAC matrix will be streamed in chunks, size:', matrixFile._matrixSize);
           break;
         }
         await loadData(payload);
+        console.log('Worker: Data load complete');
         break;
       }
 
@@ -454,17 +433,39 @@ self.onmessage = async (event) => {
           pendingAtacPayload = null;
           pendingAtacMatrixData = null;
           pendingAtacReceivedLength = 0;
+          console.log('Worker: ATAC matrix stream complete, calling loadData');
           await loadData(fullPayload);
+          console.log('Worker: Data load complete');
         }
         break;
       }
 
       case 'RUN_ANALYSIS':
+        console.log('Worker received RUN_ANALYSIS command');
         await ensureAnalysisEngineInitialized();
+        console.log('loadedData exists:', !!loadedData);
+        console.log('loadedData.state exists:', !!loadedData?.state);
         if (loadedData?.state) {
+          console.log('loadedData.state type:', loadedData.state.constructor?.name);
         }
         await runAnalysis(payload);
         break;
+
+      case 'GET_GENE_NAMES': {
+        let names = null;
+        try {
+          const modality = loadedData?.info?.modality;
+          const peakOnly = modality === 'atac' || modality === 'atac-integration';
+          if (!peakOnly && (loadedData?.state || loadedData?.jsGeneNames)) {
+            const { geneNames } = await ensureGeneLookup();
+            names = Array.from(geneNames, (g) => String(g));
+          }
+        } catch (err) {
+          console.warn('Worker: gene names not available yet:', err?.message || err);
+        }
+        self.postMessage({ type: 'GENE_NAMES', names });
+        break;
+      }
 
       default:
         console.warn('Unknown message type:', type);
@@ -482,13 +483,10 @@ async function initializeAnalysis() {
   try {
     let nthreads = Math.max(1, Math.round((self.navigator.hardwareConcurrency || 4) * 2 / 3));
 
-    // Whether SharedArrayBuffer is usable (requires crossOriginIsolated).
-    // webSecurity:false in Electron can prevent crossOriginIsolated even with COEP headers.
     const canUseSharedMemory = typeof SharedArrayBuffer !== 'undefined' && self.crossOriginIsolated;
 
     let scranInitialized = false;
 
-    // Attempt 1: custom SharedArrayBuffer-backed memory (best for large datasets).
     if (canUseSharedMemory) {
       try {
         const pageSize = 64 * 1024;
@@ -501,40 +499,40 @@ async function initializeAnalysis() {
         });
         await scran.initialize({ numberOfThreads: nthreads, wasmMemory, initialMemory: baseBytes, maximumMemory: maxBytes });
         scranInitialized = true;
+        console.log(`scran.js initialized with SharedArrayBuffer memory (${nthreads} threads)`);
       } catch (e) {
         console.warn('SharedArrayBuffer scran.js init failed:', e.message);
       }
     }
 
-    // Attempt 2: default multi-threaded (no custom memory).
     if (!scranInitialized) {
       try {
         await scran.initialize({ numberOfThreads: nthreads });
         scranInitialized = true;
+        console.log(`scran.js initialized multi-threaded (${nthreads} threads)`);
       } catch (e) {
         console.warn('Multi-threaded scran.js init failed:', e.message);
       }
     }
 
-    // Attempt 3: single-threaded fallback, always works even without SharedArrayBuffer.
     if (!scranInitialized) {
       nthreads = 1;
       await scran.initialize({ numberOfThreads: 1 });
+      console.log('scran.js initialized single-threaded (SharedArrayBuffer unavailable)');
     }
 
     await bakana.initialize({ numberOfThreads: nthreads });
     analysisState = await bakana.createAnalysis();
+    console.log('Analysis engine initialized with', nthreads, 'threads');
   } catch (error) {
     console.error('Failed to initialize analysis:', error);
     throw error;
   }
 }
 
-// Helper class to wrap file data for bakana
 class SimpleFile {
   constructor(name, data) {
     this.name_ = name;
-    // Ensure data is a Uint8Array
     if (data instanceof Uint8Array) {
       this.data_ = data;
     } else if (data instanceof ArrayBuffer) {
@@ -542,7 +540,6 @@ class SimpleFile {
     } else if (Array.isArray(data)) {
       this.data_ = new Uint8Array(data);
     } else if (data && typeof data === 'object' && data.buffer) {
-      // Handle typed array views
       this.data_ = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     } else {
       console.error('Unknown data type for SimpleFile:', typeof data, data);
@@ -610,19 +607,10 @@ function generateIdVariants(identifier) {
   return Array.from(variants);
 }
 
-/**
- * Convert MERFISH cell ID to a consistent string format.
- * MERFISH files often have large numeric IDs in scientific notation (e.g., 3.686784e+18)
- * which cause precision issues. We use the raw string with a 'c' prefix to avoid this.
- * @param {string|number} rawId: The raw cell ID from the CSV file
- * @returns {string} Consistent string ID with 'c' prefix (e.g., "c3.686784e+18")
- */
 function merfishCellIdToString(rawId) {
   if (rawId === null || rawId === undefined || rawId === '') {
     return null;
   }
-  // Use the raw string exactly as it appears, with 'c' prefix
-  // This avoids floating point precision issues with large scientific notation numbers
   const str = String(rawId).trim().replace(/^["']|["']$/g, '');
   if (!str) {
     return null;
@@ -630,26 +618,18 @@ function merfishCellIdToString(rawId) {
   return 'c' + str;
 }
 
-/**
- * Convert numeric cell ID to Visium HD barcode format
- * Input: 2 (from GeoJSON)
- * Output: "cellid_000000002-1" (to match other files)
- */
 function numericToBarcodeId(numericId) {
   const padded = String(numericId).padStart(9, '0');
   return `cellid_${padded}-1`;
 }
 
-/**
- * Parse spatial coordinates from cells data
- */
 async function parseSpatialData(spatialInfo) {
   const { cells, cellSegmentation, analysis, metadata, dataType } = spatialInfo;
 
   const result = {
     coordinates: null,
     idToCoord: null,
-    polygons: null, // For Visium HD cell polygons
+    polygons: null,
     hasPolygons: false,
     precomputed: {
       umap: null,
@@ -657,8 +637,9 @@ async function parseSpatialData(spatialInfo) {
     },
   };
 
-  // For Visium HD: Parse cell segmentation GeoJSON
   if (cellSegmentation && cellSegmentation.data) {
+    console.log('Attempting to parse cellSegmentation GeoJSON for spatial coordinates...');
+    console.log('cellSegmentation.data type:', cellSegmentation.data?.constructor?.name, 'length:', cellSegmentation.data?.length || 0);
     try {
       const rawBuf = cellSegmentation.data instanceof Uint8Array
         ? cellSegmentation.data
@@ -680,16 +661,13 @@ async function parseSpatialData(spatialInfo) {
             continue;
           }
 
-          // Convert to barcode format for matching with other data
           const cellId = numericToBarcodeId(numericId);
 
-          // Get polygon coordinates (first ring, outer boundary)
           const coordinates = feature.geometry.coordinates[0];
           if (!Array.isArray(coordinates) || coordinates.length < 3) {
             continue;
           }
 
-          // Calculate centroid from polygon
           let sumX = 0;
           let sumY = 0;
           for (const [x, y] of coordinates) {
@@ -699,10 +677,8 @@ async function parseSpatialData(spatialInfo) {
           const centroidX = sumX / coordinates.length;
           const centroidY = sumY / coordinates.length;
 
-          // Store centroid for spatial index (points)
           const centroid = [centroidX, centroidY];
 
-          // Generate variants for matching
           const variants = generateIdVariants(cellId);
           for (const variant of variants) {
             idToCoord.set(variant, centroid);
@@ -713,6 +689,8 @@ async function parseSpatialData(spatialInfo) {
         result.idToCoord = idToCoord;
         result.polygons = idToPolygon;
         result.hasPolygons = true;
+        console.log(`✓ Parsed ${idToCoord.size} Visium HD cells with polygon boundaries`);
+        console.log('Sample IDs from map:', Array.from(idToCoord.keys()).slice(0, 10));
       } else {
         console.warn('Invalid GeoJSON structure in cellSegmentation');
       }
@@ -721,24 +699,25 @@ async function parseSpatialData(spatialInfo) {
     }
   }
 
-  // For Visium HD binned outputs: Parse tissue positions (CSV or parquet)
   if (!result.idToCoord && spatialInfo.tissuePositions && spatialInfo.tissuePositions.data) {
+    console.log('Processing tissuePositions for spatial coordinates...');
+    console.log('tissuePositions format:', spatialInfo.tissuePositions.format);
     try {
         const rawBuf = spatialInfo.tissuePositions.data instanceof Uint8Array
           ? spatialInfo.tissuePositions.data
           : new Uint8Array(spatialInfo.tissuePositions.data);
 
-        // Check if it's a parquet file; if so, we can't parse it here
         const parquetMagic = rawBuf.length >= 4 && rawBuf[0] === 0x50 && rawBuf[1] === 0x41 && rawBuf[2] === 0x52 && rawBuf[3] === 0x31;
 
         if (parquetMagic) {
-          // Parse parquet file using hyparquet
+          console.log('Parsing parquet file with hyparquet...');
           self.postMessage({ type: 'STATUS_UPDATE', message: 'Parsing spatial coordinates from parquet...' });
           try {
-            // Load compressors dynamically for ZSTD support
             if (!hyparquetCompressors) {
+              console.log('Loading hyparquet-compressors for ZSTD support...');
               const compModule = await import('hyparquet-compressors');
               hyparquetCompressors = compModule.compressors;
+              console.log('hyparquet-compressors loaded');
             }
 
             const arrayBuffer = rawBuf.buffer.slice(rawBuf.byteOffset, rawBuf.byteOffset + rawBuf.byteLength);
@@ -747,6 +726,7 @@ async function parseSpatialData(spatialInfo) {
               slice: (start, end) => Promise.resolve(arrayBuffer.slice(start, end)),
             };
 
+            console.log('Starting parquet read, file size:', arrayBuffer.byteLength, 'bytes');
             const parquetData = await new Promise((resolve, reject) => {
               parquetRead({
                 file: asyncBuffer,
@@ -755,15 +735,16 @@ async function parseSpatialData(spatialInfo) {
               }).catch(reject);
             });
 
+            console.log('Parquet data loaded, rows:', parquetData?.length);
             if (parquetData && parquetData.length > 0) {
               const columns = Object.keys(parquetData[0]);
+              console.log('Parquet columns (JSON):', JSON.stringify(columns));
+              console.log('First row (JSON):', JSON.stringify(parquetData[0]));
 
               let barcodeCol = columns.find(c => /barcode/i.test(c));
               let xCol = columns.find(c => /pxl_col/i.test(c));
               let yCol = columns.find(c => /pxl_row/i.test(c));
 
-              // Visium HD binned_output (without segmented_output) uses numeric column names:
-              // "0"=barcode, "1","2","3"=bin indices, "4"=y, "5"=x (swap: column 4 as y, 5 as x)
               if (!barcodeCol || !xCol || !yCol) {
                 const allNumeric = columns.length > 0 && columns.every(c => /^\d+$/.test(String(c)));
                 if (allNumeric && columns.length >= 6 && columns.includes('0') && columns.includes('4') && columns.includes('5')) {
@@ -772,12 +753,14 @@ async function parseSpatialData(spatialInfo) {
                   const col5 = parseFloat(first['5']);
                   if (first['0'] != null && !isNaN(col4) && !isNaN(col5)) {
                     barcodeCol = '0';
-                    xCol = '5';  // Column 5 becomes x
-                    yCol = '4';  // Column 4 becomes y
+                    xCol = '5';
+                    yCol = '4';
+                    console.log('Using Visium HD binned parquet column mapping: barcode=0, x=5, y=4 (swapped)');
                   }
                 }
               }
 
+              console.log('Column mapping: barcode=', barcodeCol, 'x=', xCol, 'y=', yCol);
 
               if (barcodeCol && xCol && yCol) {
                 const idToCoord = new Map();
@@ -788,7 +771,6 @@ async function parseSpatialData(spatialInfo) {
 
                   if (barcode != null && barcode !== '' && !isNaN(x) && !isNaN(y)) {
                     const barcodeStr = String(barcode);
-                    // Visium HD: coordPair is [x, y]; xCol/yCol mapping already swapped above
                     const coordPair = [x, y];
                     idToCoord.set(barcodeStr, coordPair);
                     const dashIdx = barcodeStr.lastIndexOf('-');
@@ -800,6 +782,8 @@ async function parseSpatialData(spatialInfo) {
 
                 result.idToCoord = idToCoord;
                 result.hasPolygons = false;
+                console.log(`✓ Parsed ${idToCoord.size} tissue position coordinates from parquet`);
+                console.log('Sample IDs:', Array.from(idToCoord.keys()).slice(0, 5));
               } else {
                 console.warn('Could not find expected columns in parquet. Columns:', columns);
               }
@@ -808,23 +792,22 @@ async function parseSpatialData(spatialInfo) {
             console.error('Failed to parse parquet with hyparquet:', parquetErr);
           }
         } else {
-          // Assume CSV format
           const csvText = new TextDecoder().decode(rawBuf);
         const lines = csvText.trim().split('\n');
+        console.log('Tissue positions CSV has', lines.length, 'lines');
 
         if (lines.length > 1) {
           const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+          console.log('Tissue positions headers:', headers);
 
-          // Look for barcode and coordinate columns
-          // Common column names: barcode, pxl_row_in_fullres, pxl_col_in_fullres, array_row, array_col
           const barcodeIdx = headers.findIndex(h => /^(barcode|cell_id|id)$/i.test(h));
           let xIdx = headers.findIndex(h => /^(pxl_col_in_fullres|x_centroid|x|col)$/i.test(h));
           let yIdx = headers.findIndex(h => /^(pxl_row_in_fullres|y_centroid|y|row)$/i.test(h));
 
-          // Fallback to array coordinates if pixel coordinates not found
           if (xIdx < 0) xIdx = headers.findIndex(h => /^array_col$/i.test(h));
           if (yIdx < 0) yIdx = headers.findIndex(h => /^array_row$/i.test(h));
 
+          console.log('Column indices: barcodeIdx=', barcodeIdx, 'xIdx=', xIdx, 'yIdx=', yIdx);
 
           if (barcodeIdx >= 0 && xIdx >= 0 && yIdx >= 0) {
             const idToCoord = new Map();
@@ -846,7 +829,9 @@ async function parseSpatialData(spatialInfo) {
             }
 
             result.idToCoord = idToCoord;
-            result.hasPolygons = false; // Binned data doesn't have polygons
+            result.hasPolygons = false;
+            console.log(`✓ Parsed ${idToCoord.size} tissue position coordinates from binned outputs`);
+            console.log('Sample IDs from map:', Array.from(idToCoord.keys()).slice(0, 10));
           } else {
             console.warn('Could not find expected columns in tissue positions file. Headers:', headers);
           }
@@ -857,37 +842,41 @@ async function parseSpatialData(spatialInfo) {
     }
   }
 
-  // For Visium HD binned outputs: barcode_mappings.parquet as fallback
-  // (This is rarely used; tissuePositions is usually available)
   if (!result.idToCoord && spatialInfo.barcodeMappings && spatialInfo.barcodeMappings.data) {
+    console.log('Processing barcodeMappings for spatial coordinates...');
     console.warn('barcodeMappings parsing not implemented - use tissuePositions instead');
   }
 
-  // For Xenium: Parse cells CSV for spatial coordinates (build id -> coord map)
   if (!result.idToCoord && cells && cells.data) {
+    console.log('Attempting to parse cells data for spatial coordinates...');
+    console.log('cells.data type:', cells.data?.constructor?.name, 'length:', cells.data?.length || 0);
     try {
       const rawBuf = cells.data instanceof Uint8Array ? cells.data : new Uint8Array(cells.data);
-      const parquetMagic = rawBuf.length >= 4 && rawBuf[0] === 0x50 && rawBuf[1] === 0x41 && rawBuf[2] === 0x52 && rawBuf[3] === 0x31; // 'PAR1'
+      console.log('rawBuf length:', rawBuf.length, 'first 4 bytes:', Array.from(rawBuf.slice(0, 4)));
+      const parquetMagic = rawBuf.length >= 4 && rawBuf[0] === 0x50 && rawBuf[1] === 0x41 && rawBuf[2] === 0x52 && rawBuf[3] === 0x31;
       if (parquetMagic) {
         console.warn('Cells file appears to be Parquet; skipping spatial coordinate parse (need parquet reader).');
       } else {
+        console.log('Cells data is not parquet, attempting CSV decode...');
         let cellsText = null;
         try {
           cellsText = new TextDecoder().decode(rawBuf);
+          console.log('Successfully decoded cells data as UTF-8, length:', cellsText.length, 'chars');
         } catch (e) {
           console.warn('Failed to decode cells data as UTF-8, skipping spatial parse:', e.message);
         }
         if (cellsText) {
           const lines = cellsText.trim().split('\n');
+          console.log('CSV has', lines.length, 'lines');
           if (lines.length > 1) {
-            // Strip quotes from headers if present
             const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
-            // Try to detect x/y centroid columns with several common variants.
+            console.log('CSV headers (quotes stripped):', headers);
             let xIdx = headers.findIndex(h => /^(x(_?(centroid|center|um|px|coordinate|coord|pos|position))?|.*_x)$/i.test(h));
             let yIdx = headers.findIndex(h => /^(y(_?(centroid|center|um|px|coordinate|coord|pos|position))?|.*_y)$/i.test(h));
             if (xIdx < 0) xIdx = headers.findIndex(h => /^x$/i.test(h));
             if (yIdx < 0) yIdx = headers.findIndex(h => /^y$/i.test(h));
             const idIdx = headers.findIndex(h => /^(cell_id|barcode|cell|id)$/i.test(h));
+            console.log('Column indices: xIdx=', xIdx, 'yIdx=', yIdx, 'idIdx=', idIdx);
             if (xIdx >= 0 && yIdx >= 0) {
               const idToCoord = new Map();
               for (let i = 1; i < lines.length; i++) {
@@ -909,6 +898,8 @@ async function parseSpatialData(spatialInfo) {
                 }
               }
               result.idToCoord = idToCoord;
+              console.log(`✓ Parsed ${idToCoord.size} spatial coordinate mappings`);
+              console.log('Sample IDs from map:', Array.from(idToCoord.keys()).slice(0, 10));
             } else {
               console.warn('Could not find expected x/y centroid headers in cells file; headers:', headers);
             }
@@ -922,7 +913,6 @@ async function parseSpatialData(spatialInfo) {
     console.warn('No cells data provided to parseSpatialData');
   }
 
-  // Parse UMAP from analysis
   if (analysis && analysis.umap) {
     try {
       const umapKeys = Object.keys(analysis.umap);
@@ -933,11 +923,9 @@ async function parseSpatialData(spatialInfo) {
 
         if (lines.length > 1) {
           const headers = lines[0].split(',').map(h => h.trim());
-          // Look for UMAP-1 and UMAP-2 columns
           let umap1Idx = headers.findIndex(h => h === 'UMAP-1' || h === 'umap_1' || h === '0');
           let umap2Idx = headers.findIndex(h => h === 'UMAP-2' || h === 'umap_2' || h === '1');
 
-          // If not found, try second and third columns (first is usually cell ID)
           if (umap1Idx < 0) umap1Idx = 1;
           if (umap2Idx < 0) umap2Idx = 2;
 
@@ -968,6 +956,7 @@ async function parseSpatialData(spatialInfo) {
             result.precomputed.umap = {
               map: umapMap,
             };
+            console.log(`Parsed precomputed UMAP for ${umapMap.size} cells`);
           }
         }
       }
@@ -976,7 +965,6 @@ async function parseSpatialData(spatialInfo) {
     }
   }
 
-  // Parse clustering from analysis
   if (analysis && analysis.clusters && analysis.clusters.data) {
     try {
       const clusterText = new TextDecoder().decode(analysis.clusters.data);
@@ -1010,6 +998,7 @@ async function parseSpatialData(spatialInfo) {
           result.precomputed.clusters = {
             map: clusterMap,
           };
+          console.log(`Parsed precomputed clusters for ${clusterMap.size} cells`);
         }
       }
     } catch (error) {
@@ -1116,11 +1105,13 @@ function alignSpatialArtifacts(spatialData, barcodes) {
         }
       }
     }
+    console.log(`UMAP alignment: ${umapMatched}/${len} cells matched`);
     if (umapUnmatched.length > 0) {
+      console.log('Sample unmatched barcodes:', umapUnmatched);
+      console.log('Sample UMAP map keys:', Array.from(umapMap.keys()).slice(0, 5));
     }
   }
 
-  // Align polygon data for Visium HD if available
   let polygons = null;
   if (spatialData.polygons instanceof Map) {
     polygons = new Array(len).fill(null);
@@ -1154,14 +1145,9 @@ function alignSpatialArtifacts(spatialData, barcodes) {
   };
 }
 
-/**
- * Realign precomputed UMAP and cluster artifacts to match the filtered cell order after normalization.
- * This is critical for preloaded Xenium data: the original precomputed UMAP/clusters are aligned to
- * the original cell barcode order, but after cell_filtering.compute(), the expression matrix is indexed
- * by the filtered cells. We must realign the precomputed artifacts to match.
- */
 async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppressBroadcast = false } = {}) {
   if (!loadedData || !loadedData.precomputed) {
+    console.log('No precomputed artifacts to realign');
     return;
   }
 
@@ -1169,12 +1155,13 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
   const precomputedClusters = loadedData.precomputed.clusters;
 
   if (!Array.isArray(precomputedUmap) && !Array.isArray(precomputedClusters)) {
+    console.log('No precomputed UMAP or clusters to realign');
     return;
   }
 
-  // Get the spatial data which contains the precomputed Maps (keyed by cell ID)
   const workingSpatial = loadedData.spatialData;
   if (!workingSpatial || !workingSpatial.precomputed) {
+    console.log('No precomputed spatial data to realign');
     return;
   }
 
@@ -1182,15 +1169,16 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
   const clusterMap = workingSpatial.precomputed.clusters?.map;
 
   if (!(umapMap instanceof Map) && !(clusterMap instanceof Map)) {
+    console.log('No precomputed UMAP/cluster maps available for realignment');
     return;
   }
 
-  // Determine the number of filtered cells from the normalized matrix
   let nFilteredCells = 0;
   try {
     const normMatrix = analysisState.rna_normalization.fetchNormalizedMatrix();
     nFilteredCells = normMatrix.numberOfColumns ? normMatrix.numberOfColumns() :
                      (normMatrix.ncol ? normMatrix.ncol() : 0);
+    console.log(`Filtered cell count from normalized matrix: ${nFilteredCells}`);
   } catch (e) {
     console.warn('Could not determine filtered cell count from normalized matrix:', e.message);
     return;
@@ -1201,20 +1189,18 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
     return;
   }
 
-  // Get ordered barcodes for the filtered cells
   let orderedBarcodes = null;
 
-  // First, try to get barcodes from annotations (this is the most reliable method)
   try {
     const annotations = analysisState.inputs.fetchCellAnnotations();
     orderedBarcodes = extractOrderedBarcodesFromAnnotations(annotations, nFilteredCells);
     if (orderedBarcodes) {
+      console.log('Derived filtered cell barcodes from annotations for precomputed artifact realignment');
     }
   } catch (annotationError) {
     console.warn('Failed to derive filtered barcodes from annotations:', annotationError.message);
   }
 
-  // Second, try to reconstruct from filter keep mask
   if (!orderedBarcodes && loadedData.cellBarcodes && Array.isArray(loadedData.cellBarcodes)) {
     try {
       const filterState = analysisState.cell_filtering;
@@ -1242,22 +1228,24 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
                 keptIndices.push(i);
               }
             }
+            console.log(`Derived keptIndices from filter state: ${keptIndices.length} kept out of ${mask.length}`);
           }
         }
       }
 
       if (Array.isArray(keptIndices) && keptIndices.length > 0) {
         orderedBarcodes = keptIndices.map((idx) => loadedData.cellBarcodes[idx]);
+        console.log('Reconstructed filtered barcode ordering via keep mask for precomputed artifact realignment');
       }
     } catch (filterError) {
       console.warn('Failed to reconstruct filtered barcodes from filter state:', filterError.message);
     }
   }
 
-  // Fall back to assuming no filtering (all cells kept in original order)
   if (!orderedBarcodes && loadedData.cellBarcodes && Array.isArray(loadedData.cellBarcodes)) {
     if (loadedData.cellBarcodes.length === nFilteredCells) {
       orderedBarcodes = loadedData.cellBarcodes;
+      console.log('Using original barcodes (no filtering detected)');
     } else {
       console.warn('Barcode count mismatch; unable to realign precomputed artifacts');
       return;
@@ -1269,7 +1257,6 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
     return;
   }
 
-  // Adjust barcode array length to match filtered cell count
   if (orderedBarcodes.length !== nFilteredCells) {
     console.warn(`Ordered barcode length (${orderedBarcodes.length}) does not match filtered cell count (${nFilteredCells})`);
     if (orderedBarcodes.length > nFilteredCells) {
@@ -1281,7 +1268,6 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
     }
   }
 
-  // Realign the precomputed UMAP coordinates
   let realignedUmap = null;
   if (umapMap instanceof Map) {
     realignedUmap = new Array(nFilteredCells).fill(null);
@@ -1303,9 +1289,9 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
         umapMatched++;
       }
     }
+    console.log(`✓ Realigned precomputed UMAP: ${umapMatched}/${nFilteredCells} cells matched`);
   }
 
-  // Realign the precomputed clusters
   let realignedClusters = null;
   if (clusterMap instanceof Map) {
     realignedClusters = new Array(nFilteredCells).fill(null);
@@ -1327,16 +1313,16 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
         clusterMatched++;
       }
     }
+    console.log(`✓ Realigned precomputed clusters: ${clusterMatched}/${nFilteredCells} cells matched`);
   }
 
-  // Also realign spatial coordinates
   let realignedSpatial = null;
   if (workingSpatial.idToCoord instanceof Map) {
     const resolved = mapBarcodesToCoordinates(workingSpatial, orderedBarcodes);
     realignedSpatial = resolved.coordinates;
+    console.log(`✓ Realigned spatial coordinates: ${resolved.matched}/${nFilteredCells} cells matched`);
   }
 
-  // Update the precomputed artifacts in loadedData
   if (realignedUmap) {
     loadedData.precomputed.umap = realignedUmap;
     currentResults.umap = realignedUmap;
@@ -1350,9 +1336,8 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
     loadedData.spatialData = workingSpatial;
   }
 
+  console.log('✓ Precomputed artifacts realigned to filtered cell order');
 
-  // Broadcast the updated UMAP/clusters to UI so the display is consistent.
-  // Suppressed when a sketch pipeline will run immediately after (sketch sends its own broadcast).
   if (!suppressBroadcast) {
     if (realignedUmap) {
       let nClusters = 0;
@@ -1373,9 +1358,9 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
           realigned: true,
         },
       });
+      console.log('✓ Broadcast realigned UMAP/clusters to UI');
     }
 
-    // Also broadcast updated spatial coordinates if they changed
     if (realignedSpatial) {
       self.postMessage({
         type: 'DATA_LOADED',
@@ -1390,8 +1375,10 @@ async function realignPrecomputedArtifactsAfterFiltering(analysisState, { suppre
           reason: 'post-normalization-realignment',
         },
       });
+      console.log('✓ Broadcast realigned spatial coordinates to UI');
     }
   } else {
+    console.log('✓ Precomputed artifact realignment done (broadcast suppressed, sketch will broadcast)');
   }
 }
 
@@ -1503,6 +1490,7 @@ function validateRestoredSpatialClusterConsistency({
 }) {
   const total = Array.isArray(orderedBarcodes) ? orderedBarcodes.length : 0;
   if (!total || !Array.isArray(clusters) || !resolved || !Array.isArray(resolved.coordinates)) {
+    console.log(`[restore-check] ${context}: skipped (missing inputs)`);
     return;
   }
 
@@ -1540,9 +1528,15 @@ function validateRestoredSpatialClusterConsistency({
   const coordCoverage = n > 0 ? (100 * (n - missingCoords) / n).toFixed(2) : '0.00';
   const pairCoverage = n > 0 ? (100 * validPairs / n).toFixed(2) : '0.00';
 
+  console.log(
+    `[restore-check] ${context}: n=${n}, coordMatched=${n - missingCoords}/${n} (${coordCoverage}%), ` +
+    `validClusterCoordPairs=${validPairs}/${n} (${pairCoverage}%), missingClusters=${missingClusters}`
+  );
   if (sampleMissingCoords.length) {
+    console.log('[restore-check] sample barcodes missing spatial coords:', sampleMissingCoords);
   }
   if (sampleMissingClusters.length) {
+    console.log('[restore-check] sample barcodes missing cluster labels:', sampleMissingClusters);
   }
 }
 
@@ -1629,6 +1623,7 @@ async function finalizePrecomputedSpatialLoad({
   nCells,
   nGenes,
 }) {
+  console.log('Using precomputed spatial analysis results from spatial data output.');
   const aligned = alignSpatialArtifacts(spatialData, Array.isArray(barcodes) ? barcodes : []);
   const resolvedNCells = nCells || (Array.isArray(aligned.umap) ? aligned.umap.length : (Array.isArray(barcodes) ? barcodes.length : 0));
   const resolvedNGenes = nGenes || loadedData?.nGenes || 0;
@@ -1655,20 +1650,16 @@ async function finalizePrecomputedSpatialLoad({
     loadedData.spatialData = spatialData;
     loadedData.hasPolygons = aligned.hasPolygons;
 
-    // For spatial data, automatically run normalization so gene plotting works immediately
-    // We'll run normalization in the background without blocking the UI
     if (loadedData.dataset) {
-      // Run normalization asynchronously; don't await, let it run in background
+      console.log('Starting automatic normalization for spatial data (for gene expression plotting)...');
       runNormalizationForPrecomputedData().catch(error => {
         console.error('Failed to normalize spatial data:', error);
-        // Don't throw; normalization failure shouldn't block data loading
       });
     } else {
       loadedData.state = null;
     }
   }
 
-  // Build DATA_LOADED payload
   const dataLoadedPayload = {
     path,
     cells: resolvedNCells,
@@ -1679,10 +1670,10 @@ async function finalizePrecomputedSpatialLoad({
     modality: info?.modality || 'spatial',
   };
 
-  // Add polygon data for Visium HD
   if (aligned.hasPolygons && aligned.polygons) {
     dataLoadedPayload.hasPolygons = true;
     dataLoadedPayload.polygons = aligned.polygons;
+    console.log('Including polygon data for Visium HD:', aligned.polygons.length, 'cells');
   }
 
   self.postMessage({
@@ -1702,7 +1693,6 @@ async function finalizePrecomputedSpatialLoad({
     currentResults.umap = umapCoords;
     currentResults.clusters = clusterArray;
 
-    // Restore previous results (cluster labels/colors, region data) if available
     const prevResults = loadedData?.previousResults;
     const msg = {
       type: 'umap',
@@ -1730,8 +1720,6 @@ async function finalizePrecomputedSpatialLoad({
           regionLabelMap: prevResults.regionLabelMap || {},
         };
       }
-      // Restore SpaGE-imputed gene arrays into imputedGeneCache so violin/dot plots work immediately.
-      // imputedGenes is stored as { [geneLower]: number[] } in the JSON; convert back to Float32Array.
       if (prevResults.imputedGenes && typeof prevResults.imputedGenes === 'object') {
         for (const [key, arr] of Object.entries(prevResults.imputedGenes)) {
           if (Array.isArray(arr) && arr.length > 0) {
@@ -1740,6 +1728,7 @@ async function finalizePrecomputedSpatialLoad({
         }
         const restored = Object.keys(prevResults.imputedGenes);
         if (restored.length > 0) {
+          console.log(`[SpaGE] Restored ${restored.length} imputed gene(s) from previous session: ${restored.join(', ')}`);
         }
       }
       loadedData.previousResults = null;
@@ -1751,12 +1740,34 @@ async function finalizePrecomputedSpatialLoad({
   }
 }
 
+let activePrecomputedNormalizations = 0;
+
 async function runNormalizationForPrecomputedData() {
+  const data = loadedData;
+  if (data?.precomputedNormalizationPromise) {
+    console.log('Normalization already running for this dataset; waiting for it...');
+    return data.precomputedNormalizationPromise;
+  }
+  activePrecomputedNormalizations++;
+  self.postMessage({ type: 'NORMALIZATION_STATE', running: true });
+  const run = normalizePrecomputedDataOnce();
+  if (data) data.precomputedNormalizationPromise = run;
+  try {
+    return await run;
+  } finally {
+    if (data && data.precomputedNormalizationPromise === run) data.precomputedNormalizationPromise = null;
+    activePrecomputedNormalizations--;
+    self.postMessage({ type: 'NORMALIZATION_STATE', running: activePrecomputedNormalizations > 0 });
+  }
+}
+
+async function normalizePrecomputedDataOnce() {
   if (!loadedData || !loadedData.dataset) {
     console.warn('Cannot run normalization: dataset not available');
     return;
   }
 
+  console.log('Running normalization ONLY for precomputed Xenium data (skipping UMAP/clustering)...');
   self.postMessage({
     type: 'STATUS_UPDATE',
     message: 'Normalizing count matrix for gene expression...'
@@ -1767,20 +1778,15 @@ async function runNormalizationForPrecomputedData() {
     const info = loadedData.info || {};
     const isSpatialModality = info?.modality === 'spatial';
 
-    // Build parameters with minimal settings for faster normalization
     const baseParams = buildDefaultParameters({ fastMode: isSpatialModality });
 
-    // For precomputed data, use very permissive quality control to avoid filtering out cells
-    // The parameters go in rna_quality_control, not cell_filtering
     if (!baseParams.rna_quality_control) {
       baseParams.rna_quality_control = {};
     }
-    // Set permissive thresholds to avoid filtering cells
     baseParams.rna_quality_control.filter_strategy = 'manual';
     baseParams.rna_quality_control.detected_threshold = 0;
     baseParams.rna_quality_control.sum_threshold = 0;
 
-    // Free existing analysis state if any
     if (analysisState && typeof analysisState.free === 'function') {
       try {
         await analysisState.free();
@@ -1789,11 +1795,11 @@ async function runNormalizationForPrecomputedData() {
       }
     }
 
-    // Create analysis state
     analysisState = await bakana.createAnalysis();
+    console.log('Analysis state created for normalization only');
 
-    // Helper to run a single step
     const runStep = async (stepName, computeFn) => {
+      console.log(`Normalization: Running ${stepName}...`);
       if (stepName === 'rna_normalization') {
         self.postMessage({
           type: 'STATUS_UPDATE',
@@ -1803,7 +1809,9 @@ async function runNormalizationForPrecomputedData() {
 
       await computeFn();
 
+      console.log(`Normalization: Completed ${stepName}`);
       if (stepName === 'rna_normalization') {
+        console.log('✓ Normalization completed! Gene expression plotting is now available.');
         self.postMessage({
           type: 'STATUS_UPDATE',
           message: 'Normalization complete - gene expression plotting ready',
@@ -1811,26 +1819,24 @@ async function runNormalizationForPrecomputedData() {
       }
     };
 
-    // Run ONLY the steps needed for normalization (NO UMAP, NO CLUSTERING)
     await runStep('inputs', () => analysisState.inputs.compute({ sample: dataset }, baseParams.inputs));
     await runStep('rna_quality_control', () => analysisState.rna_quality_control.compute(baseParams.rna_quality_control));
     await runStep('cell_filtering', () => analysisState.cell_filtering.compute(baseParams.cell_filtering));
     await runStep('rna_normalization', () => analysisState.rna_normalization.compute(baseParams.rna_normalization));
 
-    // CRITICAL: After cell filtering, realign precomputed UMAP and clusters to match filtered cell order
-    // The expression matrix from rna_normalization is indexed by filtered cells, so we must align
-    // the precomputed UMAP/clusters to the same order for gene expression plotting to work correctly.
     await realignPrecomputedArtifactsAfterFiltering(analysisState);
 
-    // Store the analysis state
     loadedData.state = analysisState;
     currentParameters = baseParams;
 
+    console.log('✓ Normalization completed successfully. Gene expression can now be plotted.');
+    console.log('✓ Analysis state stored in loadedData.state:', !!loadedData.state);
+    console.log('✓ Skipped UMAP and clustering - using precomputed coordinates from Xenium data');
 
-    // Verify the normalized matrix is accessible
     try {
       const normState = analysisState.rna_normalization;
       if (normState && typeof normState.fetchNormalizedMatrix === 'function') {
+        console.log('✓ Normalized matrix is accessible via rna_normalization.fetchNormalizedMatrix()');
       } else {
         console.warn('⚠ Normalized matrix may not be accessible');
       }
@@ -1841,7 +1847,6 @@ async function runNormalizationForPrecomputedData() {
   } catch (error) {
     console.error('Normalization failed:', error);
     console.error('Error details:', error.stack);
-    // Don't throw; let the user know but don't block
     self.postMessage({
       type: 'STATUS_UPDATE',
       message: 'Normalization failed - gene plotting may not work until analysis completes',
@@ -1849,18 +1854,13 @@ async function runNormalizationForPrecomputedData() {
   }
 }
 
-/**
- * Background normalization for multiome data with precomputed UMAPs.
- * Same pattern as Xenium's runNormalizationForPrecomputedData():
- *   inputs → rna_quality_control → cell_filtering → rna_normalization
- * Then realigns RNA + ATAC UMAPs to the filtered barcode order and broadcasts updated coordinates.
- */
 async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, atacUmapParsed, rnaClustersParsed, atacClustersParsed) {
   if (!loadedData || !loadedData.dataset) {
     console.warn('Cannot run multiome normalization: dataset not available');
     return;
   }
 
+  console.log('Running background normalization for multiome data (skipping UMAP/clustering)...');
   self.postMessage({
     type: 'STATUS_UPDATE',
     message: 'Normalizing count matrix for gene expression...',
@@ -1870,7 +1870,6 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
     const dataset = loadedData.dataset;
     const baseParams = buildDefaultParameters({ fastMode: false });
 
-    // Permissive QC thresholds (same as Xenium) to minimize cell filtering
     if (!baseParams.rna_quality_control) {
       baseParams.rna_quality_control = {};
     }
@@ -1878,7 +1877,6 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
     baseParams.rna_quality_control.detected_threshold = 0;
     baseParams.rna_quality_control.sum_threshold = 0;
 
-    // Free existing analysis state if any
     if (analysisState && typeof analysisState.free === 'function') {
       try {
         await analysisState.free();
@@ -1887,10 +1885,9 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
       }
     }
 
-    // Create analysis state
     analysisState = await bakana.createAnalysis();
+    console.log('Multiome: analysis state created for normalization');
 
-    // Run only the 4 steps needed for normalization (NO UMAP, NO CLUSTERING)
     const steps = [
       ['inputs', () => analysisState.inputs.compute({ sample: dataset }, baseParams.inputs)],
       ['rna_quality_control', () => analysisState.rna_quality_control.compute(baseParams.rna_quality_control)],
@@ -1898,21 +1895,22 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
       ['rna_normalization', () => analysisState.rna_normalization.compute(baseParams.rna_normalization)],
     ];
     for (const [stepName, computeFn] of steps) {
+      console.log(`Multiome normalization: Running ${stepName}...`);
       await computeFn();
+      console.log(`Multiome normalization: Completed ${stepName}`);
     }
 
-    // Get filtered cell count from normalized matrix
     let nFilteredCells = 0;
     try {
       const normMatrix = analysisState.rna_normalization.fetchNormalizedMatrix();
       nFilteredCells = normMatrix.numberOfColumns ? normMatrix.numberOfColumns() :
                        (normMatrix.ncol ? normMatrix.ncol() : 0);
+      console.log(`Multiome normalization: ${nFilteredCells} cells after filtering`);
     } catch (e) {
       console.warn('Could not determine filtered cell count:', e.message);
       return;
     }
 
-    // Derive filtered barcode order from cell_filtering keep mask
     let filteredBarcodes = null;
     try {
       const filterState = analysisState.cell_filtering;
@@ -1939,6 +1937,7 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
                 filteredBarcodes.push(infoCellBarcodes[i]);
               }
             }
+            console.log(`Multiome: ${filteredBarcodes.length} barcodes kept after QC (out of ${infoCellBarcodes.length})`);
           }
         }
       }
@@ -1946,17 +1945,16 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
       console.warn('Failed to get filter mask:', filterError.message);
     }
 
-    // Fallback: if no filtering applied or mask unavailable, use all barcodes
     if (!filteredBarcodes || filteredBarcodes.length === 0) {
       if (infoCellBarcodes.length === nFilteredCells) {
         filteredBarcodes = [...infoCellBarcodes];
+        console.log('Multiome: no cells filtered, using all barcodes');
       } else {
         console.warn(`Multiome: barcode count mismatch (${infoCellBarcodes.length} vs ${nFilteredCells}), truncating`);
         filteredBarcodes = infoCellBarcodes.slice(0, nFilteredCells);
       }
     }
 
-    // Realign both RNA and ATAC UMAPs to filtered barcode order
     const alignToFiltered = (umapParsed, clustersParsed) => {
       const barcodeToUmap = new Map();
       for (let i = 0; i < umapParsed.barcodeOrder.length; i++) {
@@ -1981,19 +1979,18 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
         }
         alignedClusters.push(cluster !== undefined ? cluster : 0);
       }
+      console.log(`Realigned ${matched}/${filteredBarcodes.length} cells after filtering`);
       return { coordinates: alignedCoords, clusters: alignedClusters, nClusters: new Set(alignedClusters).size };
     };
 
     const rnaAligned = alignToFiltered(rnaUmapParsed, rnaClustersParsed);
     const atacAligned = alignToFiltered(atacUmapParsed, atacClustersParsed);
 
-    // Update global state
     loadedData.cellBarcodes = filteredBarcodes;
     currentResults.umap = rnaAligned.coordinates;
     currentResults.clusters = rnaAligned.clusters;
     loadedData.precomputed.rnaAligned = rnaAligned;
     loadedData.precomputed.atacAligned = atacAligned;
-    // If WNN was restored from saved results, keep WNN coordinates so gene plots use WNN layout
     const prevWnnForNorm = loadedData.previousResults;
     if (prevWnnForNorm?.wnnActive && prevWnnForNorm.umapCoordinates?.length > 0) {
       currentResults.umap = prevWnnForNorm.umapCoordinates;
@@ -2003,7 +2000,6 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
     currentParameters = baseParams;
     loadedData.nCells = nFilteredCells;
 
-    // Broadcast updated DATA_LOADED with filtered cell count
     self.postMessage({
       type: 'DATA_LOADED',
       data: {
@@ -2018,7 +2014,6 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
       },
     });
 
-    // Send realigned RNA UMAP (include filtered barcodes so App.jsx can persist them for standalone scripts)
     self.postMessage({
       type: 'ANALYSIS_COMPLETE',
       data: {
@@ -2034,7 +2029,6 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
       },
     });
 
-    // Send realigned ATAC UMAP
     self.postMessage({
       type: 'ANALYSIS_COMPLETE',
       data: {
@@ -2050,6 +2044,8 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
       },
     });
 
+    console.log('✓ Multiome background normalization completed successfully');
+    console.log(`✓ ${nFilteredCells} cells after QC, gene expression plotting is now available`);
     self.postMessage({
       type: 'STATUS_UPDATE',
       message: 'Normalization complete - gene expression plotting ready',
@@ -2064,10 +2060,6 @@ async function runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, at
   }
 }
 
-/**
- * Realign multiome precomputed RNA/ATAC UMAPs and clusters to the current filtered barcode list
- * so both RNA and ATAC views always show the same cells after reanalysis (e.g. force_reanalysis).
- */
 function realignMultiomePrecomputedToCurrentBarcodes() {
   if (loadedData?.info?.modality !== 'multiome' || !loadedData.precomputed) {
     return;
@@ -2106,6 +2098,7 @@ function realignMultiomePrecomputedToCurrentBarcodes() {
       }
       alignedClusters.push(cluster !== undefined ? cluster : 0);
     }
+    console.log(`Multiome realign: ${matched}/${filteredBarcodes.length} cells matched`);
     return { coordinates: alignedCoords, clusters: alignedClusters, nClusters: new Set(alignedClusters).size };
   };
 
@@ -2114,6 +2107,7 @@ function realignMultiomePrecomputedToCurrentBarcodes() {
   loadedData.precomputed.rnaAligned = rnaAligned;
   loadedData.precomputed.atacAligned = atacAligned;
   loadedData.nCells = filteredBarcodes.length;
+  console.log('Multiome: realigned RNA and ATAC to filtered barcode list so both views show same cells');
 }
 
 function updateMultiomeFilteredBarcodesFromState(state, expectedLength = null) {
@@ -2127,6 +2121,7 @@ function updateMultiomeFilteredBarcodesFromState(state, expectedLength = null) {
   try {
     filteredBarcodes = getOrderedBarcodesFromFilteredState(state);
     if (Array.isArray(filteredBarcodes) && filteredBarcodes.length) {
+      console.log(`Multiome: derived ${filteredBarcodes.length} filtered barcodes from analysis-state annotations.`);
     }
   } catch (error) {
     console.warn('Multiome: could not derive filtered barcodes from analysis state:', error.message);
@@ -2165,6 +2160,7 @@ function updateMultiomeFilteredBarcodesFromState(state, expectedLength = null) {
           const keepFlag = typeof raw === 'number' ? raw !== 0 : !!raw;
           if (keepFlag) filteredBarcodes.push(sourceBarcodes[i]);
         }
+        console.log(`Multiome: reconstructed ${filteredBarcodes.length} filtered barcodes from keep mask.`);
       }
     } catch (error) {
       console.warn('Multiome: could not reconstruct filtered barcodes from keep mask:', error.message);
@@ -2193,10 +2189,6 @@ function updateMultiomeFilteredBarcodesFromState(state, expectedLength = null) {
   return true;
 }
 
-/**
- * Realign only RNA precomputed UMAP/clusters to the current barcode list (e.g. after ATAC-centric
- * analysis filtered cells by min fragments/peaks). ATAC side is assumed already set (e.g. from runAtacPipeline).
- */
 function realignMultiomeRnaPrecomputedToCurrentBarcodes() {
   if (loadedData?.info?.modality !== 'multiome' || !loadedData.precomputed) {
     return;
@@ -2239,12 +2231,9 @@ function realignMultiomeRnaPrecomputedToCurrentBarcodes() {
     nClusters: new Set(alignedClusters).size,
   };
   loadedData.nCells = filteredBarcodes.length;
+  console.log(`Multiome: realigned RNA to ATAC-filtered barcode list (${matched}/${filteredBarcodes.length} cells) so both views show same cells`);
 }
 
-/**
- * Align ATAC results (e.g. from runAtacPipeline LSI) to canonical barcode order and set precomputed.atacAligned.
- * Call after runAtacPipeline when multiome so RNA and ATAC views use the same cell order.
- */
 function alignMultiomeAtacResultsToCanonical() {
   if (loadedData?.info?.modality !== 'multiome' || !loadedData.precomputed) return;
   const atacColumnBarcodes = loadedData._atacColumnBarcodesForAlign;
@@ -2277,13 +2266,9 @@ function alignMultiomeAtacResultsToCanonical() {
     nClusters: new Set(alignedClusters).size,
   };
   if (loadedData._atacColumnBarcodesForAlign) delete loadedData._atacColumnBarcodesForAlign;
+  console.log('Multiome: aligned ATAC (LSI) results to canonical barcode order');
 }
 
-/**
- * Convert scran Matrix (peaks x cells) to SparseMatrixCSC for the scATAC pipeline.
- * @param {object} peakMatrix: scran Matrix with numberOfRows(), numberOfColumns(), column(j)
- * @returns {SparseMatrixCSC}
- */
 function scranMatrixToSparseCSC(peakMatrix) {
   const nrows = peakMatrix.numberOfRows();
   const ncols = peakMatrix.numberOfColumns();
@@ -2307,10 +2292,6 @@ function scranMatrixToSparseCSC(peakMatrix) {
   return new SparseMatrixCSC(nrows, ncols, colPtr, new Int32Array(rowIdx), new Float64Array(values));
 }
 
-/**
- * Multi-sample ATAC integration pipeline (Harmony batch correction).
- * Reads loadedData.atacSamples, runs runMultiSamplePipeline, populates loadedData, posts ANALYSIS_COMPLETE.
- */
 async function runAtacIntegrationPipeline() {
   if (!loadedData || !loadedData.atacSamples) {
     throw new Error('ATAC integration: no sample data available');
@@ -2322,7 +2303,6 @@ async function runAtacIntegrationPipeline() {
 
   const result = await runMultiSamplePipeline(loadedData.atacSamples, { statusCallback });
 
-  // Store results back into loadedData
   currentResults.umap = result.umapEmbedding;
   currentResults.clusters = result.clusters;
 
@@ -2330,16 +2310,11 @@ async function runAtacIntegrationPipeline() {
   loadedData.atacCountMatrix = result.mergedMatrix;
   loadedData.atacPeakNames = result.unifiedPeakNames;
   loadedData.cellBarcodes = result.allBarcodes;
-  // Remap per-sample peak annotations to unified peaks so gene names are available.
-  // Use coordinate-based matching (not positional indexing) so it works even if
-  // peak_annotation.tsv has a different number of rows than peaks.bed (e.g. multiple
-  // annotation rows per peak, or filtered peaks).
   const unifiedGenes = new Array(result.unifiedPeaks.length).fill('');
   for (const sample of loadedData.atacSamples) {
     const sampleAnno = sample.peakAnnotation || [];
     if (sampleAnno.length === 0) continue;
 
-    // Build coordinate→gene map from peak annotation TSV (handles many:1 or 1:1)
     const coordToGene = new Map();
     for (const anno of sampleAnno) {
       const gene = (anno.gene || '').trim();
@@ -2347,23 +2322,24 @@ async function runAtacIntegrationPipeline() {
       const key = `${anno.chrom}-${anno.start}-${anno.end}`;
       if (!coordToGene.has(key)) coordToGene.set(key, gene);
     }
+    console.log(`  Sample "${sample.name}": ${sampleAnno.length} annotation rows, ${sample.peakNames.length} peaks, ${coordToGene.size} unique coords with genes`);
 
-    // Map each original peak → unified peak, using coordinate-based gene lookup
     const originalPeaks = sample.peakNames.map(parsePeakName);
     const mapping = mapPeaksToUnified(originalPeaks, result.unifiedPeaks);
     let assignedFromSample = 0;
     for (let pi = 0; pi < mapping.length; pi++) {
       const uIdx = mapping[pi];
       if (uIdx < 0) continue;
-      // Look up gene by the peak's coordinate (from peaks.bed), not by positional index
       const gene = coordToGene.get(sample.peakNames[pi]) || '';
       if (gene && !unifiedGenes[uIdx]) {
         unifiedGenes[uIdx] = gene;
         assignedFromSample++;
       }
     }
+    console.log(`  Sample "${sample.name}": assigned ${assignedFromSample} genes to unified peaks`);
   }
   const nWithGenes = unifiedGenes.filter(Boolean).length;
+  console.log(`  Peak annotation remapped: ${nWithGenes}/${result.unifiedPeaks.length} unified peaks have gene assignments`);
 
   loadedData.peakAnnotation = result.unifiedPeakNames.map((p, i) => {
     const m = p.match(/^([^-]+)-(\d+)-(\d+)$/);
@@ -2371,7 +2347,6 @@ async function runAtacIntegrationPipeline() {
     return { peakName: p, chrom: '', start: '', end: '', gene: unifiedGenes[i] };
   });
   loadedData.integrationViews = result.integrationViews;
-  // Compute per-cell total counts (library size) for coverage normalization
   loadedData.atacColSums = Array.from(result.mergedMatrix.colSums());
   loadedData.nCells = result.allBarcodes.length;
   loadedData.nGenes = result.unifiedPeakNames.length;
@@ -2409,26 +2384,15 @@ async function runAtacIntegrationPipeline() {
     },
   });
 
+  console.log('ATAC integration complete:', nCells, 'cells,', nClusters, 'clusters,', datasetNames.length, 'samples');
 }
 
-/**
- * Return integrationViews + datasetNames for the atac-integration modality (used by violin/dotplot).
- */
 function getAtacIntegrationViewsForPlot() {
   if (loadedData?.info?.modality !== 'atac-integration') return null;
   if (!loadedData.integrationViews) return null;
   return { integrationViews: loadedData.integrationViews, datasetNames: loadedData.info.datasetNames };
 }
 
-/**
- * ATAC pipeline: uses scATAC single-sample pipeline (TF-IDF, FindTopFeatures, LSI, UMAP, Louvain).
- * Matrix is peaks x cells. min_dist/num_neighbors passed through for UMAP.
- * @param {Object} opts: options
- * @param {boolean} opts.skipPostMessage: if true, do not post ANALYSIS_COMPLETE (caller will post both RNA and ATAC for multiome)
- * @param {number} [opts.minDist]: UMAP min_dist (default 0.3, scATAC pipeline default)
- * @param {number} [opts.numNeighbors]: UMAP n_neighbors (default 30)
- * @param {number} [opts.resolution]: Louvain clustering resolution (default 0.8)
- */
 async function runAtacPipeline(opts = {}) {
   const { skipPostMessage = false, minDist = null, numNeighbors = null, resolution = null, multiome = false, multiomePeakMatrix = null } = opts;
   if (!loadedData) {
@@ -2519,7 +2483,6 @@ async function runAtacPipeline(opts = {}) {
   }
 
   loadedData.nCells = nCells;
-  // For multiome, preserve the RNA gene count (nGenes); only set peak count for standalone ATAC
   if (loadedData.info?.modality !== 'multiome') {
     loadedData.nGenes = nPeaks;
     loadedData.rawGenes = nPeaks;
@@ -2539,13 +2502,11 @@ async function runAtacPipeline(opts = {}) {
   currentResults.umap = result.umapEmbedding;
   currentResults.clusters = result.clusters;
 
-  // Store LSI embeddings for WNN integration (row-major, nCells × nComponents)
   if (result.cellEmbeddings && result.nComponents) {
     loadedData.atacLSIEmbeddings = result.cellEmbeddings;
     loadedData.atacLSINComponents = result.nComponents;
   }
 
-  // For multiome, preserve the RNA gene count, only ATAC-only datasets use peak count as "genes"
   postFilteredSummary({
     summary: { cells: nCells, genes: loadedData.info?.modality === 'multiome' ? (loadedData.nGenes || 0) : nPeaks },
     force: true,
@@ -2574,10 +2535,6 @@ async function runAtacPipeline(opts = {}) {
   }
 }
 
-/**
- * Get ordered cell barcodes from a bakana state after filtering (for alignment).
- * Tries annotations first; if length doesn't match filtered count, subsets by cell_filtering keep mask.
- */
 function getOrderedBarcodesFromFilteredState(state) {
   if (!state?.umap || !state?.inputs || !state?.cell_filtering) return null;
   const umapResults = state.umap.fetchResults();
@@ -2621,11 +2578,6 @@ function getOrderedBarcodesFromFilteredState(state) {
   return out.length === nCells ? out : null;
 }
 
-/**
- * Run ATAC analysis for multiome using the same pipeline as scATAC (bakana RNA-style):
- * inputs → QC → cell_filtering → normalization → PCA → neighbor_index → UMAP → clustering.
- * Uses the Peaks modality from the multiome H5 (same as scATAC). Faster and consistent with scATAC.
- */
 async function runAtacPipelineBakana(opts = {}) {
   const { skipPostMessage = false, minDist = null, numNeighbors = null, resolution = null, algorithm = null, messageSource = null } = opts;
   if (!loadedData || loadedData.info?.modality !== 'multiome') {
@@ -2644,7 +2596,6 @@ async function runAtacPipelineBakana(opts = {}) {
   baseParams.rna_quality_control.filter_strategy = 'manual';
   baseParams.rna_quality_control.detected_threshold = 0;
   baseParams.rna_quality_control.sum_threshold = 0;
-  // ATAC (Peaks) has no mitochondrial genes; skip reference download (scATAC-style, no mito filter).
   baseParams.rna_quality_control.use_reference_mito = false;
   baseParams.rna_quality_control.mito_prefix = null;
   if (minDist != null && Number.isFinite(minDist)) {
@@ -2707,16 +2658,16 @@ async function runAtacPipelineBakana(opts = {}) {
   loadedData.atacState = atacState;
 
   let atacColumnBarcodes = getOrderedBarcodesFromFilteredState(atacState);
-  // Fallback: multiome H5 has same cell order for RNA and ATAC; if no cells filtered use allCellBarcodes
   if (!atacColumnBarcodes && loadedData.allCellBarcodes && loadedData.allCellBarcodes.length === coordinates.length) {
     atacColumnBarcodes = loadedData.allCellBarcodes;
+    console.log('Multiome: using allCellBarcodes as ATAC barcode order (same length as ATAC result)');
   }
-  // Last resort: assume 1:1 order with canonical so alignment runs and keeps RNA/ATAC in sync
   const canonicalBarcodes = loadedData.cellBarcodes && loadedData.cellBarcodes.length > 0
     ? loadedData.cellBarcodes
     : (loadedData.allCellBarcodes && loadedData.allCellBarcodes.length > 0 ? loadedData.allCellBarcodes : null);
   if (!atacColumnBarcodes && canonicalBarcodes && canonicalBarcodes.length === coordinates.length) {
     atacColumnBarcodes = canonicalBarcodes;
+    console.log('Multiome: assuming 1:1 ATAC-to-canonical order for alignment');
   }
   loadedData._atacColumnBarcodesForAlign = atacColumnBarcodes || null;
 
@@ -2763,6 +2714,7 @@ async function runAtacPipelineBakana(opts = {}) {
       nClusters,
     };
     loadedData.precomputed.atacAligned.barcodeOrder = canonicalBarcodes;
+    console.log(`Multiome: ATAC aligned to RNA barcode order (${matched}/${canonicalBarcodes.length} cells matched)`);
   } else if (loadedData.precomputed) {
     const fallbackBarcodes = canonicalBarcodes && canonicalBarcodes.length === atacCoords.length
       ? canonicalBarcodes
@@ -2774,6 +2726,7 @@ async function runAtacPipelineBakana(opts = {}) {
     };
     if (fallbackBarcodes) {
       loadedData.precomputed.atacAligned.barcodeOrder = fallbackBarcodes;
+      console.log('Multiome: ATAC fallback, using canonical/allCellBarcodes order (1:1) so RNA and ATAC match');
     } else {
       console.warn('Multiome: ATAC could not align to RNA barcode order; ATAC view may not match RNA');
     }
@@ -2823,12 +2776,6 @@ async function runAtacPipelineBakana(opts = {}) {
   }
 }
 
-/**
- * WNN integration: combine RNA PCA and ATAC LSI into a co-embedding UMAP.
- *
- * Requires multiome data. Ensures RNA PCA and ATAC LSI are both available,
- * then runs the WNN pipeline to produce a unified UMAP shown in both RNA and ATAC views.
- */
 async function runWNNIntegration(params = {}) {
   if (!loadedData || loadedData.info?.modality !== 'multiome') {
     self.postMessage({
@@ -2840,11 +2787,9 @@ async function runWNNIntegration(params = {}) {
 
   const post = (msg) => self.postMessage({ type: 'STATUS_UPDATE', message: msg });
 
-  // Step 1: Ensure RNA normalization state is ready
   post('WNN: Preparing RNA analysis state...');
   await ensureAnalysisReady({ reason: 'wnn-integrate' });
 
-  // Step 2: Run PCA if not already computed
   let rnaPcaResults = null;
   try {
     rnaPcaResults = analysisState?.rna_pca?.fetchPCs?.();
@@ -2873,7 +2818,6 @@ async function runWNNIntegration(params = {}) {
     return;
   }
 
-  // Step 3: Ensure ATAC TF-IDF/LSI pipeline has run
   if (!loadedData.atacLSIEmbeddings) {
     post('WNN: Running ATAC TF-IDF/LSI pipeline to obtain LSI embeddings...');
     const multiomePeak = await getMultiomePeakMatrix();
@@ -2885,14 +2829,10 @@ async function runWNNIntegration(params = {}) {
     return;
   }
 
-  // Step 4: Extract and barcode-align embeddings
   const nRNAPCs = rnaPcaResults.numberOfPCs();
   const nCellsRNA = rnaPcaResults.numberOfCells();
   const rnaPcaColMajor = rnaPcaResults.principalComponents({ copy: true });
 
-  // RNA: scran.js principalComponents() returns column-major (Fortran order): arr[pc + nPCs*cell]
-  // This means rows=PCs change fastest; to get row-major (nCells × nPCs) for WNN, use:
-  //   rnaPCAEmbeddings[cell * nRNAPCs + pc] = rnaPcaColMajor[pc + nRNAPCs * cell]
   const rnaPCAEmbeddings = new Float64Array(nCellsRNA * nRNAPCs);
   for (let cell = 0; cell < nCellsRNA; cell++) {
     for (let pc = 0; pc < nRNAPCs; pc++) {
@@ -2900,18 +2840,12 @@ async function runWNNIntegration(params = {}) {
     }
   }
 
-  // ATAC LSI: runSingleSamplePipeline stores row-major (nCells × nComponents)
-  const atacLSIFull = loadedData.atacLSIEmbeddings;  // Float64Array, row-major
+  const atacLSIFull = loadedData.atacLSIEmbeddings;
   const nATACComponents = loadedData.atacLSINComponents;
   const nCellsATACFull = Math.round(atacLSIFull.length / nATACComponents);
-  const nATACDims = nATACComponents - 1;  // skip depth-correlated dim 0
+  const nATACDims = nATACComponents - 1;
 
-  // Step 4b: Align ATAC LSI to RNA cells by barcode
-  // After bakana cell_filtering, RNA may be a filtered SUBSET of the full H5 barcode list.
-  // The ATAC pipeline uses all cells from the H5 (loadedData.allCellBarcodes).
-  // Without alignment, cell indices in RNA PCA and ATAC LSI refer to DIFFERENT cells,
-  // which completely corrupts the WNN result.
-  const rnaBarcodes = loadedData.cellBarcodes;       // filtered RNA barcodes (set by ensureAnalysisReady)
+  const rnaBarcodes = loadedData.cellBarcodes;
   const atacBarcodes = loadedData._atacColumnBarcodesForAlign || loadedData.allCellBarcodes;
 
   let atacLSIEmbeddings;
@@ -2919,7 +2853,6 @@ async function runWNNIntegration(params = {}) {
                                    Array.isArray(atacBarcodes) && atacBarcodes.length === nCellsATACFull;
 
   if (hasBarcodesForAlignment) {
-    // Always align by barcode: RNA cells (bakana-filtered) may differ in count or order from ATAC cells
     post(`WNN: Aligning ATAC (${nCellsATACFull} cells) to RNA (${nCellsRNA} cells) by barcode...`);
     const atacBarcodeMap = new Map();
     atacBarcodes.forEach((bc, idx) => atacBarcodeMap.set(bc, idx));
@@ -2929,7 +2862,7 @@ async function runWNNIntegration(params = {}) {
     for (let ri = 0; ri < nCellsRNA; ri++) {
       const bc = rnaBarcodes[ri];
       let ai = atacBarcodeMap.get(bc);
-      if (ai === undefined) ai = atacBarcodeMap.get(bc.replace(/-\d+$/, '')); // strip barcode suffix
+      if (ai === undefined) ai = atacBarcodeMap.get(bc.replace(/-\d+$/, ''));
       if (ai !== undefined) {
         for (let d = 1; d < nATACComponents; d++) {
           atacLSIEmbeddings[ri * nATACDims + (d - 1)] = atacLSIFull[ai * nATACComponents + d];
@@ -2943,7 +2876,6 @@ async function runWNNIntegration(params = {}) {
     }
     post(`WNN: Alignment done, ${nCellsRNA - nMissing}/${nCellsRNA} cells matched.`);
   } else {
-    // Same count and order (or no barcodes available), skip dim 0, no reordering needed
     const nCellsUse = Math.min(nCellsRNA, nCellsATACFull);
     if (nCellsRNA !== nCellsATACFull) {
       console.warn(`WNN: RNA (${nCellsRNA}) ≠ ATAC (${nCellsATACFull}) cells, no barcodes for alignment, truncating to ${nCellsUse}`);
@@ -2958,13 +2890,11 @@ async function runWNNIntegration(params = {}) {
 
   const nCells = nCellsRNA;
 
-  // Step 4c: Individual RNA and ATAC UMAPs (shown in RNA/ATAC panels of the WNN 3-panel layout)
   post(`WNN: Running individual RNA UMAP (${nCells} cells × ${nRNAPCs} dims)...`);
   {
     const { UMAP } = await import('umap-js');
     const { buildKNN: bknn, buildSNN: bsnn, louvain: lv } = await import('../scatac/clustering.js');
 
-    // Seeded PRNG (same algorithm as wnn.js), makes individual RNA/ATAC UMAPs reproducible
     function mkRng(seed) {
       return function() {
         let t = (seed += 0x6d2b79f5);
@@ -2981,7 +2911,6 @@ async function runWNNIntegration(params = {}) {
       return d > 0 ? 1 - dot / d : 1;
     }
 
-    // RNA individual UMAP
     const rnaRng = mkRng(42);
     const rnaPoints = [];
     for (let i = 0; i < nCells; i++) {
@@ -3001,7 +2930,6 @@ async function runWNNIntegration(params = {}) {
       },
     });
 
-    // ATAC individual UMAP
     post(`WNN: Running individual ATAC UMAP (${nCells} cells × ${nATACDims} dims)...`);
     const atacRng = mkRng(43);
     const atacPoints = [];
@@ -3023,7 +2951,6 @@ async function runWNNIntegration(params = {}) {
     });
   }
 
-  // Step 5: Run WNN pipeline
   post(`WNN: Running WNN integration on ${nCells} cells (${nRNAPCs} RNA PCs + ${nATACDims} ATAC LSI dims)...`);
   const wnnResult = await runWNNPipeline(
     rnaPCAEmbeddings,
@@ -3044,14 +2971,11 @@ async function runWNNIntegration(params = {}) {
   const nClusters = new Set(clusters).size;
   const coordinates = umapEmbedding;
 
-  // Update currentResults so gene expression queries use WNN coordinates instead of precomputed individual UMAP
   currentResults.umap = umapEmbedding;
   currentResults.clusters = clusters;
 
-  // Step 6: Broadcast results to both RNA and ATAC views
   post('WNN: Sending co-embedding to RNA and ATAC views...');
 
-  // RNA view gets WNN UMAP + WNN clusters
   self.postMessage({
     type: 'ANALYSIS_COMPLETE',
     data: {
@@ -3065,7 +2989,6 @@ async function runWNNIntegration(params = {}) {
     },
   });
 
-  // ATAC view gets the same WNN UMAP + WNN clusters
   self.postMessage({
     type: 'ANALYSIS_COMPLETE',
     data: {
@@ -3130,27 +3053,6 @@ function simpleKmeans(points, k, maxIters = 50) {
   return labels;
 }
 
-/**
- * Pure-JavaScript pipeline for very large datasets (>250K cells).
- *
- * Bypasses bakana/scran WASM entirely to avoid the 4 GB WASM memory limit.
- * Instead, uses h5wasm (separate WASM module) to parse the HDF5 file,
- * then runs normalization, HVG selection, SVD/PCA, UMAP, and Louvain
- * clustering all in JavaScript, the same pattern as the scATAC pipeline
- * but with log-normalization instead of TF-IDF.
- *
- * Pipeline: H5→CSC → QC filter → log-normalize → HVG → SVD → UMAP → SNN → Louvain
- */
-
-/**
- * Build k-NN in 2D using a grid spatial index. Zero heap allocations per query.
- * Used for clustering after UMAP projection, 2D k-NN is exact and fast (no
- * curse of dimensionality).
- *
- * @param {Array<[number,number]>} coords: UMAP coordinates, one [x,y] per cell
- * @param {number} k: number of neighbors
- * @returns {{ indices: Int32Array, distances: Float64Array, k: number }}
- */
 function buildKnn2DGrid(coords, k) {
   const n = coords.length;
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -3161,12 +3063,10 @@ function buildKnn2DGrid(coords, k) {
   }
   const rangeX = maxX - minX || 1;
   const rangeY = maxY - minY || 1;
-  // ~4 cells per grid cell on average; minimum 10
   const gridSize = Math.max(10, Math.ceil(Math.sqrt(n / 4)));
   const cellW = rangeX / gridSize;
   const cellH = rangeY / gridSize;
 
-  // Build grid: key = gx * gridSize + gy → array of cell indices
   const grid = new Map();
   for (let i = 0; i < n; i++) {
     const c = coords[i];
@@ -3180,7 +3080,6 @@ function buildKnn2DGrid(coords, k) {
   const flatIdx = new Int32Array(n * k);
   const flatDist = new Float64Array(n * k);
 
-  // Reusable candidate buffers, avoids per-cell allocations
   const distBuf = new Float64Array(4096);
   const idxBuf = new Int32Array(4096);
 
@@ -3189,7 +3088,6 @@ function buildKnn2DGrid(coords, k) {
     const gx = Math.min(gridSize - 1, Math.floor((cx - minX) / cellW));
     const gy = Math.min(gridSize - 1, Math.floor((cy - minY) / cellH));
 
-    // Expand grid search radius until we have ≥ k candidates
     let nCandidates = 0;
     for (let radius = 0; nCandidates < k && radius <= gridSize; radius++) {
       for (let dx = -radius; dx <= radius; dx++) {
@@ -3205,7 +3103,7 @@ function buildKnn2DGrid(coords, k) {
             distBuf[nCandidates] = d;
             idxBuf[nCandidates] = j;
             nCandidates++;
-            if (nCandidates >= distBuf.length) break; // safety, expand next iter
+            if (nCandidates >= distBuf.length) break;
           }
           if (nCandidates >= distBuf.length) break;
         }
@@ -3213,7 +3111,6 @@ function buildKnn2DGrid(coords, k) {
       }
     }
 
-    // Selection: find top-k by repeated minimum scan (O(nCandidates×k), zero alloc)
     const off = i * k;
     for (let j = 0; j < k; j++) {
       let bestD = Infinity, bestI = 0, bestB = -1;
@@ -3222,7 +3119,7 @@ function buildKnn2DGrid(coords, k) {
       }
       flatIdx[off + j] = bestI;
       flatDist[off + j] = bestD;
-      if (bestB >= 0) distBuf[bestB] = Infinity; // mark used
+      if (bestB >= 0) distBuf[bestB] = Infinity;
     }
   }
 
@@ -3232,14 +3129,13 @@ function buildKnn2DGrid(coords, k) {
 async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'large', isSpatialModality = false, preservedBarcodes = null } = {}) {
   const post = (msg) => self.postMessage({ type: 'STATUS_UPDATE', message: msg });
 
-  // Step 1: Streaming H5 → HVG-only normalised matrix
   post('Step 1/4: Reading HDF5 & building HVG matrix (streaming, 2-pass)…');
+  console.log('[large-dataset-js] Starting streaming pure-JS pipeline…');
 
-  // Determine H5 input: lazy-mounted filename (large files) or in-memory blob (small files)
-  let h5Input; // string (already-mounted path) or Uint8Array (bytes)
+  let h5Input;
   if (loadedData.h5LazyTmpFile) {
-    // Large file: already mounted via FS.createLazyFile, pass the filename directly
     h5Input = loadedData.h5LazyTmpFile;
+    console.log(`[large-dataset-js] Using lazy-mounted H5: ${h5Input}`);
   } else {
     const h5Blob = loadedData.h5Blob;
     if (!h5Blob) {
@@ -3247,6 +3143,7 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
     }
     let h5ArrayBuf = await h5Blob.arrayBuffer();
     h5Input = new Uint8Array(h5ArrayBuf);
+    console.log(`[large-dataset-js] H5 file: ${h5Input.length.toLocaleString()} bytes`);
     h5ArrayBuf = null;
     loadedData.h5Blob = null;
   }
@@ -3270,8 +3167,8 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
     h5TmpFile,
   } = streamResult;
 
+  console.log(`[large-dataset-js] HVG matrix: ${hvgMatrix.nrows} genes × ${hvgMatrix.ncols} cells, ${hvgMatrix.nnz.toLocaleString()} nnz`);
 
-  // Store metadata for gene-expression queries
   loadedData.jsGeneNames      = allGeneNames;
   loadedData.jsGeneIds        = allGeneIds;
   loadedData.jsOrigToHvg      = origToHvg;
@@ -3284,7 +3181,6 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
   const nCells = hvgMatrix.ncols;
   const nGenes = nOrigGenes;
 
-  // Step 2: PCA
   post(`Step 2/4: Computing PCA (50 components) on ${nCells.toLocaleString()} cells…`);
   const { runPCA } = await import('../scatac/svd.js');
 
@@ -3300,32 +3196,26 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
 
   const nPCAComponents = 50;
   const pcaResult = await runPCA(hvgMatrix, nPCAComponents, 20, 5, true, post, random);
+  console.log(`[large-dataset-js] PCA: ${pcaResult.nComponents} components × ${pcaResult.nCells} cells`);
 
-  // Step 3: UMAP
   loadedData.jsFilteredBarcodes = filteredBarcodes;
   loadedData.jsNormMatrix = null;
 
-  // Free HVG sparse matrix data (~1.77 GB), the local `hvgMatrix` const still
-  // holds a reference even though loadedData.jsNormMatrix is null.
-  // Null out the heavy typed arrays inside the object to actually release memory.
   hvgMatrix.values  = null;
   hvgMatrix.rowIdx  = null;
   hvgMatrix.colPtr  = null;
+  console.log('[large-dataset-js] Freed HVG matrix internals before UMAP');
 
   const pcaNcells = pcaResult.nCells;
   const pcaNcomps = pcaResult.nComponents;
-  let pcaEmbeddings = pcaResult.cellEmbeddings; // Float64Array (~516 MB for 1.3M cells × 50 dims)
+  let pcaEmbeddings = pcaResult.cellEmbeddings;
 
-  // For very large datasets, reduce dimensions to prevent OOM in UMAP
-  // Using first 20 PCs captures ~80-90% of variance and significantly reduces memory
   const umapDims = pcaNcells > 250000 ? 20 : pcaNcomps;
+  console.log(`[large-dataset-js] Using ${umapDims} PCA components for UMAP (from ${pcaNcomps} total)`);
 
-  // Build UMAP input with reduced dimensions for memory efficiency.
-  // Use Float32Array (not Float64), halves per-row memory (~103 MB vs ~206 MB for 1.3M×20).
-  // Float32 precision is sufficient for UMAP's stochastic algorithm.
   const umapInput = new Array(pcaNcells);
   for (let i = 0; i < pcaNcells; i++) {
-    const offset = i * pcaNcomps; // Source stride is still full PCA components
+    const offset = i * pcaNcomps;
     const row = new Float32Array(umapDims);
     for (let d = 0; d < umapDims; d++) {
       row[d] = pcaEmbeddings[offset + d];
@@ -3333,9 +3223,6 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
     umapInput[i] = row;
   }
 
-  // Build pcColMajor here (before UMAP) from the same data as umapInput, using Float32.
-  // This lets us free the large pcaEmbeddings before the memory-intensive UMAP step.
-  // (If we built it after UMAP from pcaEmbeddings the local var would keep 516 MB alive.)
   const pcColMajor = new Float32Array(pcaNcells * umapDims);
   for (let i = 0; i < pcaNcells; i++) {
     const row = umapInput[i];
@@ -3344,18 +3231,12 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
     }
   }
 
-  // Free pcaEmbeddings, must null BOTH the object property AND the local variable
-  // so V8's GC can collect the ~516 MB Float64Array before UMAP starts.
   pcaResult.cellEmbeddings = null;
   pcaEmbeddings = null;
 
   const { UMAP } = await import('umap-js');
   const umapMinDist = baseParams?.umap?.min_dist || 0.1;
 
-  // umap-js builds O(sqrt(n)) random projection trees with O(n) nodes each.
-  // For >500K cells this exhausts the V8 heap before a single epoch runs.
-  // Solution: fit UMAP on a representative sample, project remaining cells
-  // via umap.transform(), then build exact 2D k-NN for clustering (grid index).
   const UMAP_SAMPLE_THRESHOLD = 500_000;
   const UMAP_SAMPLE_SIZE = 200_000;
 
@@ -3365,16 +3246,15 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
   let flatDistances;
 
   if (pcaNcells <= UMAP_SAMPLE_THRESHOLD) {
-    // Full fit: all cells in umap-js
     const umapNeighbors = pcaNcells > 250000 ? 12 : Math.min(baseParams?.umap?.num_neighbors || 15, 15);
     const umapEpochs = pcaNcells > 300000 ? 200 : 250;
     post(`Step 3/4: Running UMAP on ${pcaNcells.toLocaleString()} cells…`);
+    console.log(`[large-dataset-js] UMAP full fit: ${pcaNcells} cells × ${umapDims} dims, nNeighbors=${umapNeighbors}, nEpochs=${umapEpochs}`);
 
     const umap = new UMAP({ nNeighbors: umapNeighbors, minDist: umapMinDist, nComponents: 2, nEpochs: umapEpochs, random });
     umapCoords = umap.fit(umapInput);
     umapInput.length = 0;
 
-    // Extract k-NN computed by umap-js NN-descent for clustering
     const rawKnnIdx = umap.knnIndices;
     const rawKnnDist = umap.knnDistances;
     kNeighbors = rawKnnIdx[0].length;
@@ -3387,11 +3267,10 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
         flatDistances[off + j] = rawKnnDist[i][j];
       }
     }
+    console.log(`[large-dataset-js] UMAP complete: ${umapCoords.length} points, k-NN k=${kNeighbors}`);
 
   } else {
-    // Very large: sample → fit → transform remaining
     const sampleSize = Math.min(UMAP_SAMPLE_SIZE, pcaNcells);
-    // Evenly-spaced indices give good coverage across cell ordering
     const sampleIndices = new Int32Array(sampleSize);
     const step = (pcaNcells - 1) / (sampleSize - 1);
     for (let si = 0; si < sampleSize; si++) sampleIndices[si] = Math.round(si * step);
@@ -3400,18 +3279,15 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
     const sampleInput = Array.from(sampleIndices, idx => umapInput[idx]);
 
     post(`Step 3/4: UMAP on ${sampleSize.toLocaleString()} representative cells (${pcaNcells.toLocaleString()} total)…`);
+    console.log(`[large-dataset-js] UMAP sample fit: ${sampleSize} cells × ${umapDims} dims, nNeighbors=15, nEpochs=200`);
 
     const umap = new UMAP({ nNeighbors: 15, minDist: umapMinDist, nComponents: 2, nEpochs: 200, random });
     const sampleCoords = umap.fit(sampleInput);
-    // NOTE: do NOT clear sampleInput, umap.fit() stores a reference to it as this.X,
-    // and umap.transform() checks this.X.length to verify data has been fit.
+    console.log(`[large-dataset-js] UMAP sample fit done, projecting remaining ${(pcaNcells - sampleSize).toLocaleString()} cells…`);
 
-    // Allocate full coords array; sample cells get direct coords
     umapCoords = new Array(pcaNcells);
     for (let si = 0; si < sampleSize; si++) umapCoords[sampleIndices[si]] = sampleCoords[si];
 
-    // Project non-sample cells via umap.transform() in small batches.
-    // umap.transform() uses the trained RP trees, O(batch × log(sampleSize)) per call.
     const TRANSFORM_BATCH = 2000;
     let batch = [], batchCellIdxs = [], nProjected = 0;
     for (let i = 0; i < pcaNcells; i++) {
@@ -3431,18 +3307,16 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
       }
     }
     umapInput.length = 0;
+    console.log(`[large-dataset-js] UMAP projection complete: all ${pcaNcells} cells embedded`);
 
-    // Build exact 2D k-NN from UMAP coords for clustering.
-    // 2D grid search has no curse-of-dimensionality and perfectly aligns clusters
-    // with what the user sees in the UMAP plot.
     post('Building 2D k-NN from UMAP for clustering…');
     kNeighbors = 15;
     const knn2d = buildKnn2DGrid(umapCoords, kNeighbors);
     flatIndices = knn2d.indices;
     flatDistances = knn2d.distances;
+    console.log(`[large-dataset-js] 2D k-NN built: ${pcaNcells} × ${kNeighbors}`);
   }
 
-  // Step 4: Clustering via scran.js SNN graph
   post(`Step 4/4: Clustering ${pcaNcells.toLocaleString()} cells…`);
 
   const algo = (baseParams?.snn_graph_cluster?.algorithm || 'multilevel').toLowerCase();
@@ -3452,6 +3326,7 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
   } else {
     resolution = baseParams?.snn_graph_cluster?.multilevel_resolution ?? 1.0;
   }
+  console.log(`[large-dataset-js] Clustering with scran.js: algorithm=${algo}, resolution=${resolution}`);
 
   const runs = new Int32Array(pcaNcells).fill(kNeighbors);
 
@@ -3462,7 +3337,6 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
 
   try {
     post('Building SNN graph from UMAP neighbors…');
-    // Reconstruct scran.js FindNearestNeighborsResults from umap-js k-NN
     knnResults = scran.FindNearestNeighborsResults.unserialize(runs, flatIndices, flatDistances);
 
     snnGraph = scran.buildSnnGraph(knnResults, { scheme: 'rank' });
@@ -3483,6 +3357,7 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
 
     const membership = clusterResult.membership();
     clusterArray = Array.from(membership);
+    console.log(`[large-dataset-js] Cluster membership: ${clusterArray.length} cells (expected ${pcaNcells})`);
   } finally {
     if (clusterResult) try { clusterResult.free(); } catch (_) {}
     if (snnGraph) try { snnGraph.free(); } catch (_) {}
@@ -3490,14 +3365,13 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
   }
 
   const nClusters = new Set(clusterArray).size;
+  console.log(`[large-dataset-js] Clustering complete: ${nClusters} clusters (${algo})`);
 
-  // Store PCA col-major (already built above, before UMAP, from umapInput rows)
   loadedData.jsPcaColMajor = pcColMajor;
   loadedData.jsPcaNcells = pcaNcells;
   loadedData.jsPcaNcomps = umapDims;
   loadedData.jsKNeighbors = kNeighbors;
 
-  // Store results
   currentResults.umap = umapCoords;
   currentResults.clusters = clusterArray;
 
@@ -3529,37 +3403,18 @@ async function runLargeDatasetJsPipeline(dataset, baseParams, { labelPrefix = 'l
     },
   });
 
+  console.log(`✓ Large dataset streaming pipeline complete: ${nCells} cells, ${nGenes} genes, ${nClusters} clusters`);
 }
 
-// ---------------------------------------------------------------------------
-// VisiumHD sketch-based clustering helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Returns true when the loaded dataset is a single-sample Visium HD experiment
- * (either cell-segmented or binned output) with enough cells to justify sketching.
- */
 function isVisiumHDData(data) {
   if (!data) return false;
   const si = data.spatialInfo;
   if (!si) return false;
-  // Cell-segmented VisiumHD  (has GeoJSON cell boundaries)
   if (si.cellSegmentation) return true;
-  // Binned VisiumHD (tissue_positions parquet/CSV)
   if (si.tissuePositions) return true;
   return false;
 }
 
-/**
- * Run the sketch-based UMAP + clustering pipeline for VisiumHD.
- *
- * Extracts bakana PCA coordinates, runs leverage-score sampling, fits UMAP on
- * the sketch, projects all cells, and performs SNN+Louvain clustering.
- * Results are stored in currentResults and broadcast as ANALYSIS_COMPLETE.
- *
- * @param {object} state : bakana analysis state (must have rna_pca computed)
- * @param {boolean} [sendMessage=true]
- */
 async function runVisiumHDSketchPipeline(state, sendMessage = true) {
   const post = (msg) => self.postMessage({ type: 'STATUS_UPDATE', message: msg });
 
@@ -3569,12 +3424,11 @@ async function runVisiumHDSketchPipeline(state, sendMessage = true) {
     return;
   }
 
-  // Extract PCA from bakana (column-major → row-major conversion)
   let pcaResult;
   try {
     pcaResult = state.rna_pca.fetchPCs();
   } catch (e) {
-    console.warn('VisiumHD sketch: could not fetch PCA results:', e.message, '- falling back');
+    console.warn('VisiumHD sketch: could not fetch PCA results:', e.message, ', falling back');
     await runClusteringAndUMAP(sendMessage);
     return;
   }
@@ -3588,10 +3442,6 @@ async function runVisiumHDSketchPipeline(state, sendMessage = true) {
     return;
   }
 
-  // For rare cell type separation (e.g. podocytes), we need ≥50 PCs.
-  // Podocyte markers (NPHS1/NPHS2/WT1) drive variation in PC 21–40 when
-  // PCA is computed from the full 276K-cell dataset dominated by tubular cells.
-  // If bakana was configured with fewer PCs, recompute with 50 now.
   const VISIUMHD_MIN_PCS = 50;
   let finalPcaResult = pcaResult;
   if (nPCs < VISIUMHD_MIN_PCS) {
@@ -3600,7 +3450,6 @@ async function runVisiumHDSketchPipeline(state, sendMessage = true) {
       const pcaParams = { ...(currentParameters?.rna_pca || {}), num_pcs: VISIUMHD_MIN_PCS };
       await state.rna_pca.compute(pcaParams);
       finalPcaResult = state.rna_pca.fetchPCs();
-      // Update currentParameters so subsequent re-runs retain this setting
       if (currentParameters) {
         if (!currentParameters.rna_pca) currentParameters.rna_pca = {};
         currentParameters.rna_pca.num_pcs = finalPcaResult.numberOfPCs();
@@ -3614,7 +3463,6 @@ async function runVisiumHDSketchPipeline(state, sendMessage = true) {
   const usedNPCs   = finalPcaResult.numberOfPCs();
   post(`VisiumHD sketch: extracting ${usedNPCs} PCA dimensions for ${nCells.toLocaleString()} cells…`);
   const colMajor = finalPcaResult.principalComponents({ copy: true });
-  // bakana stores column-major: colMajor[pc + nPCs * cell]
   const pcaEmbeddings = new Float64Array(nCells * usedNPCs);
   for (let cell = 0; cell < nCells; cell++) {
     for (let pc = 0; pc < usedNPCs; pc++) {
@@ -3622,13 +3470,6 @@ async function runVisiumHDSketchPipeline(state, sendMessage = true) {
     }
   }
 
-  // Derive clustering resolution from the dedicated sketch_resolution key.
-  // Intentionally do NOT read snn_graph_cluster here: bakana always initialises
-  // leiden_resolution / multilevel_resolution to a finite number (0.4 or 1.0),
-  // which would silently override the VisiumHD default.
-  // sketch_resolution is only set when the user explicitly changes the resolution
-  // via a chat command (updateClusteringResolution), so an absent value means
-  // "user has never touched it → use the VisiumHD default of 2.5".
   const resolution = Number.isFinite(currentParameters?.sketch_resolution)
     ? currentParameters.sketch_resolution
     : 1.8;
@@ -3660,11 +3501,9 @@ async function runVisiumHDSketchPipeline(state, sendMessage = true) {
 
   const { umapCoordinates, clusters, nClusters } = sketchResult;
 
-  // Store results
   currentResults.umap     = umapCoordinates;
   currentResults.clusters = clusters;
 
-  // Align spatial coordinates to the filtered cell order (same logic as runClusteringAndUMAP)
   const workingSpatial = loadedData?.spatialData;
   if (workingSpatial && workingSpatial.idToCoord && loadedData?.cellBarcodes) {
     try {
@@ -3672,7 +3511,7 @@ async function runVisiumHDSketchPipeline(state, sendMessage = true) {
       try {
         const annotations = state.inputs.fetchCellAnnotations();
         orderedBarcodes = extractOrderedBarcodesFromAnnotations(annotations, clusters.length);
-      } catch (_) { /* fallback below */ }
+      } catch (_) {  }
 
       if (!orderedBarcodes) {
         const filterState = state.cell_filtering;
@@ -3694,7 +3533,7 @@ async function runVisiumHDSketchPipeline(state, sendMessage = true) {
                 }
               }
             }
-          } catch (_) { /* ignore */ }
+          } catch (_) {  }
         }
       }
 
@@ -3742,18 +3581,16 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
     throw new Error('No data available for full analysis run');
   }
 
-  // Standalone scATAC (MTX-loaded, no bakana): run scATAC pipeline only
   if (loadedData.info?.modality === 'atac' && loadedData.atacCountMatrix) {
-    // Check for previous results, skip TF-IDF/LSI/UMAP pipeline if saved data exists
     const prevResultsAtac = loadedData.previousResults;
     if (prevResultsAtac?.umapCoordinates?.length > 0 && prevResultsAtac?.clusters?.length > 0) {
-      loadedData.previousResults = null; // consume so force-reanalysis later runs fresh
+      console.log('CellPilot: restoring previous ATAC results (skipping TF-IDF/LSI/UMAP pipeline)...');
+      loadedData.previousResults = null;
       const nCells = loadedData.nCells || prevResultsAtac.umapCoordinates.length;
       const nPeaks = loadedData.nGenes || 0;
       currentResults.umap = prevResultsAtac.umapCoordinates;
       currentResults.clusters = prevResultsAtac.clusters;
       loadedData.precomputed = { isLoaded: true };
-      // Ensure atacPeakNames is set so "plot <gene>" (e.g. plot ms4a1) works; runAtacPipeline is skipped so it was never set
       if (!loadedData.atacPeakNames && loadedData.peakNames?.length) loadedData.atacPeakNames = loadedData.peakNames;
       postFilteredSummary({ summary: { cells: nCells, genes: nPeaks }, force: true, reason: 'atac-previous-results' });
       self.postMessage({
@@ -3777,14 +3614,11 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
     return;
   }
 
-  // Multi-sample scATAC integration (Harmony)
   if (loadedData.info?.modality === 'atac-integration' && loadedData.atacSamples) {
     await runAtacIntegrationPipeline();
     return;
   }
 
-  // Large files loaded via lazy HTTP streaming have no bakana dataset, they go
-  // entirely through runLargeDatasetJsPipeline below.
   if (!loadedData.dataset && !loadedData.h5LazyTmpFile) {
     throw new Error('No dataset available for full analysis run');
   }
@@ -3796,7 +3630,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
   let currentSpatialData = loadedData.spatialData || null;
   const preservedBarcodes = Array.isArray(loadedData.cellBarcodes) ? loadedData.cellBarcodes : null;
 
-  // Multiome + user chose ATAC: default to the TF-IDF/LSI scATAC pipeline.
   if (info?.modality === 'multiome' && multiomeTarget === 'atac') {
     const useLsi = atacMethod !== 'bakana';
     self.postMessage({ type: 'STATUS_UPDATE', message: useLsi ? 'Running ATAC-centric full analysis (TF-IDF/LSI pipeline)...' : 'Running ATAC-centric full analysis (bakana peak-as-RNA pipeline)...' });
@@ -3855,6 +3688,7 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       force: true,
       reason: 'full-analysis-atac',
     });
+    console.log(`✓ ATAC-centric analysis complete: ${loadedData.nCells} cells`);
     return;
   }
 
@@ -3877,12 +3711,14 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       {
         startFun: async (step) => {
           const message = `${prefix}Running ${step}...`;
+          console.log(`Starting${label ? ` (${label})` : ''}: ${step}`);
           self.postMessage({
             type: 'STATUS_UPDATE',
             message,
           });
         },
         finishFun: async (step) => {
+          console.log(`Completed${label ? ` (${label})` : ''}: ${step}`);
         },
         stopAfterStep,
       }
@@ -3895,17 +3731,19 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
   const datasetBytes = Number.isFinite(loadedData?.datasetBytes) ? loadedData.datasetBytes : 0;
   const isLargeDataset = largeCellCount >= 150000 || datasetBytes >= 40 * 1024 * 1024;
   
-  // Apply speed optimizations based on dataset size
   applyFastUmapParameters(baseParams, largeCellCount);
   applyFastClusteringParameters(baseParams, largeCellCount);
   
   if (isLargeDataset) {
+    console.log('Applying memory-friendly defaults for large dataset', {
+      nCells: largeCellCount,
+      datasetBytes,
+    });
     applyMemoryFriendlyParameters(baseParams, {
       aggressive: largeCellCount >= 250000 || datasetBytes >= 80 * 1024 * 1024,
     });
   }
   
-  // Ensure neighbor_index and umap num_neighbors are synchronized after all parameter modifications
   synchronizeNeighborCounts(baseParams);
 
   if (clusteringResolution != null && Number.isFinite(clusteringResolution)) {
@@ -3921,19 +3759,19 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
     }
   }
 
+  console.log('Using RNA-centric pipeline with steps:', RNA_PIPELINE_STEPS.join(', '));
 
-  // === PREVIOUS RESULTS: restore saved UMAP/clusters, run normalization only ===
   const prevResults = loadedData.previousResults;
   if (prevResults?.umapCoordinates?.length > 0 && prevResults?.clusters?.length > 0) {
-    loadedData.previousResults = null; // consume so force-reanalysis later runs fresh
+    console.log('CellPilot: restoring previous RNA/spatial/multiome results...');
+    loadedData.previousResults = null;
     const isMultiome = info?.modality === 'multiome';
     let restoredCellBarcodes = null;
 
-    // Run normalization only so gene expression plotting works
     try {
       self.postMessage({ type: 'STATUS_UPDATE', message: 'Restoring previous results (normalizing data)...' });
       if (analysisState && typeof analysisState.free === 'function') {
-        try { await analysisState.free(); } catch (_e) { /* ignore */ }
+        try { await analysisState.free(); } catch (_e) {  }
       }
       analysisState = await bakana.createAnalysis();
       const normParams = buildDefaultParameters({ fastMode: isSpatialModality });
@@ -3952,8 +3790,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       console.warn('CellPilot: normalization failed for previous results; gene expression may not work:', normError);
     }
 
-    // Build per-cell tissue coordinates from idToCoord (not Space Ranger UMAP) so spatial + DATA_LOADED
-    // match a normal analysis load. The old flow hit finalizePrecomputedSpatialLoad and skipped this.
     if (isSpatialModality && !isMultiome && loadedData.spatialData?.idToCoord instanceof Map && analysisState) {
       try {
         const normMatrix = analysisState.rna_normalization.fetchNormalizedMatrix();
@@ -3961,7 +3797,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
         if (nFiltered > 0) {
           const targetN = Array.isArray(prevResults.clusters) ? prevResults.clusters.length : nFiltered;
 
-          // Best case: restore exact saved spatial order from previous session.
           if (Array.isArray(prevResults.spatialCoordinates) && prevResults.spatialCoordinates.length >= targetN && targetN > 0) {
             const finalCoords = prevResults.spatialCoordinates.slice(0, targetN).map((coord) => {
               if (!coord) return null;
@@ -3989,11 +3824,15 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
                 matched: finalMatched,
               },
             });
+            console.log(
+              'CellPilot: restored spatial coordinates directly from saved results',
+              finalMatched,
+              '/',
+              finalCoords.length
+            );
           } else {
           let orderedBarcodes = null;
 
-          // Highest priority: reuse the exact barcode order from the saved CellPilot result.
-          // This guarantees spatial colors line up with restored UMAP/clusters 1:1.
           if (Array.isArray(prevResults.cellBarcodes) && prevResults.cellBarcodes.length === prevResults.umapCoordinates.length) {
             if (prevResults.cellBarcodes.length === nFiltered) {
               orderedBarcodes = prevResults.cellBarcodes;
@@ -4013,7 +3852,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
               nFiltered
             );
           }
-          // If annotations are unfiltered, reconstruct filtered barcode order from keep mask.
           if (!orderedBarcodes && Array.isArray(loadedData.cellBarcodes) && loadedData.cellBarcodes.length > 0) {
             const filterState = analysisState.cell_filtering;
             if (filterState && typeof filterState.fetchKeep === 'function') {
@@ -4060,7 +3898,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
               let finalBarcodes = orderedBarcodes;
               let finalMatched = resolved.matched;
 
-              // Keep spatial + cluster arrays strictly aligned during previous-results restore.
               if (Number.isFinite(targetN) && targetN > 0 && resolved.coordinates.length !== targetN) {
                 console.warn(
                   'CellPilot: previous-results restore length mismatch; truncating spatial mapping to cluster length:',
@@ -4080,8 +3917,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
               loadedData.spatialData.matched = finalMatched;
               loadedData.cellBarcodes = finalBarcodes;
               restoredCellBarcodes = finalBarcodes;
-              // Build explicit expression-order -> restored-order index mapping so gene-expression
-              // vectors can be remapped exactly (instead of truncating) when lengths differ.
               const sourceIndex = new Map();
               for (let i = 0; i < orderedBarcodes.length; i += 1) {
                 const raw = orderedBarcodes[i];
@@ -4106,6 +3941,7 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
                 if (idx >= 0) remapMatched += 1;
               }
               loadedData.restoredExpressionSourceIndices = remapIndices;
+              console.log('CellPilot: built restored expression remap indices', remapMatched, '/', finalBarcodes.length);
               spatialData = loadedData.spatialData;
               validateRestoredSpatialClusterConsistency({
                 context: 'previous-results restore',
@@ -4117,6 +3953,12 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
                   matched: finalMatched,
                 },
               });
+              console.log(
+                'CellPilot: aligned tissue coordinates for previous-results restore',
+                finalMatched,
+                '/',
+                finalCoords.length
+              );
             }
           }
           }
@@ -4126,7 +3968,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       }
     }
 
-    // Restore currentResults
     currentResults.umap = prevResults.umapCoordinates;
     currentResults.clusters = prevResults.clusters;
     loadedData.restoredPreviousResults = {
@@ -4153,10 +3994,10 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
           nClusters: atacNC,
         };
       }
-      // Restore saved peak-gene links so "show links for X" works without re-running LinkPeaks
       if (Array.isArray(prevResults.peakGeneLinks) && prevResults.peakGeneLinks.length > 0) {
         loadedData.peakGeneLinks = prevResults.peakGeneLinks;
         const nGenesLinked = new Set(prevResults.peakGeneLinks.map(l => l.gene)).size;
+        console.log(`[LinkPeaks] Restored ${prevResults.peakGeneLinks.length} saved peak-gene links (${nGenesLinked} genes) from previous session`);
         self.postMessage({
           type: 'ANALYSIS_COMPLETE',
           data: {
@@ -4172,20 +4013,17 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       loadedData.precomputed = { isLoaded: true };
     }
 
-    // Keep DATA_LOADED counts consistent with restored previous-results arrays.
     postFilteredSummary({
       force: true,
       reason: 'previous-results',
       summary: { cells: nCellsResult, genes: loadedData.nGenes || 0 },
     });
 
-    // Determine if this was a WNN run and all individual panels are available
     const wasWnn = isMultiome && prevResults.wnnActive &&
       prevResults.wnnRnaCoordinates?.length > 0 && prevResults.wnnRnaClusters?.length > 0 &&
       prevResults.wnnAtacCoordinates?.length > 0 && prevResults.wnnAtacClusters?.length > 0;
 
     if (wasWnn) {
-      // Restore WNN individual RNA UMAP first
       const wnnRnaNC = prevResults.wnnRnaNClusters != null ? prevResults.wnnRnaNClusters : new Set(prevResults.wnnRnaClusters).size;
       self.postMessage({
         type: 'ANALYSIS_COMPLETE',
@@ -4199,7 +4037,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
           multiomeModality: 'rna',
         },
       });
-      // Restore WNN individual ATAC UMAP
       const wnnAtacNC = prevResults.wnnAtacNClusters != null ? prevResults.wnnAtacNClusters : new Set(prevResults.wnnAtacClusters).size;
       self.postMessage({
         type: 'ANALYSIS_COMPLETE',
@@ -4213,7 +4050,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
           multiomeModality: 'atac',
         },
       });
-      // Restore WNN integrated RNA (source: 'wnn' activates 3-panel layout)
       self.postMessage({
         type: 'ANALYSIS_COMPLETE',
         data: {
@@ -4229,7 +4065,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
           restoredAgentClusterAnnotations: prevResults.agentClusterAnnotations || [],
         },
       });
-      // Restore WNN integrated ATAC
       if (prevResults.atacUmapCoordinates?.length > 0 && prevResults.atacClusters?.length > 0) {
         const atacNC = prevResults.atacNClusters != null ? prevResults.atacNClusters : new Set(prevResults.atacClusters).size;
         self.postMessage({
@@ -4246,7 +4081,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
         });
       }
     } else {
-      // Post RNA UMAP ANALYSIS_COMPLETE
       const restoredMsg = {
         type: 'umap',
         coordinates: prevResults.umapCoordinates,
@@ -4280,7 +4114,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       }
       self.postMessage({ type: 'ANALYSIS_COMPLETE', data: restoredMsg });
 
-      // For multiome: also post ATAC ANALYSIS_COMPLETE
       if (isMultiome && prevResults.atacUmapCoordinates?.length > 0 && prevResults.atacClusters?.length > 0) {
         const atacNC = prevResults.atacNClusters != null ? prevResults.atacNClusters : new Set(prevResults.atacClusters).size;
         self.postMessage({
@@ -4298,32 +4131,22 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       }
     }
 
+    console.log('CellPilot: previous results restored successfully');
     return;
   }
-  // === END PREVIOUS RESULTS ===
 
-  // === LARGE DATASET HYBRID PATH ===
-  // For very large datasets (>250K cells), the full bakana pipeline crashes WASM because
-  // neighbor_index + UMAP + clustering together exceed the 4 GB WASM memory limit.
-  // Solution: parse H5 in JS, then run normalization, SVD, UMAP, clustering all in
-  // pure JavaScript, bypassing bakana/scran WASM entirely.
-  // Small datasets (< 250K cells AND < 2 GB) always use the normal bakana WASM pipeline.
-  //
-  // EXCEPTION: Precomputed spatial modalities (Xenium, MERFISH, Visium-HD) have small gene
-  // panels (300–1000 genes) so bakana WASM handles even 250K+ cells efficiently. More
-  // importantly, Xenium data is often loaded as MatrixMarket (no H5 blob), which the
-  // pure-JS pipeline cannot read. Always use the normal bakana path for spatial data.
   const isPrecomputedSpatialRerun = isSpatialModality && !!loadedData?.precomputed;
   const isVeryLargeDataset = !isPrecomputedSpatialRerun &&
     (largeCellCount >= 250000 || datasetBytes >= 2 * 1024 * 1024 * 1024);
   if (isVeryLargeDataset && !stopAfterStep) {
+    console.log(`Very large dataset detected (${largeCellCount.toLocaleString()} cells). ` +
+                `Using hybrid PCA-in-WASM + UMAP/clustering-in-JS path.`);
     self.postMessage({
       type: 'STATUS_UPDATE',
       message: `Large dataset (${largeCellCount.toLocaleString()} cells), using optimized hybrid pipeline...`,
     });
 
     try {
-      // Reset the wasmAbortSent flag
       wasmAbortSent = false;
 
       await runLargeDatasetJsPipeline(dataset, baseParams, {
@@ -4338,8 +4161,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
         throw new Error(WASM_OOM_MESSAGE + cellCountStr);
       }
       console.error('Hybrid JS pipeline failed:', hybridError);
-      // For truly large datasets (>250K cells), falling back to full WASM will also OOM.
-      // Only fall back for border-case datasets where WASM might still work.
       if (largeCellCount >= 250000) {
         throw new Error(
           `Large dataset analysis failed: ${hybridError.message}. ` +
@@ -4347,21 +4168,18 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
         );
       }
       console.warn('Falling back to full WASM pipeline for border-case dataset...');
-      // Fall through to try the full WASM pipeline as last resort
     }
   }
-  // === END LARGE DATASET HYBRID PATH ===
 
   let pipelineError = null;
   try {
     await runPipelineAttempt(baseParams, { label: labelPrefix });
+    console.log('Analysis pipeline complete!');
   } catch (error) {
     pipelineError = error;
     console.error('Initial analysis pipeline failed:', error);
   }
 
-  // Detect WASM abort, this is FATAL, the WASM module is now broken and cannot be reused.
-  // Throw a clear error message so the user understands what happened.
   if (pipelineError && isWasmAbort(pipelineError)) {
     const cellCountStr = largeCellCount > 0 ? ` (${largeCellCount.toLocaleString()} cells)` : '';
     console.error(`WASM abort detected${cellCountStr}. Dataset exceeds WASM 4 GB memory limit.`);
@@ -4395,9 +4213,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       fallbackParams.umap.num_neighbors = umapNeighbors;
     }
     
-    // Note: When approximate=true (which is set above), neighbor_index doesn't accept 'k' parameter.
-    // The neighbor count will be inferred from UMAP's num_neighbors automatically.
-    // Only set 'k' if approximate is false.
     if (fallbackParams?.neighbor_index && !fallbackParams.neighbor_index.approximate) {
       const neighborCount = fallbackParams.umap?.num_neighbors || 15;
       fallbackParams.neighbor_index.k = neighborCount;
@@ -4410,6 +4225,7 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
 
     try {
       await runPipelineAttempt(fallbackParams, { label: 'approximate-neighbors' });
+      console.log('Analysis pipeline complete after fallback retry.');
       pipelineError = null;
     } catch (fallbackError) {
       console.error('Fallback analysis also failed:', fallbackError);
@@ -4417,7 +4233,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
     }
   }
 
-  // Check for WASM abort after all retry attempts, this is fatal
   if (pipelineError && isWasmAbort(pipelineError)) {
     const cellCountStr = largeCellCount > 0 ? ` Current dataset: ${largeCellCount.toLocaleString()} cells.` : '';
     throw new Error(WASM_OOM_MESSAGE + cellCountStr);
@@ -4431,9 +4246,11 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
 
   const countMatrix = analysisState.inputs.fetchCountMatrix();
   const available = countMatrix.available();
-  const rnaMatrix = countMatrix.get(available[0]); // Usually 'RNA'
+  console.log('Available modalities:', available);
+  const rnaMatrix = countMatrix.get(available[0]);
   const nCells = rnaMatrix.numberOfColumns();
   const nGenes = rnaMatrix.numberOfRows();
+  console.log(`✓ Successfully loaded: ${nCells} cells, ${nGenes} genes (${available[0]} modality)`);
 
   loadedData.state = analysisState;
   loadedData.nCells = nCells;
@@ -4443,7 +4260,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
   if (!loadedData.cellBarcodes && preservedBarcodes) {
     loadedData.cellBarcodes = preservedBarcodes;
   }
-  // Preserve precomputed data for multiome (it has precomputed RNA/ATAC UMAPs and clusters)
   if (loadedData.info?.modality !== 'multiome') {
     loadedData.precomputed = null;
   }
@@ -4451,20 +4267,20 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
   cachedGeneLookup = null;
   imputedGeneCache.clear();
 
-  // For ATAC data, try to extract barcodes from the analysis state if not already set
   if (!loadedData.cellBarcodes || loadedData.cellBarcodes.length !== nCells) {
+    console.log('Attempting to extract barcodes from analysis state...');
     try {
-      // Try from cell annotations
       const annotations = analysisState.inputs.fetchCellAnnotations();
+      console.log('Cell annotations:', annotations);
       if (annotations) {
-        // Try rowNames
         if (typeof annotations.rowNames === 'function') {
           const rows = annotations.rowNames();
+          console.log('annotations.rowNames():', rows?.length);
           if (Array.isArray(rows) && rows.length === nCells) {
             loadedData.cellBarcodes = rows;
+            console.log('Extracted barcodes from annotations.rowNames():', loadedData.cellBarcodes.length);
           }
         }
-        // Try column
         if (!loadedData.cellBarcodes && typeof annotations.column === 'function') {
           const cellIdCandidates = ['cell_id', 'barcode', 'cell', 'id', 'CellID', 'Barcode', 'barcodes'];
           for (const candidate of cellIdCandidates) {
@@ -4473,39 +4289,42 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
                 const col = annotations.column(candidate);
                 if (col && col.length === nCells) {
                   loadedData.cellBarcodes = Array.from(col);
+                  console.log(`Extracted barcodes from annotations.column("${candidate}"):`, loadedData.cellBarcodes.length);
                   break;
                 }
               }
             } catch (e) {
-              // Column doesn't exist, try next
             }
           }
         }
       }
 
-      // Try from matrix column names
       if (!loadedData.cellBarcodes) {
         const primary = rnaMatrix;
         if (typeof primary.columnNames === 'function') {
           const colNames = primary.columnNames();
+          console.log('Matrix columnNames:', colNames?.length);
           if (colNames && colNames.length === nCells) {
             loadedData.cellBarcodes = Array.from(colNames);
+            console.log('Extracted barcodes from matrix.columnNames():', loadedData.cellBarcodes.length);
           }
         }
       }
 
-      // Last resort: generate synthetic barcodes
       if (!loadedData.cellBarcodes) {
+        console.log('Could not extract real barcodes, generating synthetic ones...');
         loadedData.cellBarcodes = Array.from({ length: nCells }, (_, i) => `cell_${i}`);
+        console.log('Generated synthetic barcodes:', loadedData.cellBarcodes.length);
       }
     } catch (e) {
       console.warn('Failed to extract barcodes:', e.message);
-      // Generate synthetic barcodes as fallback
       loadedData.cellBarcodes = Array.from({ length: nCells }, (_, i) => `cell_${i}`);
+      console.log('Generated synthetic barcodes (fallback):', loadedData.cellBarcodes.length);
     }
   }
 
   if (isSpatialModality) {
+    console.log('Processing spatial data...');
     let workingSpatial = currentSpatialData || loadedData.spatialData || null;
     if (!workingSpatial && spatialInfo) {
       workingSpatial = await parseSpatialData(spatialInfo);
@@ -4513,6 +4332,7 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
     if (workingSpatial) {
       let barcodes = loadedData.cellBarcodes;
       if (!barcodes || barcodes.length !== nCells) {
+        console.log('Deriving barcodes from analysis state for spatial alignment...');
         const primary = rnaMatrix;
         try {
           if (!barcodes && typeof primary.columnNames === 'function') {
@@ -4574,8 +4394,6 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       let finalCoordinates = aligned.coordinates;
       let finalMatched = aligned.matched;
 
-      // CosMX fallback: when key matching yields 0 matches, use metadata coordinates by row order
-      // (assume metadata and counts share same row order up to min length)
       if (finalMatched === 0 && Array.isArray(workingSpatial.coordinatesInMetadataOrder)) {
         const metaCoords = workingSpatial.coordinatesInMetadataOrder;
         const nBarcodes = Array.isArray(barcodes) ? barcodes.length : 0;
@@ -4583,12 +4401,12 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
           const n = Math.min(metaCoords.length, nBarcodes);
           finalCoordinates = Array.from({ length: nBarcodes }, (_, i) => (i < n ? metaCoords[i] : null));
           finalMatched = n;
+          console.log(`✓ CosMX fallback: using metadata coordinates by row order (${n} of ${nBarcodes} cells)`);
         }
       }
 
       workingSpatial.coordinates = finalCoordinates;
       workingSpatial.matched = finalMatched;
-      // Store initial barcode order so rebuild can preserve coordinates by index when idToCoord match fails (e.g. CosMX)
       workingSpatial.initialBarcodeOrder = Array.isArray(barcodes) && barcodes.length > 0 ? Array.from(barcodes) : null;
       if (!workingSpatial.precomputed) {
         workingSpatial.precomputed = {};
@@ -4596,6 +4414,7 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       workingSpatial.precomputed.alignedUmap = aligned.umap;
       workingSpatial.precomputed.alignedClusters = aligned.clusters;
 
+      console.log(`✓ Aligned ${finalMatched}/${Array.isArray(barcodes) ? barcodes.length : 0} cells with spatial coordinates`);
       if (finalMatched === 0 && aligned.unmatchedExamples.length) {
         console.error('ERROR: Zero coordinates matched!');
         console.error('Sample matrix barcodes (unmatched):', aligned.unmatchedExamples);
@@ -4609,7 +4428,7 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
       loadedData.spatialData = workingSpatial;
       currentResults.umap = aligned.umap ? aligned.umap.map((coord) => (Array.isArray(coord) ? coord : [NaN, NaN])) : null;
       currentResults.clusters = aligned.clusters;
-      spatialData = workingSpatial; // update global so postFilteredSummary and others see it
+      spatialData = workingSpatial;
     } else {
       console.warn('No spatial metadata available after parsing.');
       spatialData = null;
@@ -4623,25 +4442,21 @@ async function runFullAnalysisPipeline({ labelPrefix = 'default', stopAfterStep 
     force: true,
   });
 
-  // Multiome: realign precomputed RNA/ATAC to current filtered barcode list so both views show same cells
   if (loadedData?.info?.modality === 'multiome') {
     realignMultiomePrecomputedToCurrentBarcodes();
   }
 
-  // For multiome with precomputed data, skip runClusteringAndUMAP entirely:
-  // the pipeline may have stopped early (before UMAP/clustering), and the caller
-  // (loadData) sends precomputed RNA and ATAC UMAPs after aligning to filtered cell order.
-  // For other modalities, suppress the message only for multiome.
   if (stopAfterStep) {
+    console.log(`Skipping runClusteringAndUMAP (pipeline stopped after ${stopAfterStep})`);
   } else if (isVisiumHDData(loadedData) && nCells >= SKETCH_MIN_CELLS && analysisState) {
-    // VisiumHD with enough cells: use sketch-based UMAP + clustering for improved
-    // rare-population detection (mirrors Seurat v5 SketchData / ProjectData workflow).
+    console.log(`VisiumHD detected (${nCells.toLocaleString()} cells ≥ ${SKETCH_MIN_CELLS.toLocaleString()}), using sketch pipeline`);
     await runVisiumHDSketchPipeline(analysisState, true);
   } else {
     const suppressUmapMsg = loadedData?.info?.modality === 'multiome';
     await runClusteringAndUMAP(!suppressUmapMsg);
   }
 
+  console.log(`✓ Loaded ${nCells} cells and ${nGenes} genes`);
 }
 
 async function ensureAnalysisReady({ reason = 'on-demand', minimal = false } = {}) {
@@ -4649,67 +4464,70 @@ async function ensureAnalysisReady({ reason = 'on-demand', minimal = false } = {
     throw new Error('No dataset is loaded');
   }
   
+  console.log(`ensureAnalysisReady called for: ${reason}`);
+  console.log(`loadedData.state exists:`, !!loadedData.state);
+  console.log(`loadedData.precomputed:`, !!loadedData.precomputed);
+  console.log(`loadedData.dataset exists:`, !!loadedData.dataset);
   
   if (loadedData.state) {
-    // Verify the state is still valid
+    console.log(`✓ Analysis state is ready (${reason})`);
     try {
       if (loadedData.state.rna_normalization && typeof loadedData.state.rna_normalization.fetchNormalizedMatrix === 'function') {
+        console.log('✓ Normalized matrix is accessible');
         return;
       } else {
         console.warn('⚠ Analysis state exists but normalized matrix not accessible, re-running normalization');
-        loadedData.state = null; // Force re-normalization
+        loadedData.state = null;
       }
     } catch (verifyError) {
       console.warn('⚠ Error verifying analysis state:', verifyError);
-      loadedData.state = null; // Force re-normalization
+      loadedData.state = null;
     }
   }
   
-  // If multiome background normalization is in progress, await it instead of starting a new one
   if (loadedData.normalizationPromise) {
+    console.log('Awaiting in-progress multiome background normalization...');
     await loadedData.normalizationPromise;
     loadedData.normalizationPromise = null;
     if (loadedData.state) {
+      console.log('✓ Multiome normalization completed, analysis state is now ready');
       return;
     }
     console.warn('Multiome normalization completed but state not stored, falling through...');
   }
 
-  // Check if normalization is in progress for precomputed data
-  if (loadedData.precomputed && loadedData.dataset && !loadedData.normalizationInProgress) {
+  if (loadedData.precomputed && loadedData.dataset) {
+    console.log(`Analysis state not ready for precomputed data. Starting or awaiting normalization...`);
     try {
-      loadedData.normalizationInProgress = true;
       await runNormalizationForPrecomputedData();
-      loadedData.normalizationInProgress = false;
       if (loadedData.state) {
+        console.log(`✓ Normalization completed. Analysis state is now ready.`);
         return;
       } else {
         console.error('⚠ Normalization completed but state was not stored');
       }
     } catch (error) {
-      loadedData.normalizationInProgress = false;
       console.error('Normalization failed, falling back to full analysis:', error);
     }
   }
   
-  // Standalone scATAC (no bakana state): analysis is ready if we have atacPeakMatrix and UMAP already computed
   if (loadedData.info?.modality === 'atac' && loadedData.atacPeakMatrix) {
     const nCells = loadedData.cellBarcodes?.length ?? 0;
     if (currentResults.umap && currentResults.umap.length === nCells) {
+      console.log(`✓ ATAC analysis already complete (UMAP/clusters ready). Skipping re-analysis (${reason}).`);
       return;
     }
   }
 
-  // Multi-sample ATAC integration: analysis is ready once peak matrix and UMAP are populated
   if (loadedData.info?.modality === 'atac-integration' && loadedData.atacPeakMatrix) {
     const nCells = loadedData.cellBarcodes?.length ?? 0;
     if (currentResults.umap && currentResults.umap.length === nCells) {
+      console.log(`✓ ATAC integration analysis already complete. Skipping re-analysis (${reason}).`);
       return;
     }
   }
 
-  // For precomputed spatial data, run full analysis when user requests gene plotting
-  // The "minimal" analysis still needs to run most steps anyway, so full analysis is more reliable
+  console.log(`Analysis state not ready. Triggering full analysis (${reason}).`);
   await runFullAnalysisPipeline({ labelPrefix: reason || 'on-demand' });
 }
 
@@ -4718,6 +4536,7 @@ async function runMinimalAnalysisForGeneExpression() {
     throw new Error('No dataset available for minimal analysis');
   }
 
+  console.log('Running minimal analysis pipeline (normalization only) for gene expression...');
   
   const dataset = loadedData.dataset;
   const info = loadedData.info || {};
@@ -4726,45 +4545,40 @@ async function runMinimalAnalysisForGeneExpression() {
     throw new Error('Dataset is not available in loadedData');
   }
   
+  console.log('Dataset check passed, dataset type:', dataset?.constructor?.name);
   
-  // Ensure bakana is initialized
   if (!analysisState && typeof bakana.initialize === 'function') {
-    // Bakana should already be initialized, but check anyway
+    console.log('Bakana not initialized, checking initialization status...');
   }
   
   try {
     self.postMessage({ type: 'STATUS_UPDATE', message: 'Normalizing data for gene expression...' });
     
-    // Build default parameters instead of using ensureCurrentParameters
-    // which requires analysisState to exist
     const isSpatialModality = info?.modality === 'spatial';
+    console.log('Building default parameters, fastMode:', isSpatialModality);
     const baseParams = buildDefaultParameters({ fastMode: isSpatialModality });
+    console.log('Default parameters built');
     
-    // For precomputed data, use very permissive quality control to avoid filtering out cells
-    // The parameters go in rna_quality_control, not cell_filtering
     if (!baseParams.rna_quality_control) {
       baseParams.rna_quality_control = {};
     }
-    // Set permissive thresholds to avoid filtering cells
     baseParams.rna_quality_control.filter_strategy = 'manual';
     baseParams.rna_quality_control.detected_threshold = 0;
     baseParams.rna_quality_control.sum_threshold = 0;
     
-    // Don't set cell_filtering parameters; let bakana use defaults
     
-    // Minimize PCA work
     if (!baseParams.rna_pca) {
       baseParams.rna_pca = {};
     }
     baseParams.rna_pca.num_pcs = 10;
     baseParams.rna_pca.num_hvgs = 1000;
     
-    // Use the same pipeline structure as runFullAnalysisPipeline but with minimal parameters
-    // Free existing analysis state if it exists
     if (analysisState) {
+      console.log('Freeing existing analysis state...');
       try {
         if (typeof analysisState.free === 'function') {
           await analysisState.free();
+          console.log('Previous analysis state freed');
         }
       } catch (freeError) {
         console.warn('Unable to free previous analysis state:', freeError);
@@ -4772,23 +4586,28 @@ async function runMinimalAnalysisForGeneExpression() {
       analysisState = null;
     }
 
+    console.log('Creating new analysis state...');
+    console.log('Dataset type:', dataset?.constructor?.name);
+    console.log('Dataset available:', !!dataset);
+    console.log('bakana object:', typeof bakana);
+    console.log('bakana.createAnalysis available:', typeof bakana?.createAnalysis === 'function');
     
     if (typeof bakana?.createAnalysis !== 'function') {
       throw new Error('bakana.createAnalysis is not available. Bakana may not be initialized.');
     }
     
     try {
+      console.log('Calling bakana.createAnalysis()...');
       const startTime = Date.now();
       
-      // createAnalysis should return a promise
       const createPromise = bakana.createAnalysis();
       
       if (!createPromise || typeof createPromise.then !== 'function') {
         throw new Error('bakana.createAnalysis() did not return a promise');
       }
       
+      console.log('createAnalysis returned a promise, awaiting with 60s timeout...');
       
-      // Add a timeout to detect if it hangs
       const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => {
           reject(new Error('createAnalysis() timed out after 60 seconds. The dataset may be too large or there may be a memory issue.'));
@@ -4798,8 +4617,11 @@ async function runMinimalAnalysisForGeneExpression() {
       analysisState = await Promise.race([createPromise, timeoutPromise]);
       
       const elapsed = Date.now() - startTime;
+      console.log(`✓ Analysis state created successfully in ${elapsed}ms`);
+      console.log('Analysis state type:', analysisState?.constructor?.name);
       if (analysisState) {
         const methods = Object.keys(analysisState).filter(k => typeof analysisState[k] === 'function');
+        console.log('Analysis state has', methods.length, 'methods');
       }
     } catch (createError) {
       console.error('✗ Failed to create analysis state:', createError);
@@ -4811,8 +4633,8 @@ async function runMinimalAnalysisForGeneExpression() {
       throw createError;
     }
     
-    // Run RNA-only analysis with minimal parameters
-    // Run up to rna_normalization to get the normalized matrix
+    console.log('Starting RNA analysis pipeline...');
+    console.log('Base params keys:', Object.keys(baseParams));
     
     try {
       await runRnaOnlyAnalysis(
@@ -4821,50 +4643,47 @@ async function runMinimalAnalysisForGeneExpression() {
         baseParams,
         {
           startFun: async (step) => {
+            console.log(`Minimal analysis: Starting ${step}...`);
             self.postMessage({
               type: 'STATUS_UPDATE',
               message: `Normalizing data (${step})...`,
             });
           },
           finishFun: async (step) => {
-            // Once normalization is done, we can stop (but we need to let the pipeline complete)
+            console.log(`Minimal analysis: Completed ${step}`);
             if (step === 'rna_normalization') {
+              console.log('Normalization step completed! Normalized matrix is now available.');
             }
           },
         }
       );
       
+      console.log('RNA analysis pipeline completed');
     } catch (pipelineError) {
       console.error('RNA analysis pipeline failed:', pipelineError);
       console.error('Pipeline error stack:', pipelineError.stack);
       throw pipelineError;
     }
     
-    // Store the state
     loadedData.state = analysisState;
+    console.log('Analysis state stored in loadedData');
     
-    // Initialize currentParameters from the baseParams we used
     currentParameters = baseParams;
+    console.log('Current parameters initialized');
     
+    console.log('Minimal analysis completed. Normalized matrix is now available.');
     
   } catch (error) {
     console.error('Minimal analysis failed:', error);
     console.error('Error details:', error.stack);
-    // If minimal analysis fails, fall back to full analysis
+    console.log('Falling back to full analysis pipeline...');
     await runFullAnalysisPipeline({ labelPrefix: 'minimal-fallback' });
   }
 }
 
-/**
- * Parse MERFISH-specific spatial data files
- * For MERFISH, we use row indices as cell IDs to avoid scientific notation matching issues.
- * All MERFISH files should have cells in the same order, so row 0 in counts = row 0 in spatial, etc.
- *
- * @param {Object} files: MERFISH files (merfishSpatial, merfishClusters, merfishUmap)
- * @param {Array} cellIds: Array of cell IDs from the counts file (for matching)
- * @returns {Object} Spatial data object compatible with the analysis pipeline
- */
 async function parseMERFISHSpatialData(files, cellIds) {
+  console.log('=== Parsing MERFISH spatial data ===');
+  console.log('Number of cells from counts:', cellIds.length);
 
   const result = {
     coordinates: null,
@@ -4877,7 +4696,6 @@ async function parseMERFISHSpatialData(files, cellIds) {
     },
   };
 
-  // Helper to ensure data is Uint8Array
   function ensureUint8Array(data, name) {
     if (!data) {
       throw new Error(`${name} data is null or undefined`);
@@ -4892,9 +4710,8 @@ async function parseMERFISHSpatialData(files, cellIds) {
     throw new Error(`Cannot convert ${name} to Uint8Array`);
   }
 
-  // Parse spatial coordinates from cell_metadata.csv
-  // Use row index as cell ID to avoid scientific notation issues
   if (files.merfishSpatial?.data) {
+    console.log('Parsing MERFISH spatial coordinates...');
     try {
       const spatialFileData = ensureUint8Array(files.merfishSpatial.data, 'merfishSpatial');
       const spatialText = new TextDecoder().decode(spatialFileData);
@@ -4902,12 +4719,13 @@ async function parseMERFISHSpatialData(files, cellIds) {
 
       if (lines.length > 1) {
         const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+        console.log('MERFISH spatial headers:', headers);
 
-        // Find column indices for cell ID, center_x, center_y
         const idIdx = headers.findIndex(h => /^(EntityID|cell_id|barcode|cell|id)$/i.test(h));
         const xIdx = headers.findIndex(h => /^(center_x|x_centroid|x)$/i.test(h));
         const yIdx = headers.findIndex(h => /^(center_y|y_centroid|y)$/i.test(h));
 
+        console.log('MERFISH spatial column indices: idIdx=', idIdx, 'xIdx=', xIdx, 'yIdx=', yIdx);
 
         if (xIdx >= 0 && yIdx >= 0) {
           const idToCoord = new Map();
@@ -4927,6 +4745,8 @@ async function parseMERFISHSpatialData(files, cellIds) {
           }
 
           result.idToCoord = idToCoord;
+          console.log(`✓ Parsed MERFISH spatial coordinates for ${idToCoord.size} cells`);
+          console.log('Sample spatial IDs (first 5):', Array.from(idToCoord.keys()).slice(0, 5));
         } else {
           console.warn('Could not find center_x/center_y columns in MERFISH spatial file');
         }
@@ -4936,8 +4756,8 @@ async function parseMERFISHSpatialData(files, cellIds) {
     }
   }
 
-  // Parse UMAP coordinates from cell_numeric_categories.csv
   if (files.merfishUmap?.data) {
+    console.log('Parsing MERFISH UMAP coordinates...');
     try {
       const umapFileData = ensureUint8Array(files.merfishUmap.data, 'merfishUmap');
       const umapText = new TextDecoder().decode(umapFileData);
@@ -4945,12 +4765,13 @@ async function parseMERFISHSpatialData(files, cellIds) {
 
       if (lines.length > 1) {
         const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+        console.log('MERFISH UMAP headers:', headers);
 
-        // Find column indices
         const idIdx = headers.findIndex(h => /^(EntityID|cell_id|barcode|cell|id)$/i.test(h));
         const umapXIdx = headers.findIndex(h => /^(umap_X|UMAP-1|umap_1|UMAP1)$/i.test(h));
         const umapYIdx = headers.findIndex(h => /^(umap_Y|UMAP-2|umap_2|UMAP2)$/i.test(h));
 
+        console.log('MERFISH UMAP column indices: idIdx=', idIdx, 'umapXIdx=', umapXIdx, 'umapYIdx=', umapYIdx);
 
         if (umapXIdx >= 0 && umapYIdx >= 0) {
           const umapMap = new Map();
@@ -4970,6 +4791,9 @@ async function parseMERFISHSpatialData(files, cellIds) {
           }
 
           result.precomputed.umap = { map: umapMap };
+          console.log(`✓ Parsed MERFISH UMAP coordinates for ${umapMap.size} cells`);
+          console.log('Sample UMAP IDs (first 5):', Array.from(umapMap.keys()).slice(0, 5));
+          console.log('Sample UMAP values:', Array.from(umapMap.values()).slice(0, 3));
         } else {
           console.warn('Could not find umap_X/umap_Y columns in MERFISH UMAP file');
         }
@@ -4979,8 +4803,8 @@ async function parseMERFISHSpatialData(files, cellIds) {
     }
   }
 
-  // Parse clustering from cell_categories.csv
   if (files.merfishClusters?.data) {
+    console.log('Parsing MERFISH clustering...');
     try {
       const clusterFileData = ensureUint8Array(files.merfishClusters.data, 'merfishClusters');
       const clusterText = new TextDecoder().decode(clusterFileData);
@@ -4988,16 +4812,16 @@ async function parseMERFISHSpatialData(files, cellIds) {
 
       if (lines.length > 1) {
         const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+        console.log('MERFISH clusters headers:', headers);
 
-        // Find column indices
         const idIdx = headers.findIndex(h => /^(EntityID|cell_id|barcode|cell|id)$/i.test(h));
         let clusterIdx = headers.findIndex(h => /^(leiden|cluster|Cluster|group)$/i.test(h));
 
-        // If no specific cluster column found, use second column
         if (clusterIdx < 0 && headers.length > 1) {
           clusterIdx = 1;
         }
 
+        console.log('MERFISH clusters column indices: idIdx=', idIdx, 'clusterIdx=', clusterIdx);
 
         if (clusterIdx >= 0) {
           const clusterMap = new Map();
@@ -5016,9 +4840,11 @@ async function parseMERFISHSpatialData(files, cellIds) {
           }
 
           result.precomputed.clusters = { map: clusterMap };
+          console.log(`✓ Parsed MERFISH clusters for ${clusterMap.size} cells`);
+          console.log('Sample cluster IDs (first 5):', Array.from(clusterMap.keys()).slice(0, 5));
 
-          // Get unique clusters
           const uniqueClusters = [...new Set(clusterMap.values())];
+          console.log('Unique clusters:', uniqueClusters.length, uniqueClusters.slice(0, 10));
         } else {
           console.warn('Could not find cluster column in MERFISH clusters file');
         }
@@ -5031,16 +4857,9 @@ async function parseMERFISHSpatialData(files, cellIds) {
   return result;
 }
 
-/**
- * Parse CosMX-specific spatial data from the metadata CSV file.
- * CosMX does NOT come with precomputed UMAP or clusters, so we only parse spatial coordinates.
- * The coordinates are in the CenterX_global_px and CenterY_global_px columns.
- *
- * @param {Uint8Array|ArrayBuffer|Array} spatialFileData: Raw bytes of the metadata CSV
- * @param {Array} cellIds: Array of cell IDs from the counts file (for matching)
- * @returns {Object} Spatial data object compatible with the analysis pipeline
- */
 function parseCosMXSpatialData(spatialFileData, cellIds) {
+  console.log('=== Parsing CosMX spatial data ===');
+  console.log('Number of cells from counts:', cellIds.length);
 
   const result = {
     coordinates: null,
@@ -5074,9 +4893,8 @@ function parseCosMXSpatialData(spatialFileData, cellIds) {
     }
 
     const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+    console.log('CosMX metadata headers:', headers);
 
-    // Find column indices: fov, cell_ID (or cell_id / "cell id"), CenterX_global_px, CenterY_global_px
-    // Use flexible matching so alternate column names (e.g. "FOV", "Cell_ID", "Center X global px") work
     const fovIdx = headers.findIndex(h => /^fov$/i.test(h.trim()));
     let effectiveCellIdIdx = headers.findIndex(h => /^cell_ID$/i.test(h.trim()) || /^cell_id$/i.test(h.trim()));
     if (effectiveCellIdIdx < 0) {
@@ -5086,7 +4904,6 @@ function parseCosMXSpatialData(spatialFileData, cellIds) {
     let xIdx = headers.findIndex(h => /^CenterX_global_px$/i.test(h.trim()));
     let yIdx = headers.findIndex(h => /^CenterY_global_px$/i.test(h.trim()));
     if (xIdx < 0 || yIdx < 0) {
-      // Fallback: columns containing center, global, and x/y (e.g. "Center X global px")
       const hx = headers.findIndex(h => /center/i.test(h) && /global/i.test(h) && /x/i.test(h) && /px/i.test(h));
       const hy = headers.findIndex(h => /center/i.test(h) && /global/i.test(h) && /y/i.test(h) && /px/i.test(h));
       if (hx >= 0) xIdx = hx;
@@ -5097,6 +4914,7 @@ function parseCosMXSpatialData(spatialFileData, cellIds) {
 
     const fovCol = fovIdx >= 0 ? fovIdx : -1;
     const cellIdCol = effectiveCellIdIdx >= 0 ? effectiveCellIdIdx : -1;
+    console.log('CosMX spatial column indices: fovIdx=', fovCol, 'cellIdIdx=', cellIdCol, 'xIdx=', xIdx, 'yIdx=', yIdx);
 
     if (xIdx < 0 || yIdx < 0) {
       console.warn('Could not find CenterX_global_px/CenterY_global_px columns in CosMX metadata file. Headers:', headers);
@@ -5104,9 +4922,8 @@ function parseCosMXSpatialData(spatialFileData, cellIds) {
     }
 
     const idToCoord = new Map();
-    const coordinatesInMetadataOrder = []; // fallback when key match fails but row count matches
+    const coordinatesInMetadataOrder = [];
 
-    // Helper: normalize composite key so "01_100" and "1_100" both match (counts may use numeric fov/cell_ID)
     const normalizedKey = (fov, cellId) => {
       const a = String(fov).trim();
       const b = String(cellId).trim();
@@ -5136,18 +4953,17 @@ function parseCosMXSpatialData(spatialFileData, cellIds) {
 
     result.idToCoord = idToCoord;
     result.coordinatesInMetadataOrder = coordinatesInMetadataOrder;
+    console.log(`✓ Parsed CosMX spatial coordinates for ${idToCoord.size} cells (${coordinatesInMetadataOrder.length} rows in metadata order)`);
+    console.log('Sample spatial IDs (first 5):', Array.from(idToCoord.keys()).slice(0, 5));
   } catch (error) {
     console.error('Failed to parse CosMX spatial coordinates:', error);
   }
 
-  // CosMX does NOT have precomputed UMAP or clusters
-  // The analysis pipeline will compute them
   return result;
 }
 
 async function loadData(payload) {
   const { path, info, files, spatialInfo } = payload;
-  // Saved results from a previous analysis run (from cellpilot_results.json)
   const payloadPreviousResults = payload.previousResults || null;
   const isIntegration = payload.modality === 'integration' && Array.isArray(payload.datasets) && payload.datasets.length >= 2 && payload.datasets.length <= 3;
   const isAtacIntegration = payload.modality === 'atac-integration' && Array.isArray(payload.atacDatasets) && payload.atacDatasets.length >= 2 && payload.atacDatasets.length <= 3;
@@ -5156,7 +4972,7 @@ async function loadData(payload) {
   const isMerfishIntegration = payload.modality === 'merfish-integration' && Array.isArray(payload.merfishDatasets) && payload.merfishDatasets.length === 2;
 
   try {
-    // Reset state when loading new data
+    console.log('=== WORKER: Resetting state for new data load ===');
     loadedData = null;
     cachedGeneNames = null;
     cachedGeneLookup = null;
@@ -5175,12 +4991,14 @@ async function loadData(payload) {
       message: isIntegration ? 'Loading integration datasets...' : isXeniumIntegration ? 'Loading Xenium integration datasets...' : isVisiumHDIntegration ? 'Loading Visium HD integration datasets...' : isMerfishIntegration ? 'Loading MERFISH integration datasets...' : 'Loading 10x data...',
     });
 
+    console.log('=== WORKER loadData called ===', isIntegration ? '(integration)' : isXeniumIntegration ? '(xenium-integration)' : isVisiumHDIntegration ? '(visium-hd-integration)' : isMerfishIntegration ? '(merfish-integration)' : '');
     if (!isIntegration && !isXeniumIntegration && !isVisiumHDIntegration && !isMerfishIntegration) {
+      console.log('Path:', path);
+      console.log('Files received:', Object.keys(files || {}));
     }
     let cellBarcodes = null;
-    let spatialData = null; // Will be populated for spatial modalities (MERFISH, Xenium, Visium HD)
+    let spatialData = null;
 
-    // If data is a plain object with numeric keys (serialized array), convert it
     function ensureUint8Array(data, name) {
       if (!data) {
         throw new Error(`${name} data is null or undefined`);
@@ -5216,7 +5034,6 @@ async function loadData(payload) {
       throw new Error(`Cannot convert ${name} to Uint8Array: received ${typeof data}`);
     }
 
-    // --- Integration: 2–3 scRNA-seq datasets, MNN correction, per-dataset UMAP views ---
     if (isIntegration) {
       const datasetList = payload.datasets;
       const datasetNames = datasetList.map((d) => d.name);
@@ -5243,7 +5060,6 @@ async function loadData(payload) {
           const h5Blob = new File([h5Data], h5File.name || 'data.h5', { type: 'application/octet-stream' });
           dset = new bakana.TenxHdf5Dataset(h5Blob);
         }
-        // Pass real bakana Dataset (inputs step expects constructor.format() and abbreviate())
         datasetsForBakana[ds.name] = dset;
       }
       loadedData = {
@@ -5263,12 +5079,10 @@ async function loadData(payload) {
       };
       self.postMessage({ type: 'STATUS_UPDATE', message: 'Running integration (normalization, MNN, PCA, UMAP, clustering)...' });
       const baseParams = buildDefaultParameters({ fastMode: false });
-      // Set MNN batch correction manually (configureBatchCorrection expects adt_pca/crispr_pca which we don't clone)
       baseParams.batch_correction = baseParams.batch_correction || {};
       baseParams.batch_correction.method = 'mnn';
       baseParams.rna_pca = baseParams.rna_pca || {};
       baseParams.rna_pca.block_method = 'project';
-      // Use larger UMAP min_dist for multiple samples (better separation of batches)
       baseParams.umap = baseParams.umap || {};
       baseParams.umap.min_dist = 0.4;
       analysisState = await bakana.createAnalysis();
@@ -5307,8 +5121,6 @@ async function loadData(payload) {
       } catch (e) {
         console.warn('Could not get block from filtering state:', e);
       }
-      // Fallback: derive block from __batch__ column (set by bakana for multi-dataset)
-      // Only use when annotations length matches filtered nCells (inputs annotations may be unfiltered)
       if ((!blockIds || !blockLevels) && annotations && typeof annotations.column === 'function' && annotations.hasColumn && annotations.hasColumn('__batch__')) {
         try {
           const batchCol = annotations.column('__batch__');
@@ -5321,6 +5133,7 @@ async function loadData(payload) {
               const idx = order.indexOf(name);
               return idx >= 0 ? idx : 0;
             });
+            console.log('Integration: using __batch__ column for block, levels:', blockLevels);
           }
         } catch (e) {
           console.warn('Could not get block from __batch__:', e);
@@ -5391,24 +5204,22 @@ async function loadData(payload) {
           datasetNames,
         },
       });
+      console.log('Integration complete:', nCells, 'cells', nGenes, 'genes', 'views:', Object.keys(integrationViews));
       return;
     }
 
-    // MERFISH Integration: 2-sample MERFISH with MNN batch correction
     if (isMerfishIntegration) {
       const merfishDatasetList = payload.merfishDatasets;
       const datasetNames = merfishDatasetList.map((d) => d.name);
       const datasetsForBakana = {};
       let totalBytes = 0;
 
-      // Parse per-sample spatial coordinates and build bakana datasets from cell_by_gene.csv
       const perSampleSpatial = {};
       for (let i = 0; i < merfishDatasetList.length; i++) {
         const ds = merfishDatasetList[i];
         const f = ds.files || {};
         self.postMessage({ type: 'STATUS_UPDATE', message: `Parsing MERFISH sample "${ds.name}"...` });
 
-        // Parse cell_by_gene.csv to build counts matrix
         if (!f.counts?.data) {
           throw new Error(`MERFISH sample "${ds.name}": cell_by_gene.csv missing`);
         }
@@ -5420,7 +5231,6 @@ async function loadData(payload) {
           throw new Error(`MERFISH sample "${ds.name}": cell_by_gene.csv has no data rows`);
         }
 
-        // Parse header to get gene names, filter out "Blank*" columns
         const rawHeaders = countsLines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
         const geneIndices = [];
         const geneNames = [];
@@ -5430,8 +5240,8 @@ async function loadData(payload) {
             geneNames.push(rawHeaders[gi]);
           }
         }
+        console.log(`MERFISH "${ds.name}": ${rawHeaders.length - 1} total genes, ${geneNames.length} after filtering Blank*`);
 
-        // Parse data rows to build sparse matrix
         const nGenesSample = geneNames.length;
         const nCellsSample = countsLines.length - 1;
         const cellIds = [];
@@ -5452,7 +5262,6 @@ async function loadData(payload) {
           }
         }
 
-        // Convert to MatrixMarket format
         const mmHeader = '%%MatrixMarket matrix coordinate integer general\n';
         const mmSizeLine = `${nGenesSample} ${nCellsSample} ${sparseData.length}\n`;
         sparseData.sort((a, b) => a.col !== b.col ? a.col - b.col : a.row - b.row);
@@ -5471,8 +5280,8 @@ async function loadData(payload) {
         const barcodesBlob = new File([barcodesCompressed], 'barcodes.tsv.gz', { type: 'application/gzip' });
 
         datasetsForBakana[ds.name] = new bakana.TenxMatrixMarketDataset(matrixBlob, featuresBlob, barcodesBlob);
+        console.log(`MERFISH "${ds.name}": ${nCellsSample} cells, ${nGenesSample} genes, ${sparseData.length} non-zero entries`);
 
-        // Parse spatial coordinates from cell_metadata.csv
         if (f.spatial?.data) {
           try {
             const spatialRaw = ensureUint8Array(f.spatial.data, `${ds.name} spatial`);
@@ -5510,6 +5319,7 @@ async function loadData(payload) {
                   spatialExtent: coords.length > 0 ? { xMin, xMax, yMin, yMax } : null,
                   metadata: payload.perSampleSpatialInfo?.[i]?.metadata || null,
                 };
+                console.log(`MERFISH "${ds.name}": parsed ${coords.length} spatial coordinates`);
               }
             }
           } catch (e) {
@@ -5518,7 +5328,6 @@ async function loadData(payload) {
         }
       }
 
-      // Run MNN integration pipeline
       loadedData = {
         path: merfishDatasetList[0].path,
         info: { modality: 'merfish-integration', datasetNames, format: 'MERFISH Integration' },
@@ -5663,7 +5472,6 @@ async function loadData(payload) {
           currentResults.clusters = prevResultsMerfish.clusters;
           const nClustersPrev = prevResultsMerfish.nClusters != null ? prevResultsMerfish.nClusters : new Set(prevResultsMerfish.clusters).size;
 
-          // Align per-sample spatial coordinates to filtered cell order
           for (const name of datasetNames) {
             const sampleSpatial = perSampleSpatial[name];
             if (!sampleSpatial || !Array.isArray(sampleSpatial.cellIds)) continue;
@@ -5747,10 +5555,10 @@ async function loadData(payload) {
               restoredClusterColorOverrides: prevResultsMerfish.clusterColorOverrides || {},
             },
           });
+          console.log('CellPilot: previous MERFISH integration results restored');
           return;
         }
       }
-      // Full pipeline: normalization, MNN, PCA, UMAP, clustering
       self.postMessage({ type: 'STATUS_UPDATE', message: 'Running MERFISH integration (normalization, MNN, PCA, UMAP, clustering)...' });
       const baseParams = buildDefaultParameters({ fastMode: false });
       baseParams.batch_correction = baseParams.batch_correction || {};
@@ -5845,6 +5653,7 @@ async function loadData(payload) {
       const filteredBarcodes = getOrderedBarcodesFromFilteredState(analysisState);
       if (filteredBarcodes && filteredBarcodes.length === nCells) {
         cellBarcodesList = filteredBarcodes;
+        console.log('MERFISH integration: using barcodes from bakana annotations');
       } else {
         const keepResult = analysisState.cell_filtering?.fetchKeep?.();
         let keepMask = null;
@@ -5880,6 +5689,7 @@ async function loadData(payload) {
             const cellId = sampleSpatial?.cellIds?.[inSampleIdx];
             cellBarcodesList.push(cellId != null ? String(cellId) : `cell_${j}`);
           }
+          console.log('MERFISH integration: built barcodes from spatial cellIds');
         } else {
           for (let ii = 0; ii < nCells; ii++) cellBarcodesList.push(`cell_${ii}`);
           console.warn('MERFISH integration: could not derive barcodes, using fallback');
@@ -5887,7 +5697,6 @@ async function loadData(payload) {
       }
       loadedData.cellBarcodes = cellBarcodesList;
 
-      // Align per-sample spatial coordinates with bakana's filtered cell order
       for (const name of datasetNames) {
         const sampleSpatial = perSampleSpatial[name];
         if (!sampleSpatial || !Array.isArray(sampleSpatial.cellIds)) continue;
@@ -5900,6 +5709,9 @@ async function loadData(payload) {
         if (sampleIndices.length > 0) {
           const firstBarcodes = sampleIndices.slice(0, 5).map(ii => String(cellBarcodesList[ii] || ''));
           const firstCsvIds = sCellIds.slice(0, 5).map(id => String(id));
+          console.log(`MERFISH "${name}": ${sampleIndices.length} filtered cells, ${allCoords.length} CSV rows`);
+          console.log(`  Bakana barcodes (first 5):`, firstBarcodes);
+          console.log(`  CSV cell IDs (first 5):`, firstCsvIds);
         }
         const alignedCoords = new Array(sampleIndices.length);
         let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
@@ -5926,7 +5738,9 @@ async function loadData(payload) {
             alignedCoords[j] = null;
           }
         }
+        console.log(`MERFISH "${name}": barcode-matched ${matchedCount}/${sampleIndices.length} cells`);
         if (matchedCount < sampleIndices.length * 0.5 && allCoords.length > 0) {
+          console.log(`MERFISH "${name}": low barcode match rate, using positional fallback`);
           xMin = Infinity; xMax = -Infinity; yMin = Infinity; yMax = -Infinity;
           for (let j = 0; j < sampleIndices.length; j++) {
             const coord = allCoords[Math.min(j, allCoords.length - 1)];
@@ -5943,6 +5757,7 @@ async function loadData(payload) {
         }
         sampleSpatial.spatialCoordinates = alignedCoords;
         sampleSpatial.spatialExtent = Number.isFinite(xMin) ? { xMin, xMax, yMin, yMax } : null;
+        console.log(`MERFISH "${name}": final extent`, sampleSpatial.spatialExtent);
       }
 
       loadedData.perSampleSpatial = perSampleSpatial;
@@ -5973,24 +5788,22 @@ async function loadData(payload) {
           perSampleSpatial,
         },
       });
+      console.log('MERFISH integration complete:', nCells, 'cells', nGenes, 'genes', 'views:', Object.keys(integrationViews));
       return;
     }
 
-    // Xenium Integration: 2-sample Xenium with MNN batch correction
     if (isXeniumIntegration) {
       const xeniumDatasetList = payload.xeniumDatasets;
       const datasetNames = xeniumDatasetList.map((d) => d.name);
       const datasetsForBakana = {};
       let totalBytes = 0;
 
-      // Parse per-sample spatial coordinates first (for rendering in the frontend)
       const perSampleSpatial = {};
       for (let i = 0; i < xeniumDatasetList.length; i++) {
         const ds = xeniumDatasetList[i];
         const f = ds.files || {};
         self.postMessage({ type: 'STATUS_UPDATE', message: `Parsing Xenium sample "${ds.name}"...` });
 
-        // Build bakana dataset from cell_feature_matrix
         let dset;
         if (f.h5) {
           const h5Data = ensureUint8Array(f.h5.data, `${ds.name} HDF5`);
@@ -6011,7 +5824,6 @@ async function loadData(payload) {
         }
         datasetsForBakana[ds.name] = dset;
 
-        // Parse spatial coordinates from cells CSV
         if (f.cells?.data) {
           try {
             const rawBuf = ensureUint8Array(f.cells.data, `${ds.name} cells`);
@@ -6034,9 +5846,6 @@ async function loadData(payload) {
                   for (let j = 1; j < lines.length; j++) {
                     const values = lines[j].split(',').map(v => v.trim().replace(/^["']|["']$/g, ''));
                     if (values.length > Math.max(xIdx, yIdx)) {
-                      // Store raw µm coordinates, same as single-sample Xenium loader.
-                      // SpatialPlotView divides by spatialScaleFactor (0.2125) itself before
-                      // applying the transformation matrix, so we must NOT pre-divide here.
                       const x = parseFloat(values[xIdx]);
                       const y = parseFloat(values[yIdx]);
                       if (isFinite(x) && isFinite(y)) {
@@ -6055,6 +5864,7 @@ async function loadData(payload) {
                     spatialExtent: coords.length > 0 ? { xMin, xMax, yMin, yMax } : null,
                     metadata: payload.perSampleSpatialInfo?.[i]?.metadata || null,
                   };
+                  console.log(`Xenium "${ds.name}": parsed ${coords.length} spatial coordinates`);
                 }
               }
             }
@@ -6064,7 +5874,6 @@ async function loadData(payload) {
         }
       }
 
-      // Run MNN integration pipeline (same as scRNA-seq integration)
       loadedData = {
         path: xeniumDatasetList[0].path,
         info: { modality: 'xenium-integration', datasetNames, format: 'Xenium Integration' },
@@ -6165,6 +5974,7 @@ async function loadData(payload) {
           const filteredBarcodes = getOrderedBarcodesFromFilteredState(analysisState);
           if (filteredBarcodes && filteredBarcodes.length === nCellsPrev) {
             cellBarcodesList = filteredBarcodes;
+            console.log('Xenium integration restore: using barcodes from bakana annotations');
           } else {
             const keepResult = analysisState.cell_filtering?.fetchKeep?.();
             let keepMask = null;
@@ -6203,6 +6013,7 @@ async function loadData(payload) {
                 const cellId = sampleSpatial?.cellIds?.[inSampleIdx];
                 cellBarcodesList.push(cellId != null ? String(cellId) : `cell_${j}`);
               }
+              console.log('Xenium integration restore: built barcodes from spatial cellIds');
             } else {
               for (let i = 0; i < nCellsPrev; i++) cellBarcodesList.push(`cell_${i}`);
               console.warn('Xenium integration restore: using fallback cell_N (spatial alignment may be approximate)');
@@ -6213,8 +6024,6 @@ async function loadData(payload) {
           currentResults.clusters = prevResultsXenium.clusters;
           const nClustersPrev = prevResultsXenium.nClusters != null ? prevResultsXenium.nClusters : new Set(prevResultsXenium.clusters).size;
 
-          // Align per-sample spatial coordinates to filtered cell order (same as full pipeline)
-          // so spatial plot colors match cluster assignments; without this, coords are in CSV order and matching is wrong
           for (const name of datasetNames) {
             const sampleSpatial = perSampleSpatial[name];
             if (!sampleSpatial || !Array.isArray(sampleSpatial.cellIds)) continue;
@@ -6308,6 +6117,7 @@ async function loadData(payload) {
               restoredClusterColorOverrides: prevResultsXenium.clusterColorOverrides || {},
             },
           });
+          console.log('CellPilot: previous Xenium integration results restored');
           return;
         }
       }
@@ -6400,16 +6210,13 @@ async function loadData(payload) {
         }
         integrationViews[name] = { indices };
       }
-      // Store integrationViews on loadedData so "plot clusters" can re-send them later
       loadedData.integrationViews = integrationViews;
       let cellBarcodesList = [];
-      // Prefer bakana annotations (rowNames or barcode column), then fall back to spatial cellIds
       const filteredBarcodes = getOrderedBarcodesFromFilteredState(analysisState);
       if (filteredBarcodes && filteredBarcodes.length === nCells) {
         cellBarcodesList = filteredBarcodes;
+        console.log('Xenium integration: using barcodes from bakana annotations');
       } else {
-        // Build barcodes from per-sample spatial cellIds (H5 format often lacks barcodes in annotations).
-        // Map each filtered cell to its original cell_id via keep mask + block structure.
         const keepResult = analysisState.cell_filtering?.fetchKeep?.();
         let keepMask = null;
         if (keepResult) {
@@ -6448,6 +6255,7 @@ async function loadData(payload) {
             const cellId = sampleSpatial?.cellIds?.[inSampleIdx];
             cellBarcodesList.push(cellId != null ? String(cellId) : `cell_${j}`);
           }
+          console.log('Xenium integration: built barcodes from spatial cellIds (H5 barcodes not in annotations)');
         } else {
           for (let i = 0; i < nCells; i++) cellBarcodesList.push(`cell_${i}`);
           console.warn('Xenium integration: could not derive barcodes, using fallback cell_N (spatial alignment may fail)');
@@ -6455,21 +6263,15 @@ async function loadData(payload) {
       }
       loadedData.cellBarcodes = cellBarcodesList;
 
-      // Align per-sample spatial coordinates with bakana's filtered cell order.
-      // perSampleSpatial[name].spatialCoordinates is in CSV row order (all cells),
-      // but integrationViews[name].indices are indices into the global filtered array.
-      // Reorder so coord[j] matches the j-th filtered cell for each sample.
       for (const name of datasetNames) {
         const sampleSpatial = perSampleSpatial[name];
         if (!sampleSpatial || !Array.isArray(sampleSpatial.cellIds)) continue;
         const { cellIds, spatialCoordinates: allCoords } = sampleSpatial;
 
-        // Build cellId → CSV row index lookup (store both original string and numeric normalization)
         const cellIdToIdx = new Map();
         for (let k = 0; k < cellIds.length; k++) {
           const id = String(cellIds[k]);
           cellIdToIdx.set(id, k);
-          // Also index by parsed integer (strips leading zeros etc.)
           const num = parseInt(id, 10);
           if (!isNaN(num)) {
             const numStr = String(num);
@@ -6479,10 +6281,12 @@ async function loadData(payload) {
 
         const sampleIndices = integrationViews[name]?.indices || [];
 
-        // Diagnostic: log first few barcodes to help diagnose format mismatches
         if (sampleIndices.length > 0) {
           const firstBarcodes = sampleIndices.slice(0, 5).map(i => String(cellBarcodesList[i] || ''));
           const firstCsvIds = cellIds.slice(0, 5).map(id => String(id));
+          console.log(`Xenium "${name}": ${sampleIndices.length} filtered cells, ${allCoords.length} CSV rows`);
+          console.log(`  Bakana barcodes (first 5):`, firstBarcodes);
+          console.log(`  CSV cell IDs (first 5):`, firstCsvIds);
         }
 
         const alignedCoords = new Array(sampleIndices.length);
@@ -6494,11 +6298,8 @@ async function loadData(payload) {
           const fullBarcode = String(cellBarcodesList[globalIdx] || '');
           let csvIdx;
 
-          // Strategy 1: direct match
           csvIdx = cellIdToIdx.get(fullBarcode);
 
-          // Strategy 2: strip sample-name prefix (parts separated by underscore)
-          // e.g. "Day42_1" → try "1"; "SampleA_plate1_42" → try "plate1_42" then "42"
           if (csvIdx === undefined && fullBarcode.includes('_')) {
             const parts = fullBarcode.split('_');
             for (let p = 1; p < parts.length && csvIdx === undefined; p++) {
@@ -6506,7 +6307,6 @@ async function loadData(payload) {
             }
           }
 
-          // Strategy 3: extract trailing numeric suffix (e.g. "AAACCTGAGAAACCAT-1" → "1")
           if (csvIdx === undefined) {
             const numMatch = fullBarcode.match(/(\d+)$/);
             if (numMatch) csvIdx = cellIdToIdx.get(numMatch[1]);
@@ -6521,14 +6321,14 @@ async function loadData(payload) {
             if (coord[1] > yMax) yMax = coord[1];
             matchedCount++;
           } else {
-            alignedCoords[j] = null; // placeholder for positional fallback below
+            alignedCoords[j] = null;
           }
         }
 
+        console.log(`Xenium "${name}": barcode-matched ${matchedCount}/${sampleIndices.length} cells`);
 
-        // Positional fallback: if fewer than 50% matched by barcode, use CSV row order directly.
-        // This assumes bakana preserves the relative order of cells within each sample after QC filtering.
         if (matchedCount < sampleIndices.length * 0.5 && allCoords.length > 0) {
+          console.log(`Xenium "${name}": low barcode match rate, using positional fallback (CSV row order)`);
           xMin = Infinity; xMax = -Infinity; yMin = Infinity; yMax = -Infinity;
           for (let j = 0; j < sampleIndices.length; j++) {
             const coord = allCoords[Math.min(j, allCoords.length - 1)];
@@ -6539,7 +6339,6 @@ async function loadData(payload) {
             if (coord[1] > yMax) yMax = coord[1];
           }
         } else {
-          // Fill any remaining null placeholders with [0, 0] (unmatched minority of cells)
           for (let j = 0; j < alignedCoords.length; j++) {
             if (alignedCoords[j] === null) alignedCoords[j] = [0, 0];
           }
@@ -6547,6 +6346,7 @@ async function loadData(payload) {
 
         sampleSpatial.spatialCoordinates = alignedCoords;
         sampleSpatial.spatialExtent = Number.isFinite(xMin) ? { xMin, xMax, yMin, yMax } : null;
+        console.log(`Xenium "${name}": final extent`, sampleSpatial.spatialExtent);
       }
 
       loadedData.perSampleSpatial = perSampleSpatial;
@@ -6577,24 +6377,22 @@ async function loadData(payload) {
           perSampleSpatial,
         },
       });
+      console.log('Xenium integration complete:', nCells, 'cells', nGenes, 'genes', 'views:', Object.keys(integrationViews));
       return;
     }
 
-    // Visium HD Integration: 2-sample Visium HD with MNN batch correction:
     if (isVisiumHDIntegration) {
       const visiumHDDatasetList = payload.visiumHDDatasets;
       const datasetNames = visiumHDDatasetList.map((d) => d.name);
       const datasetsForBakana = {};
       let totalBytes = 0;
 
-      // Parse per-sample spatial coordinates from GeoJSON cellSegmentation
       const perSampleSpatial = {};
       for (let i = 0; i < visiumHDDatasetList.length; i++) {
         const ds = visiumHDDatasetList[i];
         const f = ds.files || {};
         self.postMessage({ type: 'STATUS_UPDATE', message: `Parsing Visium HD sample "${ds.name}"...` });
 
-        // Build bakana dataset from cell_feature_matrix (HDF5 or MatrixMarket)
         let dset;
         if (f.h5) {
           const h5Data = ensureUint8Array(f.h5.data, `${ds.name} HDF5`);
@@ -6615,7 +6413,6 @@ async function loadData(payload) {
         }
         datasetsForBakana[ds.name] = dset;
 
-        // Parse spatial coordinates from GeoJSON cell segmentation
         if (f.cellSegmentation?.data) {
           try {
             const rawBuf = ensureUint8Array(f.cellSegmentation.data, `${ds.name} cellSegmentation`);
@@ -6636,7 +6433,6 @@ async function loadData(payload) {
                 const coordinates = feature.geometry.coordinates[0];
                 if (!Array.isArray(coordinates) || coordinates.length < 3) continue;
 
-                // Calculate centroid from polygon
                 let sumX = 0, sumY = 0;
                 for (const [cx, cy] of coordinates) {
                   sumX += cx;
@@ -6660,6 +6456,7 @@ async function loadData(payload) {
                   spatialExtent: { xMin, xMax, yMin, yMax },
                   metadata: payload.perSampleSpatialInfo?.[i]?.metadata || null,
                 };
+                console.log(`Visium HD "${ds.name}": parsed ${coords.length} spatial coordinates from GeoJSON`);
               }
             }
           } catch (e) {
@@ -6667,14 +6464,13 @@ async function loadData(payload) {
           }
         }
 
-        // Fallback for binned VisiumHD: parse tissue positions (CSV or parquet)
         if (!perSampleSpatial[ds.name] && f.tissuePositions?.data) {
           try {
             const rawBuf = ensureUint8Array(f.tissuePositions.data, `${ds.name} tissuePositions`);
             const isParquet = rawBuf.length >= 4 && rawBuf[0] === 0x50 && rawBuf[1] === 0x41 && rawBuf[2] === 0x52 && rawBuf[3] === 0x31;
 
             if (isParquet) {
-              // Parse parquet tissue positions using hyparquet
+              console.log(`Visium HD "${ds.name}": parsing tissue positions parquet (${rawBuf.length} bytes)...`);
               self.postMessage({ type: 'STATUS_UPDATE', message: `Parsing spatial coordinates for "${ds.name}" from parquet...` });
               if (!hyparquetCompressors) {
                 const compModule = await import('hyparquet-compressors');
@@ -6698,11 +6494,11 @@ async function loadData(payload) {
                 let barcodeCol = columns.find(c => /barcode/i.test(c));
                 let xCol = columns.find(c => /pxl_col/i.test(c));
                 let yCol = columns.find(c => /pxl_row/i.test(c));
-                // Visium HD binned: numeric column names (0=barcode, 4=y, 5=x)
                 if (!barcodeCol || !xCol || !yCol) {
                   const allNumeric = columns.length > 0 && columns.every(c => /^\d+$/.test(String(c)));
                   if (allNumeric && columns.length >= 6 && columns.includes('0') && columns.includes('4') && columns.includes('5')) {
                     barcodeCol = '0'; xCol = '5'; yCol = '4';
+                    console.log(`Visium HD "${ds.name}": using binned parquet column mapping: barcode=0, x=5, y=4`);
                   }
                 }
                 if (barcodeCol && xCol && yCol) {
@@ -6729,13 +6525,13 @@ async function loadData(payload) {
                       spatialExtent: { xMin, xMax, yMin, yMax },
                       metadata: payload.perSampleSpatialInfo?.[i]?.metadata || null,
                     };
+                    console.log(`Visium HD "${ds.name}": parsed ${coords.length} spatial coordinates from tissue positions parquet`);
                   }
                 } else {
                   console.warn(`Visium HD "${ds.name}": could not find barcode/x/y columns in parquet. Columns:`, columns);
                 }
               }
             } else {
-              // CSV tissue positions
               const csvText = new TextDecoder().decode(rawBuf);
               const lines = csvText.trim().split('\n');
               if (lines.length > 1) {
@@ -6772,6 +6568,7 @@ async function loadData(payload) {
                       spatialExtent: { xMin, xMax, yMin, yMax },
                       metadata: payload.perSampleSpatialInfo?.[i]?.metadata || null,
                     };
+                    console.log(`Visium HD "${ds.name}": parsed ${coords.length} spatial coordinates from tissue positions CSV`);
                   }
                 }
               }
@@ -6782,7 +6579,6 @@ async function loadData(payload) {
         }
       }
 
-      // Run MNN integration pipeline
       loadedData = {
         path: visiumHDDatasetList[0].path,
         info: { modality: 'visium-hd-integration', datasetNames, format: 'Visium HD Integration' },
@@ -6883,14 +6679,11 @@ async function loadData(payload) {
           }
           loadedData.integrationViews = integrationViews;
 
-          // Extract barcodes from bakana annotations (without requiring UMAP)
           let cellBarcodesList = [];
           {
             const annotations = analysisState.inputs.fetchCellAnnotations();
-            // First try: annotations already have filtered-length barcodes
             let barcodes = extractOrderedBarcodesFromAnnotations(annotations, nCellsPrev);
             if (!barcodes) {
-              // Second try: use keep mask to filter full-length barcodes
               const keepResult = analysisState.cell_filtering?.fetchKeep?.();
               let mask = null;
               if (keepResult) {
@@ -6927,6 +6720,7 @@ async function loadData(payload) {
             }
             if (barcodes && barcodes.length === nCellsPrev) {
               cellBarcodesList = barcodes;
+              console.log('Visium HD restore: extracted barcodes from annotations/keep mask');
             } else {
               for (let i = 0; i < nCellsPrev; i++) cellBarcodesList.push(`cell_${i}`);
               console.warn('Visium HD restore: could not extract barcodes, using fallback cell_N');
@@ -6937,8 +6731,6 @@ async function loadData(payload) {
           currentResults.clusters = prevResultsHD.clusters;
           const nClustersPrev = prevResultsHD.nClusters != null ? prevResultsHD.nClusters : new Set(prevResultsHD.clusters).size;
 
-          // Align per-sample spatial coordinates to filtered cell order
-          // Build keep mask → raw index mapping for position-based fallback
           let restoreKeepMask = null;
           try {
             const kpResult = analysisState.cell_filtering?.fetchKeep?.();
@@ -6947,14 +6739,13 @@ async function loadData(payload) {
               else if (typeof kpResult.toArray === 'function') restoreKeepMask = kpResult.toArray();
               else if (Array.isArray(kpResult) || kpResult instanceof Uint8Array) restoreKeepMask = kpResult;
             }
-          } catch (e) { /* ignore */ }
+          } catch (e) {  }
 
-          // Compute per-sample raw cell counts from block structure
           let rawBlockArray = null;
           try {
             const rawBlock = analysisState.inputs?.fetchBlock?.();
             if (rawBlock && rawBlock.length > 0) rawBlockArray = Array.from(rawBlock);
-          } catch (e) { /* ignore */ }
+          } catch (e) {  }
 
           for (const name of datasetNames) {
             const sampleSpatial = perSampleSpatial[name];
@@ -7008,19 +6799,18 @@ async function loadData(payload) {
                 alignedCoords[j] = null;
               }
             }
+            console.log(`Visium HD restore "${name}": barcode-matched ${matchedCount}/${sampleIndices.length} cells`);
 
             if (matchedCount < sampleIndices.length * 0.5 && allCoords.length > 0) {
-              // Barcode matching failed, use keep mask + block for position-based alignment
+              console.log(`Visium HD restore "${name}": low match rate, trying keep-mask position mapping`);
               let positionMapped = false;
               if (restoreKeepMask && rawBlockArray) {
                 const sampleBlockIdx = datasetNames.indexOf(name);
                 if (sampleBlockIdx >= 0) {
-                  // Compute raw start offset for this sample from raw block assignments
                   let sampleRawStart = 0;
                   for (let r = 0; r < rawBlockArray.length; r++) {
                     if (rawBlockArray[r] === sampleBlockIdx) { sampleRawStart = r; break; }
                   }
-                  // Build filtered→raw index mapping
                   const rawToFilteredIdx = [];
                   for (let r = 0; r < restoreKeepMask.length; r++) {
                     if (restoreKeepMask[r]) rawToFilteredIdx.push(r);
@@ -7049,6 +6839,7 @@ async function loadData(payload) {
                   }
                   if (posMatched > sampleIndices.length * 0.5) {
                     positionMapped = true;
+                    console.log(`Visium HD restore "${name}": position-mapped ${posMatched}/${sampleIndices.length} cells`);
                   }
                 }
               }
@@ -7065,7 +6856,6 @@ async function loadData(payload) {
                 }
               }
             }
-            // Fill any remaining null entries
             for (let j = 0; j < alignedCoords.length; j++) {
               if (alignedCoords[j] === null) alignedCoords[j] = [0, 0];
             }
@@ -7103,6 +6893,7 @@ async function loadData(payload) {
               restoredClusterColorOverrides: prevResultsHD.clusterColorOverrides || {},
             },
           });
+          console.log('CellPilot: previous Visium HD integration results restored');
           return;
         }
       }
@@ -7196,13 +6987,12 @@ async function loadData(payload) {
       }
       loadedData.integrationViews = hdIntegrationViews;
 
-      // Get barcodes from bakana annotations (UMAP was computed on full pipeline)
       let hdCellBarcodesList = [];
       const hdFilteredBarcodes = getOrderedBarcodesFromFilteredState(analysisState);
       if (hdFilteredBarcodes && hdFilteredBarcodes.length === nCellsHD) {
         hdCellBarcodesList = hdFilteredBarcodes;
+        console.log('Visium HD integration: using barcodes from bakana annotations');
       } else {
-        // Fallback: try annotations + keep mask directly (same logic without UMAP dependency)
         const hdAnno2 = analysisState.inputs.fetchCellAnnotations();
         let hdBarcodes2 = extractOrderedBarcodesFromAnnotations(hdAnno2, nCellsHD);
         if (!hdBarcodes2) {
@@ -7242,6 +7032,7 @@ async function loadData(payload) {
         }
         if (hdBarcodes2 && hdBarcodes2.length === nCellsHD) {
           hdCellBarcodesList = hdBarcodes2;
+          console.log('Visium HD integration: using barcodes from annotations/keep mask fallback');
         } else {
           for (let i = 0; i < nCellsHD; i++) hdCellBarcodesList.push(`cell_${i}`);
           console.warn('Visium HD integration: could not derive barcodes, using fallback cell_N');
@@ -7249,7 +7040,6 @@ async function loadData(payload) {
       }
       loadedData.cellBarcodes = hdCellBarcodesList;
 
-      // Prepare keep mask + raw block for position-based fallback alignment
       let hdKeepMask = null;
       try {
         const kpResult = analysisState.cell_filtering?.fetchKeep?.();
@@ -7258,32 +7048,28 @@ async function loadData(payload) {
           else if (typeof kpResult.toArray === 'function') hdKeepMask = kpResult.toArray();
           else if (Array.isArray(kpResult) || kpResult instanceof Uint8Array) hdKeepMask = kpResult;
         }
-      } catch (e) { /* ignore */ }
+      } catch (e) {  }
       let hdRawBlockArray = null;
       try {
         const rawBlock = analysisState.inputs?.fetchBlock?.();
         if (rawBlock && rawBlock.length > 0) hdRawBlockArray = Array.from(rawBlock);
-      } catch (e) { /* ignore */ }
+      } catch (e) {  }
 
-      // Align per-sample spatial coordinates to filtered cell order
       for (const name of datasetNames) {
         const sampleSpatial = perSampleSpatial[name];
         if (!sampleSpatial || !Array.isArray(sampleSpatial.cellIds)) continue;
         const { cellIds, spatialCoordinates: allCoords } = sampleSpatial;
 
-        // Build cellId → row index lookup (barcode format, numeric, and stripped suffix)
         const cellIdToIdx = new Map();
         for (let k = 0; k < cellIds.length; k++) {
           const id = String(cellIds[k]);
           cellIdToIdx.set(id, k);
-          // cellid_ format: also index by numeric part (with and without leading zeros)
           const numMatch = id.match(/cellid_0*(\d+)-\d+/);
           if (numMatch) {
             cellIdToIdx.set(numMatch[1], k);
             const padded = numMatch[1].padStart(9, '0');
             if (padded !== numMatch[1]) cellIdToIdx.set(padded, k);
           }
-          // Standard barcodes (e.g. AAACCTGAGAAACCAT-1): also index without -N suffix
           const dashIdx = id.lastIndexOf('-');
           if (dashIdx > 0) {
             const stripped = id.substring(0, dashIdx);
@@ -7295,6 +7081,9 @@ async function loadData(payload) {
         if (sampleIndices.length > 0) {
           const firstBarcodes = sampleIndices.slice(0, 5).map(i => String(hdCellBarcodesList[i] || ''));
           const firstCsvIds = cellIds.slice(0, 5).map(id => String(id));
+          console.log(`Visium HD "${name}": ${sampleIndices.length} filtered cells, ${allCoords.length} spatial rows`);
+          console.log(`  Bakana barcodes (first 5):`, firstBarcodes);
+          console.log(`  Spatial cell IDs (first 5):`, firstCsvIds);
         }
 
         const alignedCoords = new Array(sampleIndices.length);
@@ -7305,17 +7094,14 @@ async function loadData(payload) {
           const globalIdx = sampleIndices[j];
           const fullBarcode = String(hdCellBarcodesList[globalIdx] || '');
           let csvIdx = cellIdToIdx.get(fullBarcode);
-          // Strategy 2: strip -N suffix from barcode
           if (csvIdx === undefined) {
             const dashIdx = fullBarcode.lastIndexOf('-');
             if (dashIdx > 0) csvIdx = cellIdToIdx.get(fullBarcode.substring(0, dashIdx));
           }
-          // Strategy 3: cellid_ prefix stripping (numeric part)
           if (csvIdx === undefined) {
             const numMatch = fullBarcode.match(/cellid_0*(\d+)-\d+/);
             if (numMatch) csvIdx = cellIdToIdx.get(numMatch[1]);
           }
-          // Strategy 4: bakana may return raw numeric cell_id (e.g. "1", "42"), convert to GeoJSON cellid_ format
           if (csvIdx === undefined && /^\d+$/.test(fullBarcode.trim())) {
             const cellidFormat = numericToBarcodeId(parseInt(fullBarcode, 10));
             csvIdx = cellIdToIdx.get(cellidFormat);
@@ -7333,19 +7119,18 @@ async function loadData(payload) {
           }
         }
 
+        console.log(`Visium HD "${name}": barcode-matched ${matchedCount}/${sampleIndices.length} cells`);
 
         if (matchedCount < sampleIndices.length * 0.5 && allCoords.length > 0) {
-          // Barcode matching failed, use keep mask + raw block for position-based alignment
+          console.log(`Visium HD "${name}": low match rate, trying keep-mask position mapping`);
           let positionMapped = false;
           if (hdKeepMask && hdRawBlockArray) {
             const sampleBlockIdx = datasetNames.indexOf(name);
             if (sampleBlockIdx >= 0) {
-              // Find raw start offset for this sample from raw block assignments
               let sampleRawStart = 0;
               for (let r = 0; r < hdRawBlockArray.length; r++) {
                 if (hdRawBlockArray[r] === sampleBlockIdx) { sampleRawStart = r; break; }
               }
-              // Build filtered→raw index mapping
               const rawToFilteredIdx = [];
               for (let r = 0; r < hdKeepMask.length; r++) {
                 if (hdKeepMask[r]) rawToFilteredIdx.push(r);
@@ -7374,6 +7159,7 @@ async function loadData(payload) {
               }
               if (posMatched > sampleIndices.length * 0.5) {
                 positionMapped = true;
+                console.log(`Visium HD "${name}": position-mapped ${posMatched}/${sampleIndices.length} cells`);
               }
             }
           }
@@ -7390,13 +7176,13 @@ async function loadData(payload) {
             }
           }
         }
-        // Fill any remaining null entries
         for (let j = 0; j < alignedCoords.length; j++) {
           if (alignedCoords[j] === null) alignedCoords[j] = [0, 0];
         }
 
         sampleSpatial.spatialCoordinates = alignedCoords;
         sampleSpatial.spatialExtent = Number.isFinite(xMin) ? { xMin, xMax, yMin, yMax } : null;
+        console.log(`Visium HD "${name}": final extent`, sampleSpatial.spatialExtent);
       }
 
       loadedData.perSampleSpatial = perSampleSpatial;
@@ -7427,10 +7213,10 @@ async function loadData(payload) {
           perSampleSpatial,
         },
       });
+      console.log('Visium HD integration complete:', nCellsHD, 'cells', nGenesHD, 'genes', 'views:', Object.keys(hdIntegrationViews));
       return;
     }
 
-    // ATAC Integration: multi-sample scATAC-seq with Harmony
     if (isAtacIntegration) {
       const atacDatasetList = payload.atacDatasets;
       const datasetNames = atacDatasetList.map((d) => d.name);
@@ -7447,9 +7233,9 @@ async function loadData(payload) {
         sampleBarcodes = filteredSampleBarcodes;
         if (sampleRemoved > 0) {
           self.postMessage({ type: 'STATUS_UPDATE', message: `  ${ds.name}: min peaks > ${MIN_PEAKS_ATAC}, ${sampleRemoved} cells removed, ${countMatrix.ncols} kept` });
+          console.log(`  ATAC sample "${ds.name}" cell filter (min peaks > ${MIN_PEAKS_ATAC}): ${sampleRemoved} removed, ${countMatrix.ncols} kept`);
         }
 
-        // Parse per-sample peak annotation if provided
         let samplePeakAnnotation = [];
         if (ds.peakAnnotationBuffer && ds.peakAnnotationBuffer.byteLength > 0) {
           try {
@@ -7472,6 +7258,7 @@ async function loadData(payload) {
                 });
               }
             }
+            console.log(`  Sample "${ds.name}": parsed ${samplePeakAnnotation.length} peak annotations`);
           } catch (e) {
             console.warn(`  Sample "${ds.name}": failed to parse peak annotation:`, e.message);
           }
@@ -7509,18 +7296,26 @@ async function loadData(payload) {
       await runFullAnalysisPipeline({ labelPrefix: 'atac-integration-initial' });
       return;
     }
-    //
 
     if (info.format === '10X MatrixMarket') {
+      console.log('Matrix data type:', typeof files.matrix?.data);
+      console.log('Matrix data constructor:', files.matrix?.data?.constructor?.name);
+      console.log('Matrix data is ArrayBuffer?', files.matrix?.data instanceof ArrayBuffer);
+      console.log('Matrix data is Uint8Array?', files.matrix?.data instanceof Uint8Array);
+      console.log('Matrix data byte length:', files.matrix?.data?.byteLength || files.matrix?.data?.length || 0);
     } else {
+      console.log('HDF5 data type:', typeof files.h5?.data);
+      console.log('HDF5 data constructor:', files.h5?.data?.constructor?.name);
+      console.log('HDF5 data is ArrayBuffer?', files.h5?.data instanceof ArrayBuffer);
+      console.log('HDF5 data is Uint8Array?', files.h5?.data instanceof Uint8Array);
+      console.log('HDF5 data byte length:', files.h5?.data?.byteLength || files.h5?.data?.length || 0);
     }
 
-    // Convert to Uint8Array
     let dataset;
 
     let datasetByteSize = 0;
-    let savedH5Blob = null;  // Preserve H5 blob for pure-JS large-dataset pipeline
-    let h5LazyTmpFile = null; // Set when a large H5 file is lazy-mounted via HTTP
+    let savedH5Blob = null;
+    let h5LazyTmpFile = null;
     let lazyFileCellCount = 0;
     let lazyFileGeneCount = 0;
     let lazyFileBarcodes = null;
@@ -7532,26 +7327,20 @@ async function loadData(payload) {
       }
 
       if (h5File.isLargeFile && h5File.h5Url) {
-        // Large file path: mount lazily via HTTP Range requests
-        // The analysis worker uses FS.createLazyFile() so h5wasm fetches only the
-        // compressed HDF5 chunks it actually needs, the full 4+ GB file is never
-        // copied into memory.
+        console.log('[large-h5] Lazy-mounting:', h5File.name, '-', h5File.size?.toLocaleString(), 'bytes');
         const h5mod = await import('h5wasm');
         await h5mod.ready;
         const lazyDir = '/_large_h5_';
-        try { h5mod.FS.mkdir(lazyDir); } catch (_) { /* may already exist */ }
-        // Remove any file left from a previous load before re-creating the lazy entry.
+        try { h5mod.FS.mkdir(lazyDir); } catch (_) {  }
         const candidatePath = `${lazyDir}/${h5File.name}`;
-        try { h5mod.FS.unlink(candidatePath); } catch (_) { /* didn't exist */ }
+        try { h5mod.FS.unlink(candidatePath); } catch (_) {  }
         h5mod.FS.createLazyFile(lazyDir, h5File.name, h5File.h5Url, true, false);
         h5LazyTmpFile = candidatePath;
 
-        // Read shape + barcodes, tiny datasets, only a few HTTP chunks needed.
         try {
           const f = new h5mod.File(h5LazyTmpFile, 'r');
           const rootKeys = f.keys();
 
-          // Detect layout: v3 (/matrix/...), v2 root-level, or genome-named group (/mm10/...)
           let shapePath = null;
           let barcodesPath = null;
           if (rootKeys.includes('matrix')) {
@@ -7561,7 +7350,6 @@ async function loadData(payload) {
             shapePath    = '/shape';
             barcodesPath = '/barcodes';
           } else {
-            // Genome-named group (e.g. /mm10/)
             for (const key of rootKeys) {
               try {
                 const grp = f.get(key);
@@ -7572,7 +7360,7 @@ async function loadData(payload) {
                   barcodesPath = gk.includes('barcodes') ? `/${key}/barcodes` : null;
                   break;
                 }
-              } catch (_) { /* skip */ }
+              } catch (_) {  }
             }
           }
 
@@ -7584,29 +7372,33 @@ async function loadData(payload) {
             try {
               const barcDs = f.get(barcodesPath);
               if (barcDs) lazyFileBarcodes = Array.from(barcDs.value, v => String(v));
-            } catch (_) { /* barcodes optional */ }
+            } catch (_) {  }
           }
           f.close();
+          console.log(`[large-h5] Shape: ${lazyFileGeneCount.toLocaleString()} genes × ${lazyFileCellCount.toLocaleString()} cells`);
         } catch (shapeErr) {
           console.warn('[large-h5] Could not read shape:', shapeErr.message);
         }
 
         datasetByteSize = h5File.size || 0;
         savedH5Blob = null;
-        dataset = null; // bakana not used, runLargeDatasetJsPipeline handles everything
+        dataset = null;
       } else {
-        // Normal (small) file path
+        console.log('Preparing HDF5 dataset...');
+        console.log('Converting HDF5 data...');
         let h5Data = ensureUint8Array(h5File.data, 'HDF5');
         datasetByteSize = h5Data.length;
         const h5Blob = new File([h5Data], h5File.name || 'dataset.h5', { type: 'application/octet-stream' });
-        // Free the JS-side copy ASAP, the File blob has its own copy.
+        console.log('Created HDF5 File object:', h5Blob.size + ' bytes');
         h5Data = null;
         if (h5File) h5File.data = null;
         if (files.h5) files.h5.data = null;
-        savedH5Blob = h5Blob;  // Keep for pure-JS pipeline fallback
+        savedH5Blob = h5Blob;
         dataset = new bakana.TenxHdf5Dataset(h5Blob);
+        console.log('TenxHdf5Dataset created successfully!');
       }
     } else if (info.format === '10X Multiome') {
+      console.log('Preparing 10X Multiome dataset...');
       const h5File = files.h5;
       if (!h5File) {
         throw new Error('Multiome HDF5 file payload missing');
@@ -7614,14 +7406,12 @@ async function loadData(payload) {
       let h5Data = ensureUint8Array(h5File.data, 'HDF5');
       datasetByteSize = h5Data.length;
       const h5Blob = new File([h5Data], h5File.name || 'filtered_feature_bc_matrix.h5', { type: 'application/octet-stream' });
-      // Free JS-side copy of H5 data to reduce peak memory
       h5Data = null;
       if (h5File) h5File.data = null;
       if (files.h5) files.h5.data = null;
-      // Use default featureTypeRnaName ("Gene Expression") so bakana loads RNA as primary modality
       dataset = new bakana.TenxHdf5Dataset(h5Blob);
+      console.log('TenxHdf5Dataset (Multiome) created successfully!');
 
-      // Parse peak annotation if available
       let peakAnnotation = [];
       const peakAnnoFile = files.peakAnnotation;
       if (peakAnnoFile && peakAnnoFile.data) {
@@ -7642,9 +7432,9 @@ async function loadData(payload) {
           const peakName = `${chrom}_${start}_${end}`;
           peakAnnotation.push({ peakName, chrom, start, end, gene });
         }
+        console.log('Parsed peak_annotation.tsv:', peakAnnotation.length, 'peaks');
       }
 
-      // Parse precomputed analysis (UMAP + clusters) from CSV text
       const precomputedData = payload.precomputed || {};
       const parseUmapCsv = (csvText) => {
         if (!csvText) return { barcodeOrder: [], coords: [] };
@@ -7680,8 +7470,12 @@ async function loadData(payload) {
       const rnaClustersParsed = parseClustersCsv(precomputedData.rnaClusters);
       const atacClustersParsed = parseClustersCsv(precomputedData.atacClusters);
 
+      console.log('Parsed precomputed data:',
+        'rnaUmap:', rnaUmapParsed.coords.length,
+        'atacUmap:', atacUmapParsed.coords.length,
+        'rnaClusters:', rnaClustersParsed.clusters.length,
+        'atacClusters:', atacClustersParsed.clusters.length);
 
-      // Use cell barcodes from info if provided
       const infoCellBarcodes = Array.isArray(info.cellBarcodes) && info.cellBarcodes.length > 0
         ? info.cellBarcodes
         : (rnaUmapParsed.barcodeOrder.length > 0 ? rnaUmapParsed.barcodeOrder : null);
@@ -7690,7 +7484,7 @@ async function loadData(payload) {
         path,
         info: { ...info, modality: 'multiome' },
         dataset,
-        h5Blob, // Store H5 blob for loading ATAC peak matrix
+        h5Blob,
         peakAnnotation,
         nCells: 0,
         nGenes: 0,
@@ -7710,9 +7504,9 @@ async function loadData(payload) {
         },
       };
 
-      // Get summary for cell/gene counts
       const multiomeSummary = await dataset.summary({ cache: true });
       const multiModFeatures = multiomeSummary?.modality_features || {};
+      console.log('Multiome modality features:', Object.keys(multiModFeatures));
       const rnaModKey = Object.keys(multiModFeatures).find(k => /rna|gene\s*expression/i.test(k)) || Object.keys(multiModFeatures)[0];
       if (rnaModKey) {
         loadedData.nCells = getDataFrameRowCount(multiomeSummary?.cells);
@@ -7720,22 +7514,17 @@ async function loadData(payload) {
         loadedData.rawCells = loadedData.nCells;
         loadedData.rawGenes = loadedData.nGenes;
       }
-      // Count peaks
       const peaksModKey = Object.keys(multiModFeatures).find(k => /peaks?|atac/i.test(k));
       if (peaksModKey) {
         loadedData.nPeaks = getDataFrameRowCount(multiModFeatures[peaksModKey]);
       }
 
-      // Store unfiltered barcodes for peak matrix column mapping.
-      // The ATAC peak matrix itself is loaded lazily by getMultiomePeakMatrix() when needed.
       loadedData.allCellBarcodes = infoCellBarcodes ? [...infoCellBarcodes] : null;
 
-      // === FAST PATH (same as Xenium): send precomputed UMAPs immediately, normalize in background ===
       const hasPrecomputed = loadedData.precomputed &&
         (rnaUmapParsed.coords.length > 0 || atacUmapParsed.coords.length > 0);
 
       if (hasPrecomputed) {
-        // Align precomputed UMAPs to ALL barcodes (before QC, QC runs in background)
         const allBarcodes = infoCellBarcodes || [];
         const barcodeToIdx = new Map();
         for (let i = 0; i < allBarcodes.length; i++) {
@@ -7761,20 +7550,19 @@ async function loadData(payload) {
               matched++;
             }
           }
+          console.log(`Aligned ${matched}/${nCells} cells for precomputed UMAP`);
           return { coordinates: alignedCoords, clusters: alignedClusters, nClusters: new Set(alignedClusters).size };
         };
 
         const rnaAligned = alignPrecomputed(rnaUmapParsed, rnaClustersParsed);
         const atacAligned = alignPrecomputed(atacUmapParsed, atacClustersParsed);
 
-        // Store for later use
         currentResults.umap = rnaAligned.coordinates;
         currentResults.clusters = rnaAligned.clusters;
         loadedData.precomputed.rnaAligned = rnaAligned;
         loadedData.precomputed.atacAligned = atacAligned;
         loadedData.cellBarcodes = allBarcodes;
 
-        // Send DATA_LOADED immediately (UI shows data right away)
         self.postMessage({
           type: 'DATA_LOADED',
           data: {
@@ -7788,7 +7576,6 @@ async function loadData(payload) {
           },
         });
 
-        // Send RNA UMAP
         self.postMessage({
           type: 'ANALYSIS_COMPLETE',
           data: {
@@ -7805,7 +7592,6 @@ async function loadData(payload) {
           },
         });
 
-        // Send ATAC UMAP
         self.postMessage({
           type: 'ANALYSIS_COMPLETE',
           data: {
@@ -7819,31 +7605,28 @@ async function loadData(payload) {
           },
         });
 
+        console.log('Multiome: sent precomputed UMAPs immediately, starting background normalization...');
 
-        // Restore WNN 3-panel layout if a previous WNN run was saved
         const prevWnn = loadedData.previousResults;
         if (prevWnn?.wnnActive &&
             prevWnn.wnnRnaCoordinates?.length > 0 && prevWnn.wnnRnaClusters?.length > 0 &&
             prevWnn.wnnAtacCoordinates?.length > 0 && prevWnn.wnnAtacClusters?.length > 0) {
+          console.log('Multiome: restoring WNN 3-panel layout from saved results...');
           const wnnRnaNC = prevWnn.wnnRnaNClusters != null ? prevWnn.wnnRnaNClusters : new Set(prevWnn.wnnRnaClusters).size;
           const wnnAtacNC = prevWnn.wnnAtacNClusters != null ? prevWnn.wnnAtacNClusters : new Set(prevWnn.wnnAtacClusters).size;
           const wnnNC = prevWnn.nClusters != null ? prevWnn.nClusters : new Set(prevWnn.clusters).size;
-          // Update currentResults so gene expression queries use WNN coordinates, not precomputed
           currentResults.umap = prevWnn.umapCoordinates;
           currentResults.clusters = prevWnn.clusters;
-          // WNN individual RNA UMAP
           self.postMessage({ type: 'ANALYSIS_COMPLETE', data: {
             type: 'umap', coordinates: prevWnn.wnnRnaCoordinates, clusters: prevWnn.wnnRnaClusters,
             nClusters: wnnRnaNC, nCells: prevWnn.wnnRnaCoordinates.length,
             source: 'wnn-individual', multiomeModality: 'rna',
           }});
-          // WNN individual ATAC UMAP
           self.postMessage({ type: 'ANALYSIS_COMPLETE', data: {
             type: 'umap', coordinates: prevWnn.wnnAtacCoordinates, clusters: prevWnn.wnnAtacClusters,
             nClusters: wnnAtacNC, nCells: prevWnn.wnnAtacCoordinates.length,
             source: 'wnn-individual', multiomeModality: 'atac',
           }});
-          // WNN integrated RNA (activates 3-panel layout)
           self.postMessage({ type: 'ANALYSIS_COMPLETE', data: {
             type: 'umap', coordinates: prevWnn.umapCoordinates, clusters: prevWnn.clusters,
             nClusters: wnnNC, nCells: prevWnn.umapCoordinates.length,
@@ -7851,7 +7634,6 @@ async function loadData(payload) {
             restoredClusterLabelMap: prevWnn.clusterLabelMap || {},
             restoredClusterColorOverrides: prevWnn.clusterColorOverrides || {},
           }});
-          // WNN integrated ATAC
           if (prevWnn.atacUmapCoordinates?.length > 0 && prevWnn.atacClusters?.length > 0) {
             const wnnAtacIntNC = prevWnn.atacNClusters != null ? prevWnn.atacNClusters : new Set(prevWnn.atacClusters).size;
             self.postMessage({ type: 'ANALYSIS_COMPLETE', data: {
@@ -7860,22 +7642,20 @@ async function loadData(payload) {
               source: 'wnn', multiomeModality: 'atac',
             }});
           }
+          console.log('Multiome: WNN 3-panel restore complete');
         }
 
-        // Run normalization in background (same as Xenium's runNormalizationForPrecomputedData)
-        // This enables gene expression queries, fire-and-forget, don't block UI
-        // Store the promise so ensureAnalysisReady can await it instead of starting Xenium normalization
         loadedData.normalizationPromise = runMultiomeNormalizationAsync(infoCellBarcodes, rnaUmapParsed, atacUmapParsed, rnaClustersParsed, atacClustersParsed).catch(err => {
           console.error('Multiome background normalization failed:', err);
         });
         return;
       }
 
-      // === FALLBACK: no precomputed data, run full pipeline ===
       self.postMessage({ type: 'STATUS_UPDATE', message: 'Running analysis for multiome data...' });
       await runFullAnalysisPipeline({ labelPrefix: 'multiome-initial' });
       return;
     } else if (info.format === '10X ATAC') {
+      console.log('Preparing 10X ATAC dataset (scATAC pipeline: MTX + barcodes + peaks, no bakana)...');
       const matrixFile = files.matrix;
       if (!matrixFile) {
         throw new Error('ATAC matrix.mtx payload missing (same as scATAC folder)');
@@ -7914,6 +7694,7 @@ async function loadData(payload) {
       const nCells = atacCountMatrix.ncols;
       if (atacCellsRemoved > 0) {
         self.postMessage({ type: 'STATUS_UPDATE', message: `Filtering cells (min peaks > ${MIN_PEAKS_ATAC}): ${atacCellsRemoved} removed, ${nCells} kept` });
+        console.log(`scATAC cell filter (min peaks > ${MIN_PEAKS_ATAC}): ${atacCellsRemoved} removed, ${nCells} kept`);
       }
       const atacPeakMatrix = createCSCMatrixAdapter(atacCountMatrix);
       const peakNames = Array.isArray(files.peaks) && files.peaks.length > 0
@@ -7949,6 +7730,7 @@ async function loadData(payload) {
           return { peakName: p, chrom: '', start: '', end: '', gene: '' };
         });
       }
+      console.log('ATAC (scATAC):', nPeaks, 'peaks,', nCells, 'cells, barcodes:', cellBarcodes.length, atacCellsRemoved > 0 ? `(${rawCellsAtac} before min-peaks filter)` : '');
 
       loadedData = {
         path,
@@ -7973,37 +7755,50 @@ async function loadData(payload) {
       await runFullAnalysisPipeline({ labelPrefix: 'atac-initial' });
       return;
     } else if (info.format === '10X MatrixMarket' || info.format === '10X Xenium') {
+      console.log('Converting matrix...');
       const matrixData = ensureUint8Array(files.matrix.data, 'matrix');
+      console.log('Converting features...');
       const featuresData = ensureUint8Array(files.features.data, 'features');
+      console.log('Converting barcodes...');
       const barcodesData = ensureUint8Array(files.barcodes.data, 'barcodes');
 
       datasetByteSize = matrixData.length + featuresData.length + barcodesData.length;
   
-      // Parse barcodes to extract cell IDs for later spatial matching
+      console.log('Parsing barcodes for cell IDs...');
       try {
         const pako = await import('pako');
         const decompressed = pako.inflate(barcodesData, { to: 'string' });
         const barcodeLines = decompressed.trim().split('\n');
         cellBarcodes = barcodeLines;
+        console.log(`✓ Extracted ${barcodeLines.length} cell barcodes from barcodes file`);
+        console.log('First 5 barcodes:', barcodeLines.slice(0, 5));
       } catch (parseError) {
         console.warn('Failed to pre-parse barcodes:', parseError);
       }
 
+      console.log('Creating Blob objects for bakana...');
 
       const matrixBlob = new File([matrixData], files.matrix.name, { type: 'application/gzip' });
       const featuresBlob = new File([featuresData], files.features.name, { type: 'application/gzip' });
       const barcodesBlob = new File([barcodesData], files.barcodes.name, { type: 'application/gzip' });
 
+      console.log('Created File objects:', {
+        matrix: matrixBlob.size + ' bytes',
+        features: featuresBlob.size + ' bytes',
+        barcodes: barcodesBlob.size + ' bytes',
+      });
 
+      console.log('Creating TenxMatrixMarketDataset...');
       dataset = new bakana.TenxMatrixMarketDataset(
         matrixBlob,
         featuresBlob,
         barcodesBlob
       );
+      console.log('TenxMatrixMarketDataset created successfully!');
     } else if (info.format === 'MERFISH') {
+      console.log('Processing MERFISH data...');
       self.postMessage({ type: 'STATUS_UPDATE', message: 'Parsing MERFISH counts...' });
 
-      // Parse MERFISH counts CSV (cell_by_gene.csv)
       const countsData = ensureUint8Array(files.merfishCounts.data, 'merfishCounts');
       const countsText = new TextDecoder().decode(countsData);
       const countsLines = countsText.trim().split('\n');
@@ -8012,14 +7807,12 @@ async function loadData(payload) {
         throw new Error('MERFISH counts file has no data rows');
       }
 
-      // Parse header to get gene names, filter out "Blank*" columns
       const headerLine = countsLines[0];
       const rawHeaders = headerLine.split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
 
-      // First column is cell ID (usually "cell")
       const cellIdColName = rawHeaders[0];
+      console.log('MERFISH cell ID column:', cellIdColName);
 
-      // Filter out Blank* columns (used as negative controls)
       const geneIndices = [];
       const geneNames = [];
       for (let i = 1; i < rawHeaders.length; i++) {
@@ -8029,49 +7822,43 @@ async function loadData(payload) {
           geneNames.push(geneName);
         }
       }
+      console.log(`MERFISH: ${rawHeaders.length - 1} total genes, ${geneNames.length} after filtering Blank* columns`);
 
-      // Parse data rows to build sparse matrix
       const nGenes = geneNames.length;
       const nCells = countsLines.length - 1;
       const cellIds = [];
-      const sparseData = []; // [{row, col, val}, ...]
+      const sparseData = [];
 
+      console.log(`MERFISH: Parsing ${nCells} cells...`);
       for (let cellIdx = 0; cellIdx < nCells; cellIdx++) {
         const line = countsLines[cellIdx + 1];
         const values = line.split(',').map(v => v.trim().replace(/^["']|["']$/g, ''));
 
-        // First value is cell ID: normalize it for consistent matching
         const rawCellId = values[0];
         const normalizedCellId = merfishCellIdToString(rawCellId);
         cellIds.push(normalizedCellId || rawCellId);
 
-        // Parse gene counts (only non-Blank genes)
         for (let gIdx = 0; gIdx < geneIndices.length; gIdx++) {
           const origColIdx = geneIndices[gIdx];
           const countValue = parseInt(values[origColIdx], 10);
           if (countValue > 0) {
-            // MatrixMarket uses 1-based indices, but bakana internally converts
-            // Store as 0-based for consistency with scran.js
             sparseData.push({ row: gIdx, col: cellIdx, val: countValue });
           }
         }
 
-        // Progress update every 10000 cells
         if (cellIdx > 0 && cellIdx % 10000 === 0) {
+          console.log(`MERFISH: Parsed ${cellIdx}/${nCells} cells...`);
         }
       }
 
+      console.log(`MERFISH: Parsed ${sparseData.length} non-zero entries`);
+      console.log('Sample cell IDs from counts (normalized, first 5):', cellIds.slice(0, 5));
+      console.log('Total cells in counts:', cellIds.length);
       cellBarcodes = cellIds;
 
-      // Convert to MatrixMarket format for bakana
-      // MatrixMarket format: rows are features/genes, columns are cells
-      // Header: %%MatrixMarket matrix coordinate integer general
-      // Size line: nRows nCols nEntries
-      // Data lines: row col value (1-based indices)
       const mmHeader = '%%MatrixMarket matrix coordinate integer general\n';
       const mmSizeLine = `${nGenes} ${nCells} ${sparseData.length}\n`;
 
-      // Sort by column then row for efficient reading
       sparseData.sort((a, b) => {
         if (a.col !== b.col) return a.col - b.col;
         return a.row - b.row;
@@ -8080,50 +7867,49 @@ async function loadData(payload) {
       const mmDataLines = sparseData.map(d => `${d.row + 1} ${d.col + 1} ${d.val}`).join('\n');
       const mmContent = mmHeader + mmSizeLine + mmDataLines;
 
-      // Create features.tsv content (gene_id\tgene_name)
       const featuresContent = geneNames.map(g => `${g}\t${g}\tGene Expression`).join('\n');
 
-      // Create barcodes.tsv content
       const barcodesContent = cellIds.join('\n');
 
-      // Convert to Uint8Array and compress with gzip for bakana
       const pako = await import('pako');
 
       const mmBytes = new TextEncoder().encode(mmContent);
       const featuresBytes = new TextEncoder().encode(featuresContent);
       const barcodesBytes = new TextEncoder().encode(barcodesContent);
 
-      // Compress the data (bakana expects .gz files)
       const mmCompressed = pako.gzip(mmBytes);
       const featuresCompressed = pako.gzip(featuresBytes);
       const barcodesCompressed = pako.gzip(barcodesBytes);
 
       datasetByteSize = mmCompressed.length + featuresCompressed.length + barcodesCompressed.length;
 
-      // Create File objects for bakana
       const matrixBlob = new File([mmCompressed], 'matrix.mtx.gz', { type: 'application/gzip' });
       const featuresBlob = new File([featuresCompressed], 'features.tsv.gz', { type: 'application/gzip' });
       const barcodesBlob = new File([barcodesCompressed], 'barcodes.tsv.gz', { type: 'application/gzip' });
 
+      console.log('MERFISH: Created MatrixMarket files:', {
+        matrix: matrixBlob.size + ' bytes',
+        features: featuresBlob.size + ' bytes',
+        barcodes: barcodesBlob.size + ' bytes',
+      });
 
       dataset = new bakana.TenxMatrixMarketDataset(
         matrixBlob,
         featuresBlob,
         barcodesBlob
       );
+      console.log('MERFISH: TenxMatrixMarketDataset created successfully!');
 
-      // Parse MERFISH spatial data
       self.postMessage({ type: 'STATUS_UPDATE', message: 'Parsing MERFISH spatial coordinates...' });
 
-      // Parse spatial coordinates from cell_metadata.csv
       const merfishSpatialData = await parseMERFISHSpatialData(files, cellIds);
       spatialData = merfishSpatialData;
 
     } else if (info.format === 'CosMX') {
+      console.log('Processing CosMX data...');
       let cellIds;
 
       if (files.cosmxCounts.preparsedUrls) {
-        // Large expression file was stream-parsed; fetch preparsed files from URLs (avoids huge IPC)
         self.postMessage({ type: 'STATUS_UPDATE', message: 'Fetching stream-parsed CosMX counts...' });
         const urls = files.cosmxCounts.preparsedUrls;
         const [matrixRes, featuresRes, barcodesRes, cellIdsRes] = await Promise.all([
@@ -8149,8 +7935,8 @@ async function loadData(payload) {
         const barcodesFile = new File([barcodesBlob], 'barcodes.tsv.gz', { type: 'application/gzip' });
 
         dataset = new bakana.TenxMatrixMarketDataset(matrixFile, featuresFile, barcodesFile);
+        console.log('CosMX: TenxMatrixMarketDataset created from preparsed URLs; cells:', cellIds.length);
       } else {
-        // Small expression file: parse CSV in worker
         self.postMessage({ type: 'STATUS_UPDATE', message: 'Parsing CosMX counts...' });
 
         const countsData = ensureUint8Array(files.cosmxCounts.data, 'cosmxCounts');
@@ -8239,7 +8025,6 @@ async function loadData(payload) {
         );
       }
 
-      // Parse CosMX spatial data (same for preparsed and in-worker parsed)
       self.postMessage({ type: 'STATUS_UPDATE', message: 'Parsing CosMX spatial coordinates...' });
       spatialData = parseCosMXSpatialData(files.cosmxSpatial?.data, cellIds);
 
@@ -8247,34 +8032,33 @@ async function loadData(payload) {
       throw new Error('Unsupported format: ' + info.format);
     }
 
+    console.log('Dataset created, starting analysis...');
 
-    // For non-MERFISH/CosMX spatial data, parse spatial info here
-    // (MERFISH/CosMX spatialData is already set in their handling blocks above)
     if (!spatialData && info?.modality === 'spatial' && spatialInfo) {
       spatialData = await parseSpatialData(spatialInfo);
     }
 
     let summary = null;
-    let nCellsFromSummary = lazyFileCellCount;   // pre-filled for large lazy-loaded files
+    let nCellsFromSummary = lazyFileCellCount;
     let nGenesFromSummary = lazyFileGeneCount;
     if (lazyFileBarcodes) cellBarcodes = lazyFileBarcodes;
     try {
-      if (!dataset) throw new Error('skip-summary'); // large file: shape already read above
+      if (!dataset) throw new Error('skip-summary');
       summary = await dataset.summary({ cache: true });
       if (summary?.cells) {
         nCellsFromSummary = getDataFrameRowCount(summary.cells);
 
-        // For HDF5 format, extract barcodes from the summary if not already set
         if (!cellBarcodes && info.format === '10X HDF5') {
+          console.log('Extracting barcodes from HDF5 dataset summary...');
           try {
-            // Try to get barcodes from the cells DataFrame rowNames
             if (typeof summary.cells.rowNames === 'function') {
               const rowNames = summary.cells.rowNames();
               if (Array.isArray(rowNames) && rowNames.length > 0) {
                 cellBarcodes = rowNames;
+                console.log(`✓ Extracted ${cellBarcodes.length} barcodes from HDF5 rowNames`);
+                console.log('Sample barcodes:', cellBarcodes.slice(0, 5));
               }
             }
-            // Fallback: try column data
             if (!cellBarcodes && typeof summary.cells.column === 'function') {
               const columnCandidates = ['barcode', 'barcodes', 'cell_id', 'cellid', 'CellID', 'Barcode'];
               for (const col of columnCandidates) {
@@ -8283,11 +8067,12 @@ async function loadData(payload) {
                     const colData = summary.cells.column(col);
                     if (Array.isArray(colData) && colData.length > 0) {
                       cellBarcodes = colData;
+                      console.log(`✓ Extracted ${cellBarcodes.length} barcodes from HDF5 column '${col}'`);
+                      console.log('Sample barcodes:', cellBarcodes.slice(0, 5));
                       break;
                     }
                   }
                 } catch (colError) {
-                  // Continue to next column candidate
                 }
               }
             }
@@ -8328,8 +8113,8 @@ async function loadData(payload) {
       path,
       info,
       dataset,
-      h5Blob: savedH5Blob,       // Preserved for pure-JS large-dataset pipeline (small files)
-      h5LazyTmpFile,              // Set for large files mounted via HTTP lazy loading
+      h5Blob: savedH5Blob,
+      h5LazyTmpFile,
       nCells: nCellsFromSummary,
       nGenes: nGenesFromSummary,
       rawCells: nCellsFromSummary,
@@ -8343,9 +8128,6 @@ async function loadData(payload) {
       previousResults: payloadPreviousResults,
     };
 
-    // If user chose "Load previous saved result" (cellpilot_results.json), we must not take the Space
-    // Ranger umap.csv/cluster.csv fast path, that would show 10x precomputed UMAP instead of the
-    // saved CellPilot analysis (e.g. sketch UMAP for Visium HD).
     const canRestoreFromSaved =
       payloadPreviousResults &&
       Array.isArray(payloadPreviousResults.umapCoordinates) && payloadPreviousResults.umapCoordinates.length > 0 &&
@@ -8370,16 +8152,12 @@ async function loadData(payload) {
       return;
     }
 
-    // Proactive memory estimation for very large HDF5 datasets
-    // Estimate whether the dataset will exceed the WASM 4 GiB limit.
-    // A compressed H5 file typically decompresses to 5-8× its file size inside WASM
-    // (raw data + separate arrays for values/indices/pointers + working buffers).
-    const WASM_MAX_BYTES = 4 * 1024 * 1024 * 1024; // 4 GiB
-    const WASM_SAFE_THRESHOLD = 3.5 * 1024 * 1024 * 1024; // ~3.5 GiB (leave room for overhead)
+    const WASM_MAX_BYTES = 4 * 1024 * 1024 * 1024;
+    const WASM_SAFE_THRESHOLD = 3.5 * 1024 * 1024 * 1024;
     const estimatedWasmBytes = datasetByteSize > 0  
-      ? datasetByteSize * 6  // conservative multiplier for decompression + indexing
+      ? datasetByteSize * 6
       : (nCellsFromSummary > 0 && nGenesFromSummary > 0
-          ? nCellsFromSummary * nGenesFromSummary * 0.03 * 8 + datasetByteSize // ~3% non-zero × 8 bytes
+          ? nCellsFromSummary * nGenesFromSummary * 0.03 * 8 + datasetByteSize
           : 0);
 
     if (estimatedWasmBytes > WASM_SAFE_THRESHOLD || nCellsFromSummary > 300000) {
@@ -8390,15 +8168,12 @@ async function loadData(payload) {
         `${nGenesFromSummary.toLocaleString()} genes, ${sizeMB} MB file, ` +
         `estimated WASM memory: ${estGB} GB (limit: 4 GB).`
       );
-      // Don't fail early, the hybrid pipeline in runFullAnalysisPipeline will handle
-      // large datasets by running PCA in WASM and UMAP/clustering in JavaScript.
       self.postMessage({
         type: 'STATUS_UPDATE',
         message: `Large dataset (${nCellsFromSummary.toLocaleString()} cells). Using optimized hybrid pipeline...`,
       });
     }
 
-    // Reset the wasmAbortSent flag before attempting the pipeline
     wasmAbortSent = false;
 
     await runFullAnalysisPipeline({ labelPrefix: 'default' });
@@ -8407,7 +8182,6 @@ async function loadData(payload) {
   } catch (error) {
     console.error('Failed to load data:', error);
     console.error('Error stack:', error.stack);
-    // Re-check for WASM abort in case the error wasn't caught earlier
     if (isWasmAbort(error)) {
       throw new Error(WASM_OOM_MESSAGE);
     }
@@ -8499,14 +8273,18 @@ function postFilteredSummary({ summary = null, force = false, reason = '' } = {}
     }
   }
   
-  // Include spatial coordinates if available (prefer loadedData.spatialData set by pipeline, e.g. CosMX/MERFISH)
   const spatialSource = loadedData?.spatialData ?? spatialData;
   if (spatialSource && Array.isArray(spatialSource.coordinates)) {
     payload.spatialCoordinates = spatialSource.coordinates;
     payload.modality = 'spatial';
+    console.log('postFilteredSummary: Including spatialCoordinates array with', spatialSource.coordinates.length, 'entries');
   } else {
-    // For single cell data (no spatial coordinates), this is expected; reduce logging noise
     if (spatialSource) {
+      console.log('postFilteredSummary: No spatial coordinates to include', {
+        hasSpatialData: !!spatialSource,
+        isArray: Array.isArray(spatialSource?.coordinates),
+        coordinatesLength: spatialSource?.coordinates?.length,
+      });
     }
   }
 
@@ -8514,8 +8292,14 @@ function postFilteredSummary({ summary = null, force = false, reason = '' } = {}
     payload.reason = reason;
   }
 
-  // Only log detailed payload info for spatial data (single cell data is more common, reduce noise)
   if (payload.spatialCoordinates) {
+    console.log('postFilteredSummary: Sending DATA_LOADED with payload:', {
+      cells: payload.cells,
+      genes: payload.genes,
+      hasSpatialCoordinates: !!payload.spatialCoordinates,
+      spatialCoordinatesLength: payload.spatialCoordinates?.length,
+      modality: payload.modality,
+    });
   }
 
   self.postMessage({
@@ -8533,6 +8317,7 @@ async function rerunAnalysisWithCurrentParameters({
     throw new Error('Analysis has not been initialized');
   }
 
+  console.log('Re-running analysis with updated parameters...', reason);
   resetAnalysisCaches();
 
   const statusMessage = (step) => {
@@ -8541,15 +8326,8 @@ async function rerunAnalysisWithCurrentParameters({
   };
 
   const rerunParams = cloneStepParameters(currentParameters);
-  // Pass the dataset for proper reanalysis when parameters change
   const datasets = loadedData?.dataset ? { sample: loadedData.dataset } : null;
 
-  // For precomputed spatial data (Xenium, MERFISH, Visium-HD): the existing bakana state
-  // only has QC→normalization computed (normalization-only pipeline). Reusing it causes
-  // bakana to cache QC/filtering steps and only re-run from feature_selection onwards,
-  // so cell filtering parameter changes are silently ignored. Create a fresh state so
-  // the full pipeline runs from cell_filtering with the new parameters, same as scRNA-seq
-  // force_reanalysis.
   const isPrecomputedSpatial = !!loadedData?.precomputed &&
     (loadedData?.info?.modality === 'spatial' ||
      loadedData?.info?.modality === 'merfish' ||
@@ -8559,18 +8337,12 @@ async function rerunAnalysisWithCurrentParameters({
       try { analysisState.free(); } catch (_) {}
     }
     analysisState = await bakana.createAnalysis();
+    console.log('[spatial rerun] Created fresh bakana state for full reanalysis');
   }
 
-  // For VisiumHD datasets with enough cells, sketch will override UMAP+clusters, skip
-  // bakana's expensive full-dataset UMAP (5-10 min on 300k+ cells) while keeping marker detection.
   const sketchWillRun = isVisiumHDData(loadedData) &&
     (loadedData?.nCells || 0) >= SKETCH_MIN_CELLS;
 
-  // For VisiumHD sketch: ensure at least 50 PCs so rare cell types (podocytes)
-  // are captured. With only 20-25 PCs from the full 276K-cell dataset, the
-  // podocyte signal (NPHS1/NPHS2/WT1) is diluted into PC 21+ and lost.
-  // Seurat's sketch uses the sketch's own PCA which naturally avoids this;
-  // we compensate by requesting more PCs from bakana upfront.
   if (sketchWillRun) {
     if (!rerunParams.rna_pca) rerunParams.rna_pca = {};
     if (!Number.isFinite(rerunParams.rna_pca.num_pcs) || rerunParams.rna_pca.num_pcs < 50) {
@@ -8590,18 +8362,14 @@ async function rerunAnalysisWithCurrentParameters({
         });
       },
       finishFun: async (step) => {
+        console.log(`Re-analysis completed: ${step}`);
       },
       skipUmap: sketchWillRun,
     }
   );
 
-  // For precomputed spatial: after full reanalysis, re-align spatial coordinates to the
-  // new bakana-filtered cell order (different cells may be kept with new QC thresholds).
   if (isPrecomputedSpatial) {
     try {
-      // Suppress the precomputed broadcast when sketch will immediately override it:
-      // sending source:'precomputed' first causes the App to set a flag that ignores
-      // the subsequent sketch ANALYSIS_COMPLETE.
       await realignPrecomputedArtifactsAfterFiltering(analysisState, { suppressBroadcast: sketchWillRun });
     } catch (alignErr) {
       console.warn('[spatial rerun] Failed to realign spatial coordinates:', alignErr.message);
@@ -8629,12 +8397,11 @@ async function rerunAnalysisWithCurrentParameters({
   });
 
   if (rerunClusters) {
-    // For VisiumHD with sufficient cells, use sketch-based pipeline by default
     const rerNcells = loadedData?.nCells || 0;
     if (isVisiumHDData(loadedData) && rerNcells >= SKETCH_MIN_CELLS && analysisState) {
+      console.log(`rerunAnalysisWithCurrentParameters: VisiumHD sketch pipeline (${rerNcells.toLocaleString()} cells)`);
       await runVisiumHDSketchPipeline(analysisState, true);
     } else {
-      // Pass 'reclustered' source to reset cluster labels in the UI
       await runClusteringAndUMAP(true, 'reclustered');
     }
   } else if (rerunUmapOnly) {
@@ -8710,7 +8477,6 @@ async function updateCellFiltering(params = {}) {
 }
 
 async function updateGeneFiltering(params = {}) {
-  // Gene-level filtering of the raw matrix is not yet supported without reloading the dataset.
   throw new Error('Gene-level filtering is not currently supported in this version of CellPilot.');
 }
 
@@ -8739,7 +8505,6 @@ async function updateClusteringResolution(params = {}) {
     throw new Error('Resolution must be a positive number.');
   }
 
-  // Precomputed multiome: no analysis/ATAC state yet, run full pipeline with new resolution
   if (loadedData?.info?.modality === 'multiome') {
     if (multiomeTarget === 'atac') {
       atacGeneActivityCache.clear();
@@ -8795,11 +8560,11 @@ async function updateClusteringResolution(params = {}) {
       if (rnaAligned?.coordinates && rnaAligned?.clusters) {
         currentResults.umap = rnaAligned.coordinates;
         currentResults.clusters = rnaAligned.clusters;
+        console.log('Multiome: restored currentResults to RNA after ATAC reclustering');
       }
       notifyParameterUpdate('snn_graph_cluster', `ATAC clustering resolution set to ${resolution} (${useLsi ? 'TF-IDF/LSI' : 'bakana'}).`);
       return;
     }
-    // RNA (or unspecified): run full pipeline when no analysis state or state has no UMAP/clustering (e.g. only normalization ran)
     if (multiomeTarget !== 'atac' || multiomeTarget == null) {
       let needFullRnaPipeline = !analysisState;
       if (analysisState) {
@@ -8826,7 +8591,6 @@ async function updateClusteringResolution(params = {}) {
 
   ensureCurrentParameters();
 
-  // Multiome ATAC: recluster ATAC with new resolution so downstream plot gene activity uses new clusters
   if (loadedData?.info?.modality === 'multiome' && multiomeTarget === 'atac' && loadedData.atacState) {
     atacGeneActivityCache.clear();
     self.postMessage({ type: 'STATUS_UPDATE', message: `Reclustering ATAC with resolution ${resolution}...` });
@@ -8892,6 +8656,7 @@ async function updateClusteringResolution(params = {}) {
       if (loadedData.precomputed.atacAligned.barcodeOrder) {
         loadedData.precomputed.atacAligned.barcodeOrder = canonicalBarcodes;
       }
+      console.log('Multiome: ATAC reclustered and aligned to canonical barcodes');
     } else if (loadedData.precomputed?.atacAligned) {
       loadedData.precomputed.atacAligned.clusters = newClusters.length === (loadedData.precomputed.atacAligned.coordinates?.length || 0)
         ? newClusters
@@ -8912,12 +8677,12 @@ async function updateClusteringResolution(params = {}) {
           multiomeModality: 'atac',
         },
       });
+      console.log('Multiome: sent ATAC UMAP after recluster (reclustered)');
     }
     notifyParameterUpdate('snn_graph_cluster', `ATAC clustering resolution updated to ${resolution} (${atacAlgo}).`);
     return;
   }
 
-  // VisiumHD sketch: store resolution in a dedicated key and re-run sketch pipeline
   const nCellsForSketch = loadedData?.nCells || 0;
   if (isVisiumHDData(loadedData) && nCellsForSketch >= SKETCH_MIN_CELLS && analysisState) {
     currentParameters.sketch_resolution = resolution;
@@ -8939,33 +8704,27 @@ async function updateClusteringResolution(params = {}) {
   if (algo === 'leiden') {
     currentParameters.snn_graph_cluster.leiden_resolution = resolution;
   } else if (algo === 'walktrap') {
-    // walktrap uses steps, not resolution; we could map resolution sensibly but we'll just log.
     currentParameters.snn_graph_cluster.walktrap_steps = Math.max(1, Math.round(resolution));
   } else {
     currentParameters.snn_graph_cluster.multilevel_resolution = resolution;
   }
 
-  // Clear cached results to force fresh fetch after recomputation
   resetAnalysisCaches();
 
-  // Directly recompute clustering steps with new resolution
-  // This avoids issues with bakana's caching when only resolution changes
   if (analysisState) {
     self.postMessage({ type: 'STATUS_UPDATE', message: `Reclustering with resolution ${resolution}...` });
 
     const clusteringParams = currentParameters.choose_clustering || {};
     const method = clusteringParams.method || 'snn_graph';
 
-    // Force recomputation of SNN clustering with new resolution
     await analysisState.snn_graph_cluster.compute(method === 'snn_graph', currentParameters.snn_graph_cluster);
     await analysisState.choose_clustering.compute(clusteringParams);
 
-    // Patch fetchClusters to convert BigInt64 to Int32 for marker detection
-    // This fixes the type mismatch with scoreMarkers
     const originalFetchClusters = analysisState.choose_clustering.fetchClusters.bind(analysisState.choose_clustering);
     analysisState.choose_clustering.fetchClusters = function() {
       const clusters = originalFetchClusters();
       if (clusters && clusters.constructor && clusters.constructor.className === 'BigInt64WasmArray') {
+        console.log('Converting BigInt64WasmArray clusters to Int32WasmArray');
         const int32Clusters = scran.createInt32WasmArray(clusters.length);
         const clustersArray = clusters.array();
         const int32Array = int32Clusters.array();
@@ -8977,16 +8736,12 @@ async function updateClusteringResolution(params = {}) {
       return clusters;
     };
 
-    // Recompute marker detection with new clusters
     await analysisState.marker_detection.compute(currentParameters.marker_detection || {});
 
-    // Restore original fetchClusters
     analysisState.choose_clustering.fetchClusters = originalFetchClusters;
 
-    // Fetch and send new results with 'reclustered' source to reset cluster labels
     await runClusteringAndUMAP(true, 'reclustered');
   } else {
-    // Fallback to full rerun if no analysis state
     await rerunAnalysisWithCurrentParameters({
       rerunClusters: true,
       reason: `Clustering resolution set to ${resolution} (${algo})`,
@@ -9019,7 +8774,6 @@ async function updatePcaForUmap(params = {}) {
 async function updateUmapParameters(params = {}) {
   const { min_dist, num_neighbors, multiomeTarget } = params || {};
 
-  // LSI is for ATAC only: if user said "LSI" but selected RNA, do not run and inform.
   if (loadedData?.info?.modality === 'multiome' && multiomeTarget === 'rna' && params?.atacMethod === 'lsi') {
     self.postMessage({
       type: 'ANALYSIS_ERROR',
@@ -9029,7 +8783,6 @@ async function updateUmapParameters(params = {}) {
     return;
   }
 
-  // Multiome + user chose ATAC: default to the TF-IDF/LSI scATAC pipeline.
   if (loadedData?.info?.modality === 'multiome' && multiomeTarget === 'atac') {
     if (min_dist != null && (!Number.isFinite(min_dist) || min_dist <= 0)) {
       throw new Error('UMAP min_dist must be a positive number.');
@@ -9072,11 +8825,11 @@ async function updateUmapParameters(params = {}) {
         },
       });
     }
-    // Restore currentResults to RNA so RNA view (dot plot, violin, etc.) keeps using RNA clusters
     const rnaAligned = loadedData.precomputed?.rnaAligned;
     if (rnaAligned?.coordinates && rnaAligned?.clusters) {
       currentResults.umap = rnaAligned.coordinates;
       currentResults.clusters = rnaAligned.clusters;
+      console.log('Multiome: restored currentResults to RNA after ATAC-only UMAP update');
     }
     const parts = [];
     if (min_dist != null) parts.push(`min_dist = ${min_dist}`);
@@ -9085,8 +8838,6 @@ async function updateUmapParameters(params = {}) {
     return;
   }
 
-  // Standalone scATAC has no bakana state/currentParameters. Its native path is
-  // the TF-IDF/LSI pipeline, so update UMAP by rerunning that pipeline directly.
   if (loadedData?.info?.modality === 'atac') {
     if (min_dist != null && (!Number.isFinite(min_dist) || min_dist <= 0)) {
       throw new Error('UMAP min_dist must be a positive number.');
@@ -9138,13 +8889,9 @@ async function updateUmapParameters(params = {}) {
   if (num_neighbors != null) {
     currentParameters.umap.num_neighbors = Math.floor(num_neighbors);
     
-    // CRITICAL: Synchronize neighbor_index.k with umap.num_neighbors
-    // UMAP requires the neighbor index to have the same number of neighbors
-    // Note: neighbor_index uses 'k', not 'num_neighbors', and only accepts 'k' when approximate=false
     if (!currentParameters.neighbor_index) {
       currentParameters.neighbor_index = {};
     }
-    // Only set 'k' if approximate is false (when approximate=true, neighbor count is inferred automatically)
     if (!currentParameters.neighbor_index.approximate) {
       currentParameters.neighbor_index.k = currentParameters.umap.num_neighbors;
     }
@@ -9170,10 +8917,15 @@ async function updateUmapParameters(params = {}) {
 async function runAnalysis(payload) {
   const { command, dataPath, clusterLabelMap } = payload;
 
+  console.log('====== WORKER: runAnalysis called ======');
+  console.log('Command:', command);
+  console.log('Action:', command?.action);
+  console.log('Params:', command?.params);
+  console.log('ClusterLabelMap:', clusterLabelMap);
 
-  // Store clusterLabelMap if provided (for UMAP updates that need to preserve merges)
   if (clusterLabelMap !== undefined) {
     currentClusterLabelMap = clusterLabelMap;
+    console.log('Stored clusterLabelMap in worker:', currentClusterLabelMap);
   }
 
   if (!loadedData) {
@@ -9192,7 +8944,6 @@ async function runAnalysis(payload) {
       return;
     }
 
-    // ATAC-only UMAP update does not need RNA state or normalization (no mito reference fetch).
     const isAtacOnlyUmapUpdate = action === 'update_umap_parameters' &&
       params?.multiomeTarget === 'atac' &&
       loadedData?.info?.modality === 'multiome';
@@ -9200,6 +8951,7 @@ async function runAnalysis(payload) {
       await ensureAnalysisReady({ reason: action || 'analysis-request' });
     }
 
+    console.log('====== WORKER: Switching on action:', action, '======');
     
     switch (action) {
       case 'cluster_and_visualize':
@@ -9207,7 +8959,6 @@ async function runAnalysis(payload) {
         break;
 
       case 'force_reanalysis':
-        // User explicitly requested reanalysis: ignore precomputed data
         const multiomeTarget = params?.multiomeTarget;
         const atacMethod = params?.atacMethod;
         if (loadedData?.info?.modality === 'multiome' && multiomeTarget === 'rna' && atacMethod === 'lsi') {
@@ -9218,7 +8969,7 @@ async function runAnalysis(payload) {
           });
           break;
         }
-        // Standalone scATAC + user requested LSI: run TF-IDF/LSI pipeline (backup)
+        console.log('User requested force reanalysis - running full pipeline', multiomeTarget ? `(multiome: ${multiomeTarget})` : '', atacMethod === 'lsi' ? '(LSI)' : '');
         if (loadedData?.info?.modality === 'atac' && atacMethod === 'lsi') {
           self.postMessage({ type: 'STATUS_UPDATE', message: 'Running ATAC reanalysis (TF-IDF/LSI pipeline)...' });
           await runAtacPipeline({ skipPostMessage: true, multiome: false });
@@ -9242,7 +8993,6 @@ async function runAnalysis(payload) {
           });
           break;
         }
-        // Multiome + user chose ATAC: default to the TF-IDF/LSI scATAC pipeline.
         if (loadedData?.info?.modality === 'multiome' && multiomeTarget === 'atac') {
           const useLsi = atacMethod !== 'bakana';
           self.postMessage({ type: 'STATUS_UPDATE', message: useLsi ? 'Running ATAC-centric analysis (TF-IDF/LSI pipeline)...' : 'Running ATAC-centric analysis (bakana peak-as-RNA pipeline)...' });
@@ -9295,12 +9045,11 @@ async function runAnalysis(payload) {
           break;
         }
         if (currentParameters && loadedData?.dataset) {
-          // Preserve current parameters (including custom filtering) when rerunning
+          console.log('Preserving current parameters for reanalysis');
+          console.log('Current QC parameters:', JSON.stringify(currentParameters.rna_quality_control, null, 2));
 
-          // Reset caches
           resetAnalysisCaches();
 
-          // Free existing state and create new one
           if (analysisState && typeof analysisState.free === 'function') {
             try {
               analysisState.free();
@@ -9310,7 +9059,6 @@ async function runAnalysis(payload) {
           }
           analysisState = await bakana.createAnalysis();
 
-          // Run with current parameters (preserves user's custom settings)
           await runRnaOnlyAnalysis(
             analysisState,
             { sample: loadedData.dataset },
@@ -9323,14 +9071,13 @@ async function runAnalysis(payload) {
                 });
               },
               finishFun: async (step) => {
+                console.log(`Re-analysis completed: ${step}`);
               }
             }
           );
 
-          // Update parameters from the new state
           currentParameters = cloneStepParameters(bakana.retrieveParameters(analysisState));
 
-          // Recompute summary and post
           const summary = computeFilteredSummary();
           if (!Number.isFinite(loadedData.rawCells)) {
             loadedData.rawCells = summary.cells;
@@ -9344,21 +9091,18 @@ async function runAnalysis(payload) {
             reason: 'force-reanalysis',
           });
 
-          // Multiome: update cell barcodes to filtered list and realign ATAC so both views show same cells
           if (loadedData?.info?.modality === 'multiome' && loadedData.precomputed) {
             updateMultiomeFilteredBarcodesFromState(analysisState);
           }
 
-          // Re-run clustering and UMAP
-          // For VisiumHD with sufficient cells, use sketch-based pipeline by default
           const reanalysisNCells = loadedData?.nCells || 0;
           if (isVisiumHDData(loadedData) && reanalysisNCells >= SKETCH_MIN_CELLS && analysisState) {
+            console.log(`force_reanalysis: VisiumHD sketch pipeline (${reanalysisNCells.toLocaleString()} cells)`);
             await runVisiumHDSketchPipeline(analysisState, true);
           } else {
             await runClusteringAndUMAP(true, 'reclustered');
           }
         } else {
-          // No current parameters or dataset; use defaults
           await runFullAnalysisPipeline({ labelPrefix: 'user-requested', multiomeTarget, atacMethod: params?.atacMethod });
         }
         break;
@@ -9486,7 +9230,6 @@ async function runAnalysis(payload) {
   } catch (error) {
     console.error('Analysis failed:', error);
     console.error('Error stack:', error.stack);
-    // Send error message to UI
     self.postMessage({
       type: 'ANALYSIS_ERROR',
       error: error.message || 'Unknown error occurred',
@@ -9497,29 +9240,17 @@ async function runAnalysis(payload) {
   }
 }
 
-// ============================================================================
-// Peak-to-Gene Linkage (scMultiome LinkPeaks)
-// ============================================================================
-
-/**
- * Read gene TSS coordinates from the 10x multiome H5 file.
- * Cell Ranger ARC stores gene body intervals in matrix/features/interval
- * as "chr1:1000-2000" strings, we use the start position as the TSS.
- * Returns { GENENAME: { chr, tss } }.
- */
 async function buildGeneTSSFromH5() {
   const geneTSS = {};
   const h5mod = await import('h5wasm');
   await h5mod.ready;
 
-  // Resolve H5 input: lazy-mounted path (large files) or in-memory blob (small files)
   let tmpPath = null;
   let wroteFile = false;
   let f = null;
 
   try {
     if (loadedData.h5LazyTmpFile) {
-      // Already mounted in MEMFS by the large-file pipeline
       tmpPath = loadedData.h5LazyTmpFile;
     } else if (loadedData.h5Blob) {
       tmpPath = '/_linkpeaks_tss.h5';
@@ -9548,7 +9279,7 @@ async function buildGeneTSSFromH5() {
 
     for (let i = 0; i < names.length; i++) {
       if (types[i] !== 'Gene Expression') continue;
-      const iv = intervals[i];          // e.g. "chr1:826206-827522"
+      const iv = intervals[i];
       const colon = iv.indexOf(':');
       const dash  = iv.indexOf('-', colon);
       if (colon === -1 || dash === -1) continue;
@@ -9559,6 +9290,7 @@ async function buildGeneTSSFromH5() {
         geneTSS[names[i]] = { chr, tss: start };
       }
     }
+    console.log(`[linkPeaks] Built TSS table for ${Object.keys(geneTSS).length} genes from H5`);
   } catch (e) {
     console.warn('[linkPeaks] Could not read gene intervals from H5:', e.message);
   } finally {
@@ -9570,14 +9302,9 @@ async function buildGeneTSSFromH5() {
   return geneTSS;
 }
 
-/**
- * Subset columns of a SparseMatrixCSC by an array of column indices.
- * Returns a new object with the same shape interface { nrows, ncols, colPtr, rowIdx, values, nnz }.
- */
 function subsetCSCColumns(csc, colIndices) {
   const newNcols = colIndices.length;
   const newColPtr = new Int32Array(newNcols + 1);
-  // First pass: count nnz per selected column
   let totalNnz = 0;
   for (let jj = 0; jj < newNcols; jj++) {
     const j = colIndices[jj];
@@ -9599,10 +9326,6 @@ function subsetCSCColumns(csc, colIndices) {
   return new SparseMatrixCSC(csc.nrows, newNcols, newColPtr, newRowIdx, newValues);
 }
 
-/**
- * Handle the link_peaks action.
- * Runs the peak-to-gene linkage analysis and stores results in loadedData.peakGeneLinks.
- */
 async function runLinkPeaksAction({ gene: geneFilter } = {}) {
   const statusCallback = (msg) => self.postMessage({ type: 'STATUS_UPDATE', message: msg });
   if (loadedData?.info?.modality !== 'multiome') {
@@ -9629,7 +9352,6 @@ async function runLinkPeaksAction({ gene: geneFilter } = {}) {
   }
   const rnaCSC   = scranMatrixToSparseCSC(normMatrix);
 
-  // Resolve gene names: try jsGeneNames (large-dataset JS path), then bakana annotations
   let geneNames = loadedData.jsGeneNames || null;
   if (!geneNames || geneNames.length === 0) {
     try {
@@ -9653,11 +9375,12 @@ async function runLinkPeaksAction({ gene: geneFilter } = {}) {
     self.postMessage({ type: 'ANALYSIS_ERROR', error: 'Could not determine gene names for LinkPeaks. Gene annotations not available.' });
     return;
   }
+  console.log(`[linkPeaks] Gene names: ${geneNames.length}, RNA matrix: ${rnaCSC.nrows} rows × ${rnaCSC.ncols} cols`);
+  console.log(`[linkPeaks] ATAC peak matrix: ${peakCSC.nrows} rows × ${peakCSC.ncols} cols`);
+  console.log(`[linkPeaks] Peak names count: ${peakNames.length}, sample: ${peakNames.slice(0, 3).join(', ')}`);
 
-  // Verify column counts match (cells must be aligned)
   if (peakCSC.ncols !== rnaCSC.ncols) {
     console.warn(`[linkPeaks] Column mismatch: ATAC has ${peakCSC.ncols} cells, RNA has ${rnaCSC.ncols} cells. Attempting cell alignment…`);
-    // Use cell_filtering.fetchKeep() to get the keep mask (bakana API)
     let keepIndices = null;
     const keepResult = loadedData.state?.cell_filtering?.fetchKeep?.();
     if (keepResult) {
@@ -9670,9 +9393,9 @@ async function runLinkPeaksAction({ gene: geneFilter } = {}) {
         for (let i = 0; i < keepMask.length; i++) {
           if (keepMask[i]) keepIndices.push(i);
         }
+        console.log(`[linkPeaks] cell_filtering.fetchKeep: ${keepIndices.length} kept out of ${keepMask.length}`);
       }
     }
-    // Fallback: try rna_quality_control.fetchDiscards()
     if (!keepIndices) {
       const qcDiscard = loadedData.state?.rna_quality_control?.fetchDiscards?.();
       if (qcDiscard) {
@@ -9685,21 +9408,24 @@ async function runLinkPeaksAction({ gene: geneFilter } = {}) {
           for (let i = 0; i < discardMask.length; i++) {
             if (!discardMask[i]) keepIndices.push(i);
           }
+          console.log(`[linkPeaks] rna_quality_control.fetchDiscards: ${keepIndices.length} kept out of ${discardMask.length}`);
         }
       }
     }
     if (keepIndices && keepIndices.length === rnaCSC.ncols) {
       statusCallback('Aligning ATAC and RNA cell matrices…');
       peakCSC = subsetCSCColumns(peakCSC, keepIndices);
+      console.log(`[linkPeaks] After alignment: ATAC ${peakCSC.nrows} × ${peakCSC.ncols}, RNA ${rnaCSC.nrows} × ${rnaCSC.ncols}`);
     } else if (keepIndices) {
       console.warn(`[linkPeaks] Keep mask gave ${keepIndices.length} cells but RNA has ${rnaCSC.ncols}, truncating ATAC to RNA column count`);
-      // Last resort: just take the first N columns (cells are in the same order in 10x multiome)
       const indices = Array.from({ length: rnaCSC.ncols }, (_, i) => i);
       peakCSC = subsetCSCColumns(peakCSC, indices);
+      console.log(`[linkPeaks] After truncation: ATAC ${peakCSC.nrows} × ${peakCSC.ncols}`);
     } else {
       console.warn('[linkPeaks] No cell filter mask available, truncating ATAC to RNA column count');
       const indices = Array.from({ length: rnaCSC.ncols }, (_, i) => i);
       peakCSC = subsetCSCColumns(peakCSC, indices);
+      console.log(`[linkPeaks] After truncation: ATAC ${peakCSC.nrows} × ${peakCSC.ncols}`);
     }
   }
 
@@ -9740,15 +9466,12 @@ async function runLinkPeaksAction({ gene: geneFilter } = {}) {
       nLinks: links.length,
       nGenesLinked: Object.keys(byGene).length,
       topGenes,
-      links, // full array so frontend can persist it to cellpilot_results.json
+      links,
       message: `Found ${links.length} significant peak–gene links across ${Object.keys(byGene).length} genes.\nTop linked genes: ${topGenes.slice(0, 5).join(', ')}`,
     },
   });
 }
 
-/**
- * Handle show_peak_gene_links, returns links + coverage data for a gene.
- */
 async function showPeakGeneLinksAction({ gene } = {}) {
   if (!gene) {
     self.postMessage({ type: 'ANALYSIS_ERROR', error: 'Please specify a gene name, e.g. "show links for CD14".' });
@@ -9780,9 +9503,6 @@ async function showPeakGeneLinksAction({ gene } = {}) {
     return;
   }
 
-  // Compute coverage data for a Signac-style display region around the TSS.
-  // The display window is TSS-5kb to TSS+50kb; links beyond this are still drawn
-  // (arcs extend from the edge) but coverage tracks only cover this narrower window.
   let coverageByCluster = null;
   let region = null;
   let peaksOnGene = null;
@@ -9796,7 +9516,6 @@ async function showPeakGeneLinksAction({ gene } = {}) {
     const regionEnd = tss + 50000;
     region = { chrom: chr, start: regionStart, end: regionEnd };
 
-    // Build peaksOnGene from the links themselves
     peaksOnGene = geneLinks.map(l => ({
       chrom: l.chr,
       start: l.peakStart,
@@ -9804,11 +9523,9 @@ async function showPeakGeneLinksAction({ gene } = {}) {
       peakName: l.peak,
     }));
 
-    // Collect cell barcodes + clusters for fragment-based coverage in the frontend
     clusters = currentResults.clusters || null;
     cellBarcodes = loadedData.cellBarcodes || null;
 
-    // Per-cluster mean depth for Signac-style normalization
     const colSums = loadedData.atacColSums;
     const nCells = cellBarcodes ? cellBarcodes.length : 0;
     if (Array.isArray(colSums) && colSums.length === nCells && Array.isArray(clusters) && clusters.length === nCells) {
@@ -9826,11 +9543,9 @@ async function showPeakGeneLinksAction({ gene } = {}) {
       }
     }
 
-    // Compute peak-matrix coverage as initial fallback (overridden by fragment-based in frontend)
     const peakAnnotation = loadedData.peakAnnotation || [];
     if (Array.isArray(clusters) && clusters.length > 0) {
       if (loadedData?.info?.modality === 'multiome') {
-        // Multiome: use ATAC peak matrix (not RNA matrix from state)
         const multiomePeak = await getMultiomePeakMatrix();
         if (multiomePeak && multiomePeak.peakMatrix) {
           const { peakMatrix, fullBarcodeOrder, peakNames: atacPeakNames } = multiomePeak;
@@ -9854,7 +9569,6 @@ async function showPeakGeneLinksAction({ gene } = {}) {
           }
         }
       } else {
-        // scATAC: use state count matrix
         const state = loadedData.state;
         if (state) {
           const { geneNames: peakNames } = await ensureGeneLookup();
@@ -9889,10 +9603,6 @@ async function showPeakGeneLinksAction({ gene } = {}) {
     },
   });
 }
-
-// ============================================================================
-// TF Motif Enrichment Analysis
-// ============================================================================
 
 let jasparPwmCache = null;
 
@@ -9940,6 +9650,7 @@ async function fetchJasparPwms() {
       const pwms = parsePfmEntries(data.results || []);
       if (pwms.length > 0) {
         jasparPwmCache = pwms;
+        console.log(`[TF Motif] Loaded ${jasparPwmCache.length} JASPAR PWMs via REST API`);
         return jasparPwmCache;
       }
     }
@@ -9947,7 +9658,6 @@ async function fetchJasparPwms() {
     console.warn('[TF Motif] REST API failed:', e.message);
   }
 
-  // Fallback: bulk flat-file
   const bulkResp = await fetch('https://jaspar.genereg.net/download/data/2024/CORE/JASPAR2024_CORE_vertebrates_non-redundant_pfms_jaspar.txt');
   if (!bulkResp.ok) throw new Error(`JASPAR bulk file returned ${bulkResp.status}`);
   const text = await bulkResp.text();
@@ -9966,6 +9676,7 @@ async function fetchJasparPwms() {
   }
   if (cur) entries.push(cur);
   jasparPwmCache = parsePfmEntries(entries);
+  console.log(`[TF Motif] Loaded ${jasparPwmCache.length} JASPAR PWMs via bulk file`);
   return jasparPwmCache;
 }
 
@@ -10047,7 +9758,6 @@ async function computeTopLinkedMarkers(cluster, topN = 30) {
   }
   if (!clusterAssignments?.length) throw new Error('No cluster assignments available.');
 
-  // cluster may be a single ID or a Set of IDs (for merged/renamed clusters)
   const clusterSet = cluster instanceof Set ? cluster : new Set([String(cluster)]);
   const inIdx = [], outIdx = [];
   for (let i = 0; i < clusterAssignments.length; i++) {
@@ -10083,7 +9793,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
     self.postMessage({ type: 'ANALYSIS_ERROR', error: 'Please specify a cluster, e.g. "show top TF for cluster 3".' });
     return;
   }
-  // Build a Set of cluster IDs to treat as a single group (handles merged/renamed clusters)
   const clusterSet = Array.isArray(mergedClusters) && mergedClusters.length > 1
     ? new Set(mergedClusters.map(String))
     : new Set([String(cluster)]);
@@ -10116,7 +9825,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
   }
   const markerGeneNames = new Set(topMarkers.map(m => m.gene.toLowerCase()));
 
-  // Collect query peaks from linked peaks of marker genes
   const seen = new Set();
   const queryPeaks = [];
   for (const link of loadedData.peakGeneLinks) {
@@ -10132,9 +9840,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
   }
   const cappedQuery = queryPeaks.slice(0, 300);
 
-  // Sample background peaks from peaks linked to NON-marker genes.
-  // This gives peaks accessible in other cell types, making cluster-specific TF motifs
-  // (e.g. PAX5 in B cells, HNF4A in PT) detectable via fold enrichment.
   const queryKeySet = new Set(cappedQuery.map(p => `${p.chrom}:${p.start}-${p.end}`));
   const bgCandMap = new Map();
   for (const link of loadedData.peakGeneLinks) {
@@ -10144,7 +9849,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
     bgCandMap.set(key, { chrom: link.chr, start: link.peakStart, end: link.peakEnd });
   }
   let bgPool = [...bgCandMap.values()];
-  // Fallback: if not enough non-marker linked peaks, supplement with random peaks from all peaks
   if (bgPool.length < nBackground) {
     const peakAnnotation = loadedData.peakAnnotation || [];
     for (const p of peakAnnotation) {
@@ -10162,7 +9866,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
     bgPeaks.push(bgPool[i]);
   }
 
-  // Fetch sequences from UCSC
   statusMsg(`Fetching sequences for ${cappedQuery.length + bgPeaks.length} peaks from UCSC...`);
   const allPeaks = [...cappedQuery, ...bgPeaks];
   const seqs = new Array(allPeaks.length).fill('');
@@ -10180,7 +9883,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
     await new Promise(r => setTimeout(r, 0));
   }
 
-  // Load JASPAR PWMs
   statusMsg('Loading JASPAR motif database (first run downloads ~400 KB)...');
   let pwms;
   try {
@@ -10190,7 +9892,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
     return;
   }
 
-  // Scan motifs
   statusMsg(`Scanning ${pwms.length} motifs across ${allPeaks.length} peaks...`);
   const nQ = cappedQuery.length;
   const nBg = bgPeaks.length;
@@ -10207,7 +9908,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
     motifResults.push({ id: pwms[mi].id, name: pwms[mi].name, qHits, bHits });
   }
 
-  // Hypergeometric test + BH correction
   const rawP = motifResults.map(m => hypergeomPvalue(m.qHits, nQ, m.bHits, nBg));
   const adjP = bhCorrect(rawP);
   const enriched = motifResults.map((m, i) => ({
@@ -10220,11 +9920,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
     negLogP: rawP[i] > 0 ? -Math.log10(rawP[i]) : 300,
   }));
 
-  // RENIN step 2: correlate TF expression with target gene expression (cluster cells)
-  // RENIN paper: "correlate expression of predicted binding TFs to expression of target genes"
-  // Score = mean_expr_in_cluster(TF) × Σ_genes max(0, pearsonCorr(TF_expr, gene_expr))
-  // Mirrors rank_tfs: Score_TF = mean_expr(TF) × Σ coef_if_kept(TF→gene)
-  // where Pearson correlation is our tractable proxy for the AEN regression coefficient
   try {
     const { lookup } = await ensureGeneLookup();
     const state = loadedData.state;
@@ -10241,7 +9936,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
       const normMatrix = state.rna_normalization.fetchNormalizedMatrix();
       const nC = inIdx.length;
 
-      // Pearson correlation over cluster cells
       function pearsonCorr(a, b) {
         let sumA = 0, sumB = 0;
         for (let i = 0; i < nC; i++) { sumA += a[i]; sumB += b[i]; }
@@ -10255,7 +9949,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
         return denom < 1e-10 ? 0 : num / denom;
       }
 
-      // Pre-fetch marker gene expression vectors (cluster cells only)
       statusMsg('Computing RENIN TF–gene expression correlations...');
       const markerVecs = [];
       for (const m of topMarkers) {
@@ -10267,10 +9960,8 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
         markerVecs.push(vec);
       }
 
-      // Only score the candidates that passed hypergeometric filter, avoids 700× normMatrix.row() calls
       const candidates = enriched.filter(e => e.queryHits > 0 && e.pvalue < 0.05);
       for (const e of candidates) {
-        // Handle composite JASPAR names: "SP1::CTCF" → try SP1 first, then CTCF
         const parts = e.tfName.split('::').map(p => p.split('(')[0].trim());
         let gIdx;
         for (const part of parts) {
@@ -10287,11 +9978,10 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
           const meanExprOut = sumOut / (outIdx.length || 1);
           const log2FC = Math.log2((e.meanExprInCluster + 1e-3) / (meanExprOut + 1e-3));
 
-          // Σ max(0, corr(TF, gene)) across marker genes, RENIN step 2
           let corrSum = 0;
           for (const mv of markerVecs) corrSum += Math.max(0, pearsonCorr(tfVec, mv));
           e.corrSum = corrSum;
-          e.reninScore = Math.max(0, log2FC) * e.meanExprInCluster * corrSum;  // balances specificity × level × correlation
+          e.reninScore = Math.max(0, log2FC) * e.meanExprInCluster * corrSum;
         } else {
           e.meanExprInCluster = 0;
           e.corrSum = 0;
@@ -10299,9 +9989,8 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
         }
       }
     }
-  } catch (_) { /* RENIN scoring optional, fall back to fold enrichment ranking */ }
+  } catch (_) {  }
 
-  // Deduplicate by TF name, JASPAR has multiple matrices per TF; keep the best-scoring one
   const byTfName = new Map();
   for (const e of enriched.filter(e => e.queryHits > 0 && e.pvalue < 0.05)) {
     const key = e.tfName.toLowerCase();
@@ -10329,19 +10018,6 @@ async function runTfMotifAnalysisAction({ cluster, clusters: mergedClusters, nMa
   });
 }
 
-// ============================================================================
-// SpaGE Gene Imputation
-// ============================================================================
-
-/**
- * Read a 10x h5 scRNA-seq file using h5wasm and return log-normalized expression
- * for a specific set of genes.
- *
- * @param {Uint8Array} h5Bytes  – raw HDF5 file bytes
- * @param {Set<string>} genesToFetch  – lowercase gene names needed (common + predict)
- * @returns {{ geneNames: string[], matrix: Float32Array, nCells: number }}
- *   matrix is row-major (nCells × nFetched), log1p(counts / cellTotal * 1e4)
- */
 async function readScrnaH5ForSpaGE(h5Bytes, genesToFetch) {
   const h5mod = await import('h5wasm');
   await h5mod.ready;
@@ -10353,7 +10029,6 @@ async function readScrnaH5ForSpaGE(h5Bytes, genesToFetch) {
   try {
     f = new h5mod.File(tmpPath, 'r');
 
-    // Detect layout (v3: /matrix/..., v2: root-level, or genome-group)
     const rootKeys = f.keys();
     let dataPath, indicesPath, indptrPath, shapePath, geneNamesPath;
 
@@ -10375,7 +10050,6 @@ async function readScrnaH5ForSpaGE(h5Bytes, genesToFetch) {
                     : rootKeys.includes('genes')       ? '/genes'
                     : null;
     } else {
-      // Try genome-named group
       for (const key of rootKeys) {
         try {
           const grp = f.get(key);
@@ -10393,23 +10067,20 @@ async function readScrnaH5ForSpaGE(h5Bytes, genesToFetch) {
               break;
             }
           }
-        } catch (_) { /* skip */ }
+        } catch (_) {  }
       }
     }
 
     if (!dataPath) throw new Error('Could not detect 10x HDF5 layout for scRNA reference');
 
-    // Read gene names
     const rawNames = geneNamesPath ? f.get(geneNamesPath).value : [];
     const geneNames = Array.from(rawNames, s => String(s));
 
-    // Read shape [nGenes, nCells]
     const shapeArr = f.get(shapePath).value;
     const nGenes = Number(shapeArr[0]);
     const nCells = Number(shapeArr[1]);
 
-    // Build index lookup for genes we need
-    const geneToFetchIdx = new Map(); // h5 gene index → fetch slot
+    const geneToFetchIdx = new Map();
     const fetchedNames   = [];
     for (let i = 0; i < geneNames.length; i++) {
       if (genesToFetch.has(geneNames[i].toLowerCase())) {
@@ -10421,25 +10092,19 @@ async function readScrnaH5ForSpaGE(h5Bytes, genesToFetch) {
       throw new Error('No genes from the spatial panel were found in the scRNA HDF5 reference. Check gene name conventions (e.g. upper vs lower case).');
     }
 
-    // Read full sparse arrays (CSC: cells=columns)
     const dataArr    = f.get(dataPath).value;
     const indicesArr = f.get(indicesPath).value;
     const indptrRaw  = f.get(indptrPath).value;
-    // Convert indptr to regular numbers (may be BigInt64Array)
     const indptr = new Float64Array(nCells + 1);
     for (let i = 0; i <= nCells; i++) {
       indptr[i] = typeof indptrRaw[i] === 'bigint' ? Number(indptrRaw[i]) : indptrRaw[i];
     }
-    // Compute per-cell totals for library-size normalization
     const cellTotals = new Float64Array(nCells);
     for (let c = 0; c < nCells; c++) {
       const start = indptr[c], end = indptr[c + 1];
       for (let k = start; k < end; k++) cellTotals[c] += dataArr[k];
     }
 
-    // Build dense matrix (nCells × nFetched)
-    // indicesArr may be BigInt64Array (h5wasm returns 64-bit indices as BigInt);
-    // Map keys are plain numbers so we must convert before lookup.
     const indicesAreBigInt = indicesArr.length > 0 && typeof indicesArr[0] === 'bigint';
     const nFetched = fetchedNames.length;
     const dense    = new Float32Array(nCells * nFetched);
@@ -10457,22 +10122,12 @@ async function readScrnaH5ForSpaGE(h5Bytes, genesToFetch) {
 
     return { geneNames: fetchedNames, matrix: dense, nCells };
   } finally {
-    if (f) try { f.close(); } catch (_) { /* ignore */ }
-    try { h5mod.FS.unlink(tmpPath); } catch (_) { /* ignore */ }
+    if (f) try { f.close(); } catch (_) {  }
+    try { h5mod.FS.unlink(tmpPath); } catch (_) {  }
   }
 }
 
-/**
- * Read a 10x MatrixMarket scRNA-seq dataset and return log-normalized
- * expression for a specific set of genes.
- *
- * @param {Uint8Array} matrixBuf   – matrix.mtx bytes (uncompressed)
- * @param {string[]}   allGeneNames – gene names from features.tsv (one per row of matrix)
- * @param {Set<string>} genesToFetch
- * @returns {{ geneNames: string[], matrix: Float32Array, nCells: number }}
- */
 function readScrnaMtxForSpaGE(matrixBuf, allGeneNames, genesToFetch) {
-  // parseMTXFromBuffer returns SparseMatrixCSC (genes=rows, cells=columns)
   const sparse = parseMTXFromBuffer(matrixBuf);
   const nGenes = sparse.nrows;
   const nCells = sparse.ncols;
@@ -10511,15 +10166,6 @@ function readScrnaMtxForSpaGE(matrixBuf, allGeneNames, genesToFetch) {
   return { geneNames: fetchedNames, matrix: dense, nCells };
 }
 
-/**
- * Main imputation handler: runs SpaGE to predict unmeasured gene expression
- * in the loaded spatial dataset using a provided scRNA-seq reference.
- *
- * @param {object} params      – { gene: string, genes?: string[] }
- * @param {object} scrnaFiles  – pre-read file buffers from Electron IPC (read10xFiles return value)
- *   For h5:  { success, format: '10X HDF5', files: { h5: { data: Uint8Array, name: string } } }
- *   For mtx: { success, format: '10X MatrixMarket', files: { matrix: { data }, features: { data }, barcodes: { data } } }
- */
 async function imputeGeneExpression(params, scrnaFiles) {
   const genesToPredict = params.genes
     ? params.genes
@@ -10536,18 +10182,15 @@ async function imputeGeneExpression(params, scrnaFiles) {
 
   self.postMessage({ type: 'STATUS_UPDATE', message: `Imputing gene(s): ${genesToPredict.join(', ')}…` });
 
-  // Get spatial count matrix and gene names from loaded data
   if (!loadedData) throw new Error('No spatial data loaded');
 
   const { geneNames: spatialGeneNames, lookup } = await ensureGeneLookup();
   const nSpatialGenes = spatialGeneNames.length;
 
-  // Fetch log-normalized expression for ALL spatial genes
   self.postMessage({ type: 'STATUS_UPDATE', message: 'SpaGE: Extracting spatial expression matrix…' });
   const { logExpressions: spatialExprArrs } = await resolveGeneExpressions(spatialGeneNames);
 
   const nSpatial = spatialExprArrs[0].length;
-  // Build spatial matrix (nSpatial × nSpatialGenes), row-major
   const spatialMatrix = new Float32Array(nSpatial * nSpatialGenes);
   for (let g = 0; g < nSpatialGenes; g++) {
     const col = spatialExprArrs[g];
@@ -10556,10 +10199,8 @@ async function imputeGeneExpression(params, scrnaFiles) {
     }
   }
 
-  // Load scRNA reference
   self.postMessage({ type: 'STATUS_UPDATE', message: 'SpaGE: Loading scRNA-seq reference…' });
 
-  // Fetch only: common genes (all spatial panel genes) + genes to predict
   const genesToFetch = new Set([
     ...spatialGeneNames.map(g => g.toLowerCase()),
     ...genesToPredict.map(g => g.toLowerCase()),
@@ -10567,7 +10208,6 @@ async function imputeGeneExpression(params, scrnaFiles) {
 
   let rnaGeneNames, rnaMatrix, nRNA;
 
-  // read10xFiles returns { success, format, files: { h5 } } or { success, format, files: { matrix, features, barcodes } }
   const files = scrnaFiles.files || scrnaFiles;
   const isH5 = scrnaFiles.format === '10X HDF5' || scrnaFiles.format === 'h5' || !!files.h5;
 
@@ -10577,10 +10217,8 @@ async function imputeGeneExpression(params, scrnaFiles) {
     const h5Bytes = h5Raw instanceof Uint8Array ? h5Raw : new Uint8Array(h5Raw);
     ({ geneNames: rnaGeneNames, matrix: rnaMatrix, nCells: nRNA } = await readScrnaH5ForSpaGE(h5Bytes, genesToFetch));
   } else if (files.matrix && files.features) {
-    // MTX format: features file contains gene names; decompress .gz if needed
-    // Simpler gzip decompress using DecompressionStream (available in workers)
     const decompressGzip = async (buf) => {
-      if (buf[0] !== 0x1f || buf[1] !== 0x8b) return buf; // not gzipped
+      if (buf[0] !== 0x1f || buf[1] !== 0x8b) return buf;
       const ds = new DecompressionStream('gzip');
       const writer = ds.writable.getWriter();
       const reader = ds.readable.getReader();
@@ -10606,13 +10244,13 @@ async function imputeGeneExpression(params, scrnaFiles) {
     const matrixBuf   = await decompressGzip(rawMatrix);
     const featuresBuf = await decompressGzip(rawFeatures);
 
-    // Decode features TSV to get gene names (column 2 = gene name)
     const featText = new TextDecoder().decode(featuresBuf);
     const allGeneNames = featText.trim().split('\n').map(line => {
       const cols = line.split('\t');
       return cols[1] || cols[0] || '';
     });
 
+    console.log(`[SpaGE] MTX: allGeneNames.length=${allGeneNames.length}, first 3:`, allGeneNames.slice(0, 3));
 
     ({ geneNames: rnaGeneNames, matrix: rnaMatrix, nCells: nRNA } =
       readScrnaMtxForSpaGE(matrixBuf, allGeneNames, genesToFetch));
@@ -10622,7 +10260,6 @@ async function imputeGeneExpression(params, scrnaFiles) {
 
   self.postMessage({ type: 'STATUS_UPDATE', message: `SpaGE: ${nRNA} RNA cells × ${rnaGeneNames.length} genes loaded. Running alignment…` });
 
-  // Run SpaGE
   let imputedMap;
   try {
     imputedMap = runSpaGE({
@@ -10638,21 +10275,18 @@ async function imputeGeneExpression(params, scrnaFiles) {
     throw new Error(`SpaGE imputation failed: ${err.message}`);
   }
 
-  // Debug: check imputed values
   for (const [geneName, expression] of imputedMap) {
     const nonzero = expression.filter(v => v > 0).length;
     const max = Math.max(...expression.subarray(0, Math.min(200, expression.length)));
+    console.log(`[SpaGE] imputed ${geneName}: ${nonzero}/${expression.length} nonzero cells, max(first 200)=${max}`);
+    console.log(`[SpaGE] sample values:`, Array.from(expression.subarray(0, 10)));
   }
 
-  // Store imputed values in cache for violin/dot plots
-  // These are plotting-only and must NEVER be used in reanalysis (PCA/clustering/UMAP).
-  // Keep a copy before transferring the buffer below.
   const imputedCopies = new Map();
   for (const [geneName, expression] of imputedMap) {
     imputedCopies.set(geneName.toLowerCase(), expression.slice());
   }
 
-  // Send results back as gene_expression (one per gene)
   const isSpatialIntegration =
     loadedData?.info?.modality === 'xenium-integration' ||
     loadedData?.info?.modality === 'merfish-integration' ||
@@ -10668,16 +10302,12 @@ async function imputeGeneExpression(params, scrnaFiles) {
 
   const umapCoords = currentResults.umap || null;
 
-  // For spatial integration: include integrationViews + perSampleSpatial so the
-  // frontend can display the imputed gene on each sample's tissue view in the same
-  // merged-cell order (values are comparable across samples, joint SpaGE imputation).
   const integrationMeta = isSpatialIntegration ? {
     integrationViews: loadedData.integrationViews || null,
     datasetNames: loadedData.info?.datasetNames || [],
     perSampleSpatial: loadedData.perSampleSpatial || null,
   } : {};
 
-  // Send one message per imputed gene
   for (const [geneName, expression] of imputedMap) {
     self.postMessage({
       type: 'ANALYSIS_COMPLETE',
@@ -10693,39 +10323,17 @@ async function imputeGeneExpression(params, scrnaFiles) {
     }, [expression.buffer]);
   }
 
-  // Populate cache after sending (the buffer is transferred above, use copies)
   for (const [key, copy] of imputedCopies) {
     imputedGeneCache.set(key, copy);
   }
+  console.log(`[SpaGE] imputedGeneCache updated: ${[...imputedGeneCache.keys()].join(', ')}`);
 }
 
-// ============================================================================
-// BANKSY Region Segmentation
-// ============================================================================
-
-/**
- * Run BANKSY spatial region segmentation.
- * Requires spatial coordinates and normalized expression data.
- *
- * Returns a 'umap' type result with BANKSY cluster labels replacing the
- * standard transcriptomic clusters, displayed on the spatial tissue view.
- *
- * @param {Object} params
- * @param {number} [params.lambda=0.3]: Neighborhood contribution (0=transcriptomic, 1=spatial)
- * @param {number} [params.numNeighbors=15]: Spatial k-NN neighbors
- * @param {number} [params.clusterNeighbors=50]: BANKSY PCA graph neighbors
- * @param {number} [params.resolution=0.7]: Leiden/multilevel clustering resolution
- * @param {number} [params.numHvgs=500]: Number of HVGs to use for BANKSY
- * @param {number} [params.numPcaDims=20]: PCA dimensions
- */
 async function runBanksyRegionSegmentation(params = {}) {
   const {
     lambda = 0.3,
     numNeighbors = 15,
     clusterNeighbors = 50,
-    // Lower resolution than cell-type clustering, region segmentation should
-    // produce fewer, larger cohesive areas (typically 5–15 regions).
-    // BANKSY paper uses 0.2–0.3 for tissue domain detection.
     resolution = 0.3,
     numHvgs = 500,
     numPcaDims = 20,
@@ -10739,7 +10347,6 @@ async function runBanksyRegionSegmentation(params = {}) {
     throw new Error('No data loaded. Please load a spatial dataset first.');
   }
 
-  // Get spatial coordinates
   const spatialDataSource = loadedData.spatialData || spatialData;
   if (!spatialDataSource || !Array.isArray(spatialDataSource.coordinates) || spatialDataSource.coordinates.length === 0) {
     self.postMessage({
@@ -10752,13 +10359,11 @@ async function runBanksyRegionSegmentation(params = {}) {
 
   const rawCoords = spatialDataSource.coordinates;
 
-  // Parse coordinates to [x, y] pairs (handle both array and object formats)
   const allCoords = rawCoords.map(c => {
     if (c == null) return [0, 0];
     return Array.isArray(c) ? [c[0] ?? 0, c[1] ?? 0] : [c.x ?? 0, c.y ?? 0];
   });
 
-  // Determine which cells have valid (non-null) coordinates
   const validCellMask = rawCoords.map(c => c != null && !isNaN(Array.isArray(c) ? c[0] : c.x));
   const validIndices = validCellMask.map((v, i) => v ? i : -1).filter(i => i >= 0);
 
@@ -10767,8 +10372,6 @@ async function runBanksyRegionSegmentation(params = {}) {
 
   post(`BANKSY: Preparing expression matrix for ${nCells.toLocaleString()} cells...`);
 
-  // Get normalized expression matrix
-  // Prefer bakana state, fall back to JS pipeline data
   let normMatrix = null;
   let nGenesTotal = 0;
   let geneNames = [];
@@ -10793,7 +10396,6 @@ async function runBanksyRegionSegmentation(params = {}) {
       geneNames = Array.from({ length: nGenesTotal }, (_, i) => `gene_${i}`);
     }
   } else if (loadedData.jsGeneNames) {
-    // Large dataset JS path, use HVG matrix if available
     geneNames = loadedData.jsGeneNames;
     nGenesTotal = geneNames.length;
   } else {
@@ -10804,18 +10406,14 @@ async function runBanksyRegionSegmentation(params = {}) {
     return;
   }
 
-  // Select HVGs for BANKSY (top N by expression variance)
   const nHvgs = Math.min(numHvgs, nGenesTotal);
   post(`BANKSY: Selecting top ${nHvgs} variable genes...`);
 
-  // Compute per-gene variance to select HVGs
-  // For the bakana path, sample up to 5K cells for variance estimation to save time
   const nForVariance = Math.min(nCells, 5000);
   const varianceSampleStep = nCells > nForVariance ? Math.floor(nCells / nForVariance) : 1;
   const geneVar = new Float64Array(nGenesTotal);
 
   if (normMatrix) {
-    // For each gene, get expression values from all valid cells (step for speed on large datasets)
     for (let g = 0; g < nGenesTotal; g++) {
       const row = normMatrix.row(g);
       if (!row) continue;
@@ -10833,21 +10431,18 @@ async function runBanksyRegionSegmentation(params = {}) {
       }
     }
   } else if (loadedData.jsNormMatrix) {
-    // JS pipeline path: use jsNormMatrix (sparse CSC)
     const mat = loadedData.jsNormMatrix;
     for (let g = 0; g < nGenesTotal; g++) {
-      geneVar[g] = 1; // treat all as equally variable if no variance info
+      geneVar[g] = 1;
     }
   } else {
     for (let g = 0; g < nGenesTotal; g++) geneVar[g] = 1;
   }
 
-  // Sort genes by variance (descending) and pick top nHvgs
   const geneOrder = Array.from({ length: nGenesTotal }, (_, i) => i);
   geneOrder.sort((a, b) => geneVar[b] - geneVar[a]);
   const hvgIndices = geneOrder.slice(0, nHvgs);
 
-  // Build dense expression matrix (nCells × nHvgs), row-major, Float32
   post(`BANKSY: Extracting expression matrix (${nCells.toLocaleString()} cells × ${nHvgs} genes)...`);
   const X = new Float32Array(nCells * nHvgs);
 
@@ -10862,11 +10457,9 @@ async function runBanksyRegionSegmentation(params = {}) {
       }
     }
   } else {
-    // fallback: all zeros (algorithm will still run, just won't be meaningful)
     post('BANKSY: Warning, could not extract expression data, spatial-only mode.');
   }
 
-  // Seeded PRNG for reproducibility
   function seededRandom(seed) {
     return function () {
       let t = (seed += 0x6d2b79f5);
@@ -10877,7 +10470,6 @@ async function runBanksyRegionSegmentation(params = {}) {
   }
   const rng = seededRandom(42);
 
-  // Run BANKSY
   post(`BANKSY: Running BANKSY algorithm (lambda=${lambda}, k=${numNeighbors})...`);
   let banksyResult;
   try {
@@ -10900,13 +10492,17 @@ async function runBanksyRegionSegmentation(params = {}) {
   const { cellEmbeddings, nComponents, kUsed } = banksyResult;
   post(`BANKSY: Clustering ${nCells.toLocaleString()} cells in BANKSY space...`);
 
-  // Build kNN from BANKSY PCA for SNN clustering. BANKSY's graph clustering
-  // defaults to k_neighbors=50; keeping this separate from the spatial k keeps
-  // the neighborhood feature calculation and the final graph aligned with the
-  // upstream workflow.
-  const kClustering = Math.min(Math.max(1, Math.floor(clusterNeighbors)), nCells - 1);
+  const SNN_LARGE_CELLS = 50000;
+  const SNN_CELLS_K2_BUDGET = 302340 * 15 * 15;
+  const kMemoryCap = nCells <= SNN_LARGE_CELLS
+    ? 50
+    : Math.max(10, Math.floor(Math.sqrt(SNN_CELLS_K2_BUDGET / nCells)));
+  const kRequested = Math.max(1, Math.floor(clusterNeighbors));
+  const kClustering = Math.min(kRequested, kMemoryCap, nCells - 1);
+  if (kClustering < kRequested) {
+    post(`BANKSY: ${nCells.toLocaleString()} cells, using k=${kClustering} (instead of ${kRequested}) for the region graph to stay within memory...`);
+  }
 
-  // Cluster with scran.js SNN graph + multilevel/leiden
   post('BANKSY: Building k-NN/SNN graph in full BANKSY PCA space...');
   const pcaColumnMajor = new Float64Array(nCells * nComponents);
   for (let i = 0; i < nCells; i++) {
@@ -10928,13 +10524,20 @@ async function runBanksyRegionSegmentation(params = {}) {
       approximate: nCells > 10000,
     });
     knnResults = scran.findNearestNeighbors(neighborIndex, kClustering);
-    snnGraph = scran.buildSnnGraph(knnResults, { scheme: 'rank' });
+    snnGraph = scran.buildSnnGraph(knnResults, { scheme: 'rank', neighbors: kClustering });
+    knnResults.free(); knnResults = null;
+    neighborIndex.free(); neighborIndex = null;
     clusterResult = scran.clusterGraph(snnGraph, {
       method: 'multilevel',
       multiLevelResolution: resolution,
     });
     const membership = clusterResult.membership();
     clusterArray = Array.from(membership);
+  } catch (err) {
+    if (/Aborted/i.test(String(err?.message))) {
+      throw new Error(`BANKSY ran out of memory while clustering ${nCells.toLocaleString()} cells (the WebAssembly memory limit is 4 GB). Please reload the data before running another analysis.`);
+    }
+    throw err;
   } finally {
     if (clusterResult) try { clusterResult.free(); } catch (_) {}
     if (snnGraph) try { snnGraph.free(); } catch (_) {}
@@ -10945,8 +10548,6 @@ async function runBanksyRegionSegmentation(params = {}) {
   const nRegions = new Set(clusterArray).size;
   post(`BANKSY: Found ${nRegions} spatial region${nRegions !== 1 ? 's' : ''}!`);
 
-  // Build full-length cluster and coordinate arrays aligned to all original cells.
-  // Cells with null/invalid coordinates (validCellMask=false) get label -1.
   const nAllCells = allCoords.length;
   const finalClusters = new Array(nAllCells).fill(-1);
   for (let ci = 0; ci < nCells; ci++) {
@@ -10954,10 +10555,8 @@ async function runBanksyRegionSegmentation(params = {}) {
   }
   const finalSpatialCoords = allCoords.map(c => [c[0], c[1]]);
 
-  // Store region labels independently so they don't overwrite transcriptomic clusters
   currentResults.regionClusters = finalClusters;
 
-  // Ensure transcriptomic clusters are populated for cross-referencing
   if (!currentResults.clusters || !currentResults.clusters.length) {
     try {
       const state = loadedData.state;
@@ -10965,10 +10564,9 @@ async function runBanksyRegionSegmentation(params = {}) {
       if (fetched && fetched.length) {
         currentResults.clusters = Array.from(fetched);
       }
-    } catch (_) { /* clustering may not be available yet */ }
+    } catch (_) {  }
   }
 
-  // Use existing UMAP coordinates (or spatial coords if no UMAP)
   const umapCoordinates = currentResults.umap || null;
 
   self.postMessage({
@@ -10992,7 +10590,6 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
     throw new Error('No data loaded. Please load data first.');
   }
 
-  // Reclustering: clear scATAC caches so downstream plot gene activity uses new clusters
   if (source === 'reclustered') {
     scAtacGeneActivityCache.clear();
   }
@@ -11006,7 +10603,6 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
     return;
   }
 
-  // Standalone scATAC: default is bakana (RNA-style); when user requests LSI, run TF-IDF/LSI pipeline
   if (loadedData.info?.modality === 'atac' && atacMethod === 'lsi') {
     self.postMessage({ type: 'STATUS_UPDATE', message: 'Running ATAC clustering and UMAP (TF-IDF/LSI pipeline)...' });
     await runAtacPipeline({ skipPostMessage: true, multiome: false });
@@ -11029,8 +10625,9 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
   }
 
   try {
-    // Multiome + user chose ATAC: default to the TF-IDF/LSI scATAC pipeline.
-    if (loadedData.info?.modality === 'multiome' && multiomeTarget === 'atac') {
+    const hasAtacResults = (loadedData.precomputed?.atacAligned?.coordinates?.length ?? 0) > 0;
+    const atacViewOnly = hasAtacResults && source !== 'reclustered' && !atacMethod;
+    if (loadedData.info?.modality === 'multiome' && multiomeTarget === 'atac' && !atacViewOnly) {
       const useLsi = atacMethod !== 'bakana';
       self.postMessage({ type: 'STATUS_UPDATE', message: useLsi ? 'Running ATAC clustering and UMAP (TF-IDF/LSI pipeline)...' : 'Running ATAC clustering and UMAP (bakana peak-as-RNA pipeline)...' });
       if (useLsi) {
@@ -11080,12 +10677,11 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
       if (rnaAligned?.coordinates && rnaAligned?.clusters) {
         currentResults.umap = rnaAligned.coordinates;
         currentResults.clusters = rnaAligned.clusters;
+        console.log('Multiome: restored currentResults to RNA after runClusteringAndUMAP(ATAC)');
       }
       return;
     }
 
-    // ATAC integration: use existing UMAP/clusters from currentResults (from initial runAtacIntegrationPipeline).
-    // No bakana state; "plot umap" / cluster_and_visualize should resend UMAP colored by cluster.
     if (loadedData.info?.modality === 'atac-integration' && source !== 'reclustered' &&
         currentResults.umap && currentResults.clusters &&
         currentResults.umap.length > 0 && currentResults.clusters.length > 0) {
@@ -11108,13 +10704,11 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
           messageData.clusterLabelMap = currentClusterLabelMap;
         }
         self.postMessage({ type: 'ANALYSIS_COMPLETE', data: messageData });
+        console.log('ATAC integration: sent UMAP from currentResults:', coordinates.length, 'cells,', nClusters, 'clusters');
       }
       return;
     }
 
-    // Standalone scATAC: use existing UMAP/clusters from currentResults (e.g. from initial runFullAnalysisPipeline)
-    // when we have them, so "plot clusters" shows the UMAP even when precomputed is null.
-    // Skip when source === 'reclustered' so we fall through to state path and update currentResults with new clusters.
     if (loadedData.info?.modality === 'atac' && source !== 'reclustered' &&
         currentResults.umap && currentResults.clusters &&
         currentResults.umap.length > 0 && currentResults.clusters.length > 0) {
@@ -11135,26 +10729,23 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
           messageData.clusterLabelMap = currentClusterLabelMap;
         }
         self.postMessage({ type: 'ANALYSIS_COMPLETE', data: messageData });
+        console.log('scATAC: sent UMAP from currentResults:', coordinates.length, 'cells,', nClusters, 'clusters');
       }
       return;
     }
 
-    // FIRST: Check if we have precomputed UMAP/clusters (e.g., from Xenium preloaded data)
-    // Use these directly without running full analysis pipeline.
-    // Skip when source === 'reclustered' and we have state so we send newly computed results instead.
     const usePrecomputed = loadedData.precomputed && currentResults.umap && currentResults.clusters &&
       !(source === 'reclustered' && loadedData.state);
     if (usePrecomputed) {
+      console.log('Using precomputed UMAP and clusters - no reanalysis needed');
 
       const coordinates = currentResults.umap;
       const clusters = currentResults.clusters;
 
-      // Count unique clusters
       const uniqueClusters = new Set(clusters.filter(c => c !== null && c !== undefined));
       const nClusters = uniqueClusters.size;
 
       if (sendMessage) {
-        // For multiome: send both RNA and ATAC UMAPs
         if (loadedData.info?.modality === 'multiome' && loadedData.precomputed.atacAligned) {
           const rnaAligned = loadedData.precomputed.rnaAligned || { coordinates, clusters, nClusters };
           const atacAligned = loadedData.precomputed.atacAligned;
@@ -11195,10 +10786,10 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
           source: 'precomputed',
         };
 
-        // Add spatial data if present
         if (loadedData.spatialData && Array.isArray(loadedData.spatialData.coordinates)) {
           messageData.spatialCoordinates = loadedData.spatialData.coordinates;
           messageData.spatialMatched = loadedData.spatialData.matched;
+          console.log(`Including spatial coordinates: ${loadedData.spatialData.matched}/${loadedData.spatialData.coordinates.length} matched`);
         }
 
         self.postMessage({
@@ -11207,15 +10798,15 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
         });
       }
 
+      console.log(`✓ Returned precomputed UMAP: ${coordinates.length} cells, ${nClusters} clusters`);
       return;
     }
 
-    // If no precomputed data, we need analysis state (or for scATAC legacy path: run ATAC pipeline)
     if (!loadedData.state) {
-      // Standalone scATAC with legacy atacPeakMatrix (no bakana state): run TF-IDF/LSI pipeline to get UMAP/clusters
       if (loadedData.info?.modality === 'atac') {
         self.postMessage({ type: 'STATUS_UPDATE', message: 'Running ATAC analysis (TF-IDF/LSI pipeline)...' });
         await runAtacPipeline({ skipPostMessage: false, multiome: false });
+        console.log('scATAC: sent UMAP from runAtacPipeline (no state path)');
         return;
       }
       throw new Error('No analysis state available. Please run analysis first.');
@@ -11223,35 +10814,28 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
 
     const state = loadedData.state;
 
-    // Check if UMAP has already been computed in bakana state
-    // If not, we need to run the full pipeline to compute UMAP and clustering
     let needsFullPipeline = false;
     try {
-      // Try to check if UMAP results exist
       const testResults = state.umap ? await state.umap.fetchResults() : null;
       if (!testResults || !testResults.x || testResults.x.length === 0) {
         needsFullPipeline = true;
+        console.log('UMAP not computed yet - need to run full analysis pipeline');
       } else {
+        console.log('UMAP already computed - using existing results');
       }
     } catch (e) {
       needsFullPipeline = true;
+      console.log('UMAP fetch failed - need to run full analysis pipeline:', e.message);
     }
 
-    // If UMAP hasn't been computed (e.g., only normalization was run), run full pipeline
-    // EXCEPT: for integration/xenium/atac/visium-hd we may have loaded previous results in currentResults, use those instead
     if (needsFullPipeline) {
       const isIntegration = loadedData.info?.modality === 'integration' || loadedData.info?.modality === 'xenium-integration' || loadedData.info?.modality === 'atac-integration' || loadedData.info?.modality === 'visium-hd-integration' || loadedData.info?.modality === 'merfish-integration';
-      // For precomputed spatial (Xenium, MERFISH, Visium HD): when not explicitly reclustering,
-      // return precomputed results rather than trying to re-run the full pipeline.
-      // When source === 'reclustered', the user explicitly requested reanalysis, fall through
-      // to runFullAnalysisPipeline so fresh results are computed.
       const isPrecomputedSpatial = !!loadedData.precomputed && (
         loadedData.info?.modality === 'spatial' ||
         loadedData.info?.modality === 'merfish' ||
         loadedData.info?.modality === 'visium-hd'
       );
       if (isPrecomputedSpatial && source !== 'reclustered') {
-        // Prefer currentResults (realigned to filtered cells); fall back to loadedData.precomputed arrays
         const umapCoords = (currentResults.umap && currentResults.umap.length > 0)
           ? currentResults.umap
           : (Array.isArray(loadedData.precomputed.umap) ? loadedData.precomputed.umap : null);
@@ -11289,6 +10873,7 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
       const hasExistingResults = currentResults.umap && currentResults.clusters &&
         currentResults.umap.length > 0 && currentResults.clusters.length === currentResults.umap.length;
       if (isIntegration && hasExistingResults) {
+        console.log('Integration: using existing UMAP/clusters from loaded results (no full pipeline).');
         if (sendMessage) {
           self.postMessage({ type: 'STATUS_UPDATE', message: 'Using existing UMAP and cluster data...' });
         }
@@ -11332,44 +10917,34 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
         self.postMessage({ type: 'ANALYSIS_COMPLETE', data: messageData });
         return;
       }
+      console.log('Running full analysis pipeline for clustering and UMAP...');
       await runFullAnalysisPipeline({ labelPrefix: 'recluster' });
-      // After full pipeline, the results will be sent by runFullAnalysisPipeline
       return;
     }
 
-    // Otherwise, UMAP was already computed (from precomputed data or previous analysis)
-    // Just fetch and send the existing results
     if (sendMessage) {
       self.postMessage({ type: 'STATUS_UPDATE', message: 'Fetching existing UMAP and cluster data...' });
     }
 
-    // Get UMAP coordinates from bakana
     const umapResults = await state.umap.fetchResults();
     const coordinates = [];
     for (let i = 0; i < umapResults.x.length; i++) {
       coordinates.push([umapResults.x[i], umapResults.y[i]]);
     }
 
-    // Get cluster assignments
-    // If we're not reclustering and we have existing (potentially merged) clusters, preserve them
-    // Only fetch fresh clusters from bakana state when actually reclustering
     let clusters;
     if (source !== 'reclustered' && currentResults.clusters && currentResults.clusters.length === coordinates.length) {
-      // Use existing clusters (preserves any merged clusters)
       clusters = currentResults.clusters;
+      console.log('Using existing clusters (preserving merged state)');
     } else {
-      // Fetch fresh clusters from bakana state (for reclustering or initial load)
       const clusterResults = state.choose_clustering.fetchClusters();
       clusters = Array.from(clusterResults);
+      console.log('Fetched fresh clusters from bakana state');
     }
 
-    // Store results
     currentResults.umap = coordinates;
     currentResults.clusters = clusters;
 
-    // Rebuild spatial coordinates to match filtered cell order & cluster indexing.
-    // Previous attempt assumed coordinates array index matched original matrix column index after simple discard filtering, which is fragile.
-    // Use the global spatialData variable (reassign it) instead of creating a local const to avoid shadowing
     spatialData = loadedData?.spatialData;
     if (spatialData && spatialData.idToCoord && loadedData?.cellBarcodes) {
       try {
@@ -11379,6 +10954,7 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
           const annotations = state.inputs.fetchCellAnnotations();
           orderedBarcodes = extractOrderedBarcodesFromAnnotations(annotations, clusters.length);
           if (orderedBarcodes) {
+            console.log('Derived filtered cell barcodes directly from annotations for spatial alignment.');
           }
         } catch (annotationError) {
           console.warn('Failed to derive filtered barcodes from annotations:', annotationError);
@@ -11418,6 +10994,7 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
                       keptIndices.push(i);
                     }
                   }
+                  console.log(`Derived keptIndices from filter state: ${keptIndices.length} kept out of ${mask.length}`);
                 }
               }
             } catch (e) {
@@ -11431,6 +11008,10 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
           }
 
           orderedBarcodes = keptIndices.map((idx) => loadedData.cellBarcodes[idx]);
+          console.log('Reconstructed filtered barcode ordering via keep mask.', {
+            derivedLength: orderedBarcodes.length,
+            expectedLength: clusters.length,
+          });
         }
 
         if (Array.isArray(orderedBarcodes)) {
@@ -11451,7 +11032,6 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
           let resolved = mapBarcodesToCoordinates(spatialData, orderedBarcodes);
           let finalCoords = resolved.coordinates;
 
-          // When idToCoord match fails (0 matches), preserve coordinates by mapping through initial barcode order (CosMX)
           if (resolved.matched === 0 &&
               Array.isArray(spatialData.initialBarcodeOrder) &&
               Array.isArray(spatialData.coordinates) &&
@@ -11472,6 +11052,7 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
             });
             resolved = { coordinates: finalCoords, matched: preserved, unmatchedExamples: [] };
             if (preserved > 0) {
+              console.log(`✓ Rebuilt spatial coordinates by initial order: ${preserved}/${finalCoords.length} preserved`);
             }
           }
 
@@ -11494,6 +11075,7 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
               sampleUnmatched: resolved.unmatchedExamples,
             });
           } else {
+            console.log(`✓ Rebuilt spatial coordinates for filtered cells: matched ${resolved.matched}/${finalCoords.length}`);
             if (resolved.unmatchedExamples.length) {
               console.warn('Sample unmatched barcodes after rebuild:', resolved.unmatchedExamples);
             }
@@ -11502,7 +11084,6 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
           spatialData.coordinates = finalCoords;
           spatialData.matched = resolved.matched;
           spatialData.filteredBarcodes = orderedBarcodes;
-          // Persist the updated spatial data back to loadedData
           loadedData.spatialData = spatialData;
         } else {
           console.warn('Unable to derive ordered barcodes for spatial alignment; leaving coordinates unchanged.');
@@ -11511,8 +11092,6 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
         console.warn('Failed to rebuild spatial coordinates for filtered order:', rebuildError);
       }
     } else {
-      // For single cell data (no spatial coordinates), this is expected; no need to warn
-      // Only log if we actually have spatial data but missing required fields
       if (spatialData) {
         console.warn('Skipping spatial coordinate rebuild: missing idToCoord or cellBarcodes', {
           hasSpatialData: !!spatialData,
@@ -11520,27 +11099,24 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
           hasCellBarcodes: !!loadedData?.cellBarcodes,
         });
       }
-      // For single cell data without spatialData, silently skip (this is normal)
     }
 
-    // Get number of clusters
     let maxClusterId = -Infinity;
     for (let i = 0; i < clusters.length; i++) {
-      const candidate = Number(clusters[i]); // Convert BigInt to Number
+      const candidate = Number(clusters[i]);
       if (candidate > maxClusterId) {
         maxClusterId = candidate;
       }
     }
     const nClusters = (maxClusterId === -Infinity ? 0 : maxClusterId + 1);
 
+    console.log(`Analysis complete: ${coordinates.length} cells, ${nClusters} clusters`);
 
     postFilteredSummary({
       reason: sendMessage ? 'post-clustering' : '',
     });
 
-    // Only send message if this was called directly, not as a helper function
     if (sendMessage) {
-      // Include spatial coordinates if available (for spatial datasets after reanalysis)
       const messageData = {
         type: 'umap',
         coordinates: coordinates,
@@ -11549,18 +11125,16 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
         nCells: coordinates.length,
       };
 
-      // Add source if specified (e.g., 'reclustered' to indicate cluster labels should be reset)
       if (source) {
         messageData.source = source;
       }
 
-      // Add spatial data if present
       if (spatialData && Array.isArray(spatialData.coordinates)) {
         messageData.spatialCoordinates = spatialData.coordinates;
         messageData.spatialMatched = spatialData.matched;
+        console.log(`Including spatial coordinates in analysis result: ${spatialData.matched}/${spatialData.coordinates.length} matched`);
       }
 
-      // Integration: include per-sample views so the app shows Healthy/PKD UMAP cards and clears DEG view
       if (loadedData.info?.modality === 'integration') {
         const nCellsForViews = coordinates.length;
         const integrationMeta = getIntegrationViewsForPlot(nCellsForViews);
@@ -11570,25 +11144,21 @@ async function runClusteringAndUMAP(sendMessage = true, source = null, multiomeT
         }
       }
 
-      // Xenium integration: include per-sample views so all spatial cards show cluster colors
       if (loadedData.info?.modality === 'xenium-integration' && loadedData.integrationViews && loadedData.info.datasetNames) {
         messageData.integrationViews = loadedData.integrationViews;
         messageData.datasetNames = loadedData.info.datasetNames;
       }
 
-      // Visium HD integration: include per-sample views so spatial cards show coordinates colored by clusters
       if (loadedData.info?.modality === 'visium-hd-integration' && loadedData.integrationViews && loadedData.info.datasetNames) {
         messageData.integrationViews = loadedData.integrationViews;
         messageData.datasetNames = loadedData.info.datasetNames;
       }
 
-      // MERFISH integration: include per-sample views so spatial cards show coordinates colored by clusters
       if (loadedData.info?.modality === 'merfish-integration' && loadedData.integrationViews && loadedData.info.datasetNames) {
         messageData.integrationViews = loadedData.integrationViews;
         messageData.datasetNames = loadedData.info.datasetNames;
       }
 
-      // Multiome: send both RNA and ATAC UMAP so both views show cluster UMAP
       if (loadedData.info?.modality === 'multiome') {
         if (Array.isArray(loadedData.cellBarcodes) && loadedData.cellBarcodes.length === coordinates.length) {
           messageData.cellBarcodes = loadedData.cellBarcodes;
@@ -11648,7 +11218,6 @@ async function runUMAP(multiomeTarget = null, atacMethod = null) {
     return;
   }
 
-  // Standalone scATAC: default is bakana (RNA-style); when user requests LSI, run TF-IDF/LSI pipeline
   if (loadedData.info?.modality === 'atac' && atacMethod === 'lsi') {
     self.postMessage({ type: 'STATUS_UPDATE', message: 'Running ATAC UMAP (TF-IDF/LSI pipeline)...' });
     await runAtacPipeline({ skipPostMessage: true, multiome: false });
@@ -11669,7 +11238,6 @@ async function runUMAP(multiomeTarget = null, atacMethod = null) {
   }
 
   try {
-    // Multiome + user chose ATAC: default to the TF-IDF/LSI scATAC pipeline.
     if (loadedData.info?.modality === 'multiome' && multiomeTarget === 'atac') {
       const useLsi = atacMethod !== 'bakana';
       self.postMessage({ type: 'STATUS_UPDATE', message: useLsi ? 'Running ATAC UMAP (TF-IDF/LSI pipeline)...' : 'Running ATAC UMAP (bakana peak-as-RNA pipeline)...' });
@@ -11717,21 +11285,20 @@ async function runUMAP(multiomeTarget = null, atacMethod = null) {
       if (rnaAligned?.coordinates && rnaAligned?.clusters) {
         currentResults.umap = rnaAligned.coordinates;
         currentResults.clusters = rnaAligned.clusters;
+        console.log('Multiome: restored currentResults to RNA after runUMAP(ATAC)');
       }
       return;
     }
 
-    // For precomputed data (Xenium), use the existing UMAP coordinates and clusters
     if (loadedData.precomputed && currentResults.umap && currentResults.clusters) {
+      console.log('Using precomputed UMAP coordinates for Xenium data');
 
       const coordinates = currentResults.umap;
       const clusters = currentResults.clusters;
 
-      // Count unique clusters
       const uniqueClusters = new Set(clusters.filter(c => c !== null && c !== undefined));
       const nClusters = uniqueClusters.size;
 
-      // Multiome: send both RNA and ATAC UMAP so both views show cluster UMAP
       if (loadedData.info?.modality === 'multiome' && loadedData.precomputed.atacAligned) {
         const rnaAligned = loadedData.precomputed.rnaAligned || { coordinates, clusters, nClusters };
         const atacAligned = loadedData.precomputed.atacAligned;
@@ -11778,10 +11345,10 @@ async function runUMAP(multiomeTarget = null, atacMethod = null) {
         source: 'precomputed',
       };
 
-      // Add spatial data if present
       if (loadedData.spatialData && Array.isArray(loadedData.spatialData.coordinates)) {
         messageData.spatialCoordinates = loadedData.spatialData.coordinates;
         messageData.spatialMatched = loadedData.spatialData.matched;
+        console.log(`Including spatial coordinates in UMAP result: ${loadedData.spatialData.matched}/${loadedData.spatialData.coordinates.length} matched`);
       }
 
       self.postMessage({
@@ -11791,7 +11358,6 @@ async function runUMAP(multiomeTarget = null, atacMethod = null) {
       return;
     }
 
-    // For regular data, compute UMAP from bakana state
     if (!loadedData.state) {
       throw new Error('Analysis state not ready. Please run analysis first.');
     }
@@ -11800,21 +11366,18 @@ async function runUMAP(multiomeTarget = null, atacMethod = null) {
 
     self.postMessage({ type: 'STATUS_UPDATE', message: 'Computing UMAP...' });
 
-    // Get UMAP coordinates from bakana
     const umapResults = await state.umap.fetchResults();
     const coordinates = [];
     for (let i = 0; i < umapResults.x.length; i++) {
       coordinates.push([umapResults.x[i], umapResults.y[i]]);
     }
 
-    // Fetch clusters so UMAP is colored by existing clusters (clustering is unchanged when only UMAP params change)
     const clusterResults = state.choose_clustering.fetchClusters();
     const clusters = Array.from(clusterResults);
 
     currentResults.umap = coordinates;
     currentResults.clusters = clusters;
 
-    // Compute nClusters for the UI
     let maxClusterId = -Infinity;
     for (let i = 0; i < clusters.length; i++) {
       const candidate = Number(clusters[i]);
@@ -11832,19 +11395,16 @@ async function runUMAP(multiomeTarget = null, atacMethod = null) {
       nCells: coordinates.length,
     };
 
-    // Include clusterLabelMap so App can preserve cluster renames/merges
     if (currentClusterLabelMap && Object.keys(currentClusterLabelMap).length > 0) {
       messageData.clusterLabelMap = currentClusterLabelMap;
     }
 
-    // Add spatial data if present
     const spatialDataSource = loadedData?.spatialData || spatialData;
     if (spatialDataSource && Array.isArray(spatialDataSource.coordinates)) {
       messageData.spatialCoordinates = spatialDataSource.coordinates;
       messageData.spatialMatched = spatialDataSource.matched;
     }
 
-    // Multiome: send both RNA and ATAC UMAP so both views show cluster UMAP
     if (loadedData.info?.modality === 'multiome') {
       self.postMessage({
         type: 'ANALYSIS_COMPLETE',
@@ -11867,7 +11427,6 @@ async function runUMAP(multiomeTarget = null, atacMethod = null) {
           },
         });
       } else {
-        // No ATAC-specific UMAP: use same RNA coordinates/clusters for ATAC view so both show same clusters
         self.postMessage({
           type: 'ANALYSIS_COMPLETE',
           data: { ...messageData, multiomeModality: 'atac' },
@@ -11899,7 +11458,6 @@ async function ensureGeneLookup() {
     return { geneNames: cachedGeneNames, lookup: cachedGeneLookup };
   }
 
-  // Pure-JS pipeline: gene names stored directly on loadedData
   if (!loadedData.state && loadedData.jsGeneNames) {
     const geneNames = loadedData.jsGeneNames;
     const lookup = new Map();
@@ -11967,7 +11525,6 @@ async function ensureGeneLookup() {
     if (!lookup.has(key)) {
       lookup.set(key, i);
     }
-    // ATAC peak IDs: allow both chr6:88141558-88142467 and chr6_88141558_88142467 to resolve to same row
     if (peakIdRegex.test(name)) {
       const withUnderscores = name.replace(/:/g, '_').replace(/-/g, '_').toLowerCase();
       const withColonDash = name.replace(/^chr(\w+)_(\d+)_(\d+)$/i, 'chr$1:$2-$3').toLowerCase();
@@ -12105,10 +11662,7 @@ async function resolveGeneExpressions(geneList) {
     }
   }
 
-  // Check imputedGeneCache for genes not found in the bakana/JS matrix
-  // (e.g. SpaGE-imputed genes not in the spatial panel).
-  // These are plotting-only, never used in reanalysis.
-  const imputedResults = []; // { rawGene, key, expression }
+  const imputedResults = [];
   const stillMissing = [];
   for (const rawGene of missing) {
     const key = normalizeGeneName(rawGene);
@@ -12129,16 +11683,14 @@ async function resolveGeneExpressions(geneList) {
   const logExpressions = [];
 
   if ((hasJsNormMatrix || hasJsH5Pipeline) && !state) {
-    // Pure-JS streaming pipeline
-    const jsMatrix  = loadedData.jsNormMatrix;  // may be null if freed for memory
-    const origToHvg = loadedData.jsOrigToHvg;   // Int32Array: orig gene idx → HVG row (−1 = non-HVG)
+    const jsMatrix  = loadedData.jsNormMatrix;
+    const origToHvg = loadedData.jsOrigToHvg;
     const nKeptCells = loadedData.jsFilteredBarcodes?.length || jsMatrix?.ncols || 0;
 
     for (const index of indices) {
       const hvgIdx = origToHvg ? origToHvg[index] : -1;
 
       if (hvgIdx >= 0 && jsMatrix) {
-        // Fast path: gene is in the HVG matrix (if matrix is in memory)
         const row = new Float32Array(jsMatrix.ncols);
         for (let j = 0; j < jsMatrix.ncols; j++) {
           for (let p = jsMatrix.colPtr[j]; p < jsMatrix.colPtr[j + 1]; p++) {
@@ -12150,7 +11702,6 @@ async function resolveGeneExpressions(geneList) {
         }
         logExpressions.push(row);
       } else if (loadedData.jsH5TmpFile) {
-        // H5 path: stream from H5 for any gene
         const { readSingleGeneFromH5 } = await import('../scatac/h5sparse.js');
         const row = await readSingleGeneFromH5(
           loadedData.jsH5TmpFile,
@@ -12162,14 +11713,11 @@ async function resolveGeneExpressions(geneList) {
         );
         logExpressions.push(row);
       } else {
-        // Fallback: zeros
         logExpressions.push(new Float32Array(nKeptCells));
       }
     }
   } else {
     const normMatrix = state.rna_normalization.fetchNormalizedMatrix();
-    // Matrix is already log-normalized (scran/bakana: log(1 + count/sizeFactor), i.e. log1p(CPM)-scale).
-    // Use values as-is so dot plot "Mean" is in standard log-normalized units (0 to ~9), not double-logged (0-1).
     for (const index of indices) {
       const row = normMatrix.row(index);
       const logArray = new Float32Array(row.length);
@@ -12181,13 +11729,10 @@ async function resolveGeneExpressions(geneList) {
     }
   }
 
-  // Append imputed gene results (from imputedGeneCache).
-  // Always return a .slice() copy, postMessage may transfer the buffer on the
-  // caller side, which would detach the original and break subsequent requests.
   for (const { rawGene, expression } of imputedResults) {
     resolvedNames.push(rawGene);
     logExpressions.push(expression.slice());
-    indices.push(-1); // sentinel: not a real matrix index
+    indices.push(-1);
   }
 
   return {
@@ -12210,18 +11755,11 @@ function computeQuantile(sortedValues, q) {
   return sortedValues[base];
 }
 
-/**
- * Get integration views (per-sample indices) for integration modality.
- * Used by violin/dotplot to plot per-sample with global normalization.
- * @param {number} nCells: total number of cells (filtered)
- * @returns {{ integrationViews: Object.<string, { indices: number[] }>, datasetNames: string[] } | null}
- */
 function getIntegrationViewsForPlot(nCells) {
   if (!loadedData) return null;
 
   const modality = loadedData.info?.modality;
 
-  // Xenium integration: integrationViews is stored directly on loadedData
   if (modality === 'xenium-integration') {
     const integrationViews = loadedData.integrationViews;
     const datasetNames = loadedData.info?.datasetNames;
@@ -12231,7 +11769,6 @@ function getIntegrationViewsForPlot(nCells) {
     return { integrationViews, datasetNames };
   }
 
-  // Visium HD integration: same as Xenium, integrationViews stored on loadedData
   if (modality === 'visium-hd-integration') {
     const integrationViews = loadedData.integrationViews;
     const datasetNames = loadedData.info?.datasetNames;
@@ -12241,7 +11778,6 @@ function getIntegrationViewsForPlot(nCells) {
     return { integrationViews, datasetNames };
   }
 
-  // MERFISH integration: same as Xenium, integrationViews stored on loadedData
   if (modality === 'merfish-integration') {
     const integrationViews = loadedData.integrationViews;
     const datasetNames = loadedData.info?.datasetNames;
@@ -12251,7 +11787,6 @@ function getIntegrationViewsForPlot(nCells) {
     return { integrationViews, datasetNames };
   }
 
-  // Standard scRNA-seq integration: derive integrationViews from bakana state
   if (modality !== 'integration' || !loadedData.state) {
     return null;
   }
@@ -12335,6 +11870,7 @@ function wilcoxonRankSumPValue(rowValues, inIndices, outIndices, workspace) {
   const n1 = inIndices.length;
   const n2 = outIndices.length;
   const total = n1 + n2;
+  workspace.auc = 0.5;
 
   if (n1 === 0 || n2 === 0 || total <= 1) {
     return 1;
@@ -12397,6 +11933,7 @@ function wilcoxonRankSumPValue(rowValues, inIndices, outIndices, workspace) {
   }
 
   const U1 = rankSumIn - (n1 * (n1 + 1)) / 2;
+  workspace.auc = U1 / (n1 * n2);
   const U2 = n1 * n2 - U1;
   const U = Math.min(U1, U2);
 
@@ -12665,16 +12202,10 @@ const ATAC_EXTEND_UPSTREAM = 1000;
 const ATAC_EXTEND_DOWNSTREAM = 5000;
 const ATAC_MAX_CLUSTERS_COVERAGE = 12;
 
-/**
- * Get the peak matrix for multiome data.
- * Uses the pre-loaded atacPeakMatrix, or loads on-the-fly from H5 blob using featureTypeRnaName='Peaks'.
- * Returns { peakMatrix, peakNames, fullBarcodeOrder } or null if not available.
- */
 async function getMultiomePeakMatrix() {
   if (loadedData?.info?.modality !== 'multiome') {
     return null;
   }
-  // Use peak matrix loaded during multiome initialization (same approach as scATAC)
   if (loadedData.atacPeakMatrix) {
     const peakMatrix = loadedData.atacPeakMatrix;
     const peakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
@@ -12682,15 +12213,13 @@ async function getMultiomePeakMatrix() {
       Array.from({ length: peakMatrix.numberOfColumns() }, (_, i) => `cell_${i}`);
     return { peakMatrix, peakNames, fullBarcodeOrder };
   }
-  // Fallback: load peak matrix on-the-fly from H5 blob (same approach as scATAC 10X ATAC load)
-  // scATAC uses setOptions({ featureTypeRnaName: 'Peaks' }) so the reader loads only Peaks rows
-  // and maps them to the first modality key "RNA" (the mapping key, not the file's feature_type name).
   const h5Blob = loadedData.h5Blob;
   if (!h5Blob) {
     console.warn('Multiome: no ATAC peak matrix and no H5 blob available');
     return null;
   }
   try {
+    console.log('Multiome: loading ATAC peak matrix on-the-fly from H5...');
     const atacDataset = new bakana.TenxHdf5Dataset(h5Blob);
     atacDataset.setOptions({ featureTypeRnaName: 'Peaks' });
     const atacLoaded = await atacDataset.load({ cache: true });
@@ -12703,8 +12232,6 @@ async function getMultiomePeakMatrix() {
       ? atacMultiMatrix.available()
       : Object.keys(atacMultiMatrix || {});
     const atacModalityKeys = Array.isArray(rawModalityKeys) ? rawModalityKeys : (rawModalityKeys ? Object.keys(rawModalityKeys) : []);
-    // With featureTypeRnaName: 'Peaks', the reader maps "Peaks" feature_type to modality key "RNA"
-    // (same as scATAC). So the (only) modality is the peak matrix; use first key.
     const atacPeaksKey = atacModalityKeys.find(k => /peaks?|atac/i.test(k)) || atacModalityKeys[0];
     if (!atacPeaksKey) {
       console.warn('Multiome: no Peaks modality found in H5, keys:', atacModalityKeys);
@@ -12721,7 +12248,6 @@ async function getMultiomePeakMatrix() {
     const peakNames = rawPeakNames
       ? (Array.isArray(rawPeakNames) ? rawPeakNames : Array.from(rawPeakNames))
       : [];
-    // Get barcodes from the loaded data (ensure we never assign null so .length is safe)
     let fullBarcodeOrder = [];
     if (atacLoaded.cells) {
       try {
@@ -12740,13 +12266,13 @@ async function getMultiomePeakMatrix() {
       fullBarcodeOrder = loadedData.allCellBarcodes ||
         Array.from({ length: peakMatrix.numberOfColumns() }, (_, i) => `cell_${i}`);
     }
-    // Cache for subsequent calls
     loadedData.atacPeakMatrix = peakMatrix;
     loadedData.atacPeakNames = peakNames;
     loadedData.atacDataset = atacDataset;
     if (!loadedData.allCellBarcodes) {
       loadedData.allCellBarcodes = Array.isArray(fullBarcodeOrder) ? fullBarcodeOrder : Array.from(fullBarcodeOrder);
     }
+    console.log('Multiome: loaded ATAC peak matrix on-the-fly:', peakMatrix.numberOfRows(), 'peaks x', peakMatrix.numberOfColumns(), 'cells');
     return { peakMatrix, peakNames, fullBarcodeOrder };
   } catch (e) {
     console.warn('Multiome: on-the-fly peak matrix load failed:', e.message);
@@ -12754,7 +12280,6 @@ async function getMultiomePeakMatrix() {
   }
 }
 
-/** Get all peaks in a genomic region from peakAnnotation and map to row indices. */
 function getPeaksInRegion(peakAnnotation, peakNamesOrRowNames, chrom, regionStart, regionEnd) {
   const peakIdRegex = /^chr\w+[:_]\d+[-_]\d+$/i;
   const nameToIndex = new Map();
@@ -12769,7 +12294,6 @@ function getPeaksInRegion(peakAnnotation, peakNamesOrRowNames, chrom, regionStar
         if (!nameToIndex.has(withUnderscores)) nameToIndex.set(withUnderscores, i);
         if (!nameToIndex.has(withColonDash)) nameToIndex.set(withColonDash, i);
       }
-      // Peaks.bed uses chr-start-end; annotation lookups use chr:start-end or chr_start_end
       const hyphenToColon = String(raw).replace(/^chr(\w+)-(\d+)-(\d+)$/i, 'chr$1:$2-$3').toLowerCase();
       if (hyphenToColon !== n && !nameToIndex.has(hyphenToColon)) nameToIndex.set(hyphenToColon, i);
     }
@@ -12795,7 +12319,6 @@ function getPeaksInRegion(peakAnnotation, peakNamesOrRowNames, chrom, regionStar
   return { peakRows, peaksInRegion };
 }
 
-/** Find a peak by ID (chr:start-end or chr_start_end) in the peakNames array. Returns index or -1. */
 function findPeakIndex(peakId, peakNames) {
   const normalized = String(peakId).toLowerCase();
   const altUnderscore = normalized.replace(/:/g, '_').replace(/-/g, '_');
@@ -12808,14 +12331,8 @@ function findPeakIndex(peakId, peakNames) {
   return -1;
 }
 
-/** Preferred header names for the gene column in peak annotation (first match wins). */
 const PEAK_ANNO_GENE_HEADERS = ['gene', 'gene_name', 'symbol', 'gene_symbol', 'Gene', 'Gene_Symbol', 'name'];
 
-/**
- * Minimal gene TSS references for TSS-based gene activity when peak annotation has no gene column.
- * Signac-style: link peaks to genes by distance to transcription start site.
- * Genome is chosen from loadedData.info.genome (e.g. from summary.csv or dataset metadata).
- */
 const GENE_TSS_HG38 = {
   slc12a1: { chrom: 'chr15', tss: 48206301 },
   cd4: { chrom: 'chr12', tss: 6819476 },
@@ -12848,7 +12365,6 @@ const GENE_TSS_HG38 = {
   hbb: { chrom: 'chr11', tss: 5342839 },
 };
 
-/** Mouse mm10 TSS (same gene symbols, lowercase). Used when genome is mm10/mm39. */
 const GENE_TSS_MM10 = {
   slc12a1: { chrom: 'chr2', tss: 124994430 },
   cd4: { chrom: 'chr6', tss: 125068656 },
@@ -12880,24 +12396,14 @@ const GENE_TSS_MM10 = {
   hbb: { chrom: 'chr7', tss: 103970980 },
 };
 
-/** Default distance (bp) from TSS to link peaks to gene (Signac default is 500kb). */
 const GENE_ACTIVITY_TSS_DISTANCE_BP = 500000;
 
-/**
- * Resolve which TSS reference to use from genome build (e.g. from summary.csv or dataset info).
- * Returns GENE_TSS_MM10 for mouse (mm10, mm39), else GENE_TSS_HG38 for human.
- */
 function getTSSReferenceForGenome(genome) {
   const g = (genome && String(genome).toLowerCase()) || '';
   if (g.includes('mm') || g.includes('mouse') || g === 'grcm38' || g === 'grcm39') return GENE_TSS_MM10;
   return GENE_TSS_HG38;
 }
 
-/**
- * Get peaks linked to a gene by distance to TSS (fallback when peak annotation has no gene column).
- * Uses genome from loadedData.info.genome to pick human (hg38) or mouse (mm10) TSS reference.
- * Returns { peakIndices, peaksOnGene } or { peakIndices: [], peaksOnGene: [] } if gene not in reference or no peaks in range.
- */
 function getPeaksForGeneByTSS(geneName, peakAnnotation, peakNamesOrRowNames, distanceBp = GENE_ACTIVITY_TSS_DISTANCE_BP, genome = null) {
   const geneLower = (geneName && String(geneName).trim()).toLowerCase() || '';
   const tssRef = getTSSReferenceForGenome(genome);
@@ -12965,11 +12471,7 @@ function findPeakAnnotationGeneColumnIndex(headers) {
   return -1;
 }
 
-/** Get peaks linked to a gene from peakAnnotation (for ATAC). Returns { peakIndices, peaksOnGene }. */
-function getPeaksForGene(geneName, peakAnnotation, peakNamesOrRowNames) {
-  const geneLower = (geneName && String(geneName).trim()).toLowerCase() || '';
-  const indexSet = new Set();
-  const peaksOnGene = [];
+function buildPeakNameIndex(peakNamesOrRowNames) {
   const peakIdRegex = /^chr\w+[:_]\d+[-_]\d+$/i;
   const nameToIndex = new Map();
   if (Array.isArray(peakNamesOrRowNames)) {
@@ -12983,11 +12485,30 @@ function getPeaksForGene(geneName, peakAnnotation, peakNamesOrRowNames) {
         if (!nameToIndex.has(withUnderscores)) nameToIndex.set(withUnderscores, i);
         if (!nameToIndex.has(withColonDash)) nameToIndex.set(withColonDash, i);
       }
-      // Peaks.bed uses chr-start-end; annotation uses chr:start-end or chr_start_end for lookups
       const hyphenToColon = String(raw).replace(/^chr(\w+)-(\d+)-(\d+)$/i, 'chr$1:$2-$3').toLowerCase();
       if (hyphenToColon !== n && !nameToIndex.has(hyphenToColon)) nameToIndex.set(hyphenToColon, i);
     }
   }
+  return nameToIndex;
+}
+
+function annotationPeakIndex(entry, nameToIndex) {
+  const { chrom, peakName: pname } = entry;
+  const start = Number(entry.start) || 0;
+  const end = Number(entry.end) || 0;
+  const pnameId = `${chrom}:${start}-${end}`;
+  let idx = nameToIndex.get((pname || '').toLowerCase()) ?? nameToIndex.get(pnameId.toLowerCase());
+  if (idx === undefined) idx = nameToIndex.get(`${chrom}_${start}_${end}`.toLowerCase());
+  if (idx === undefined && pname) idx = nameToIndex.get(pname.replace(/:/g, '_').replace(/-/g, '_').toLowerCase());
+  if (idx === undefined) idx = nameToIndex.get(pnameId.replace(/:/g, '_').replace(/-/g, '_').toLowerCase());
+  return idx;
+}
+
+function getPeaksForGene(geneName, peakAnnotation, peakNamesOrRowNames) {
+  const geneLower = (geneName && String(geneName).trim()).toLowerCase() || '';
+  const indexSet = new Set();
+  const peaksOnGene = [];
+  const nameToIndex = buildPeakNameIndex(peakNamesOrRowNames);
   for (let k = 0; k < peakAnnotation.length; k++) {
     const rawGene = (peakAnnotation[k].gene || '').trim();
     const geneList = rawGene.split(/[\s,;|]+/).map((s) => s.toLowerCase().trim()).filter(Boolean);
@@ -12998,18 +12519,109 @@ function getPeaksForGene(geneName, peakAnnotation, peakNamesOrRowNames) {
     const end = Number(peakAnnotation[k].end) || 0;
     const pname = peakAnnotation[k].peakName;
     const pnameId = `${chrom}:${start}-${end}`;
-    const pnameUnderscore = `${chrom}_${start}_${end}`;
     peaksOnGene.push({ chrom, start, end, peakName: pname || pnameId });
-    let idx = nameToIndex.get((pname || '').toLowerCase()) ?? nameToIndex.get(pnameId.toLowerCase());
-    if (idx === undefined) idx = nameToIndex.get(pnameUnderscore.toLowerCase());
-    if (idx === undefined && pname) idx = nameToIndex.get(pname.replace(/:/g, '_').replace(/-/g, '_').toLowerCase());
-    if (idx === undefined) idx = nameToIndex.get(pnameId.replace(/:/g, '_').replace(/-/g, '_').toLowerCase());
+    const idx = annotationPeakIndex(peakAnnotation[k], nameToIndex);
     if (idx !== undefined) indexSet.add(idx);
   }
   return { peakIndices: Array.from(indexSet), peaksOnGene };
 }
 
-/** Normalize coverage signal by global max so all tracks share scale [0,1]; aligns Peak View with UMAP (high-activity clusters stand out). */
+const NONCODING_GENE_NAME = /^(?:[A-Z]{1,2}\d{5,6}\.\d+|LINC\d+|LOC\d+|MIR\d+\w*|SNOR[AD]\d+\w*|RNU\d\w*|Y_RNA|.+-(?:AS|IT|OT)\d*|.+-DT|Gm\d+|.+Rik\d*|.+-ps\d*)$/;
+
+function getAtacGeneActivityMatrix() {
+  const peakMatrix = loadedData?.atacPeakMatrix;
+  const cached = loadedData?._geneActivityMatrix;
+  if (cached && cached.source === peakMatrix) return cached;
+
+  const peakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
+  const peakAnnotation = loadedData.peakAnnotation || [];
+  const csc = peakMatrix?.getCSC ? peakMatrix.getCSC() : null;
+  if (!csc) throw new Error('The ATAC peak matrix is not available for gene activity.');
+  const nCells = peakMatrix.numberOfColumns();
+  const { colPtr, rowIdx, values } = csc;
+
+  const nameToIndex = buildPeakNameIndex(peakNames);
+  const geneIndexByKey = new Map();
+  const geneNames = [];
+  const peakGenes = new Array(peakNames.length);
+  for (const entry of peakAnnotation) {
+    const genes = String(entry.gene || '').split(/[\s,;|]+/).map((g) => g.trim()).filter((g) => g && !NONCODING_GENE_NAME.test(g));
+    if (genes.length === 0) continue;
+    const idx = annotationPeakIndex(entry, nameToIndex);
+    if (idx === undefined) continue;
+    for (const g of genes) {
+      const key = g.toLowerCase();
+      let gi = geneIndexByKey.get(key);
+      if (gi === undefined) { gi = geneNames.length; geneIndexByKey.set(key, gi); geneNames.push(g); }
+      if (!peakGenes[idx]) peakGenes[idx] = [];
+      if (!peakGenes[idx].includes(gi)) peakGenes[idx].push(gi);
+    }
+  }
+  if (geneNames.length === 0) {
+    throw new Error('The peak annotation has no gene names, so gene activity markers cannot be computed. ' +
+      'Load the peak annotation file (e.g. peak_annotation.tsv with a "gene" column), or ask for "marker peaks for cluster N" instead.');
+  }
+
+  let depth = loadedData.atacColSums;
+  if (!depth || depth.length !== nCells) {
+    depth = new Float64Array(nCells);
+    for (let c = 0; c < nCells; c++) for (let p = colPtr[c]; p < colPtr[c + 1]; p++) depth[c] += values[p];
+  }
+  const sorted = Float64Array.from(depth).sort();
+  const median = sorted.length ? sorted[sorted.length >> 1] : 1;
+  const target = median > 0 ? median : 1;
+
+  const nGenes = geneNames.length;
+  const acc = new Float64Array(nGenes);
+  const stamp = new Int32Array(nGenes).fill(-1);
+  const touched = new Int32Array(nGenes);
+  const rowCounts = new Int32Array(nGenes);
+  const eachCell = (visit) => {
+    for (let c = 0; c < nCells; c++) {
+      let nTouched = 0;
+      for (let p = colPtr[c]; p < colPtr[c + 1]; p++) {
+        const genes = peakGenes[rowIdx[p]];
+        if (!genes) continue;
+        for (const gi of genes) {
+          if (stamp[gi] !== c) { stamp[gi] = c; acc[gi] = 0; touched[nTouched++] = gi; }
+          acc[gi] += values[p];
+        }
+      }
+      visit(c, nTouched);
+    }
+  };
+  eachCell((c, n) => { for (let k = 0; k < n; k++) rowCounts[touched[k]]++; });
+  const rowPtr = new Int32Array(nGenes + 1);
+  for (let g = 0; g < nGenes; g++) rowPtr[g + 1] = rowPtr[g] + rowCounts[g];
+  const fill = rowPtr.slice(0, nGenes);
+  const cellIdx = new Int32Array(rowPtr[nGenes]);
+  const vals = new Float32Array(rowPtr[nGenes]);
+  stamp.fill(-1);
+  eachCell((c, n) => {
+    const scale = target / (depth[c] > 0 ? depth[c] : 1);
+    for (let k = 0; k < n; k++) {
+      const g = touched[k];
+      const at = fill[g]++;
+      cellIdx[at] = c;
+      vals[at] = Math.log1p(acc[g] * scale);
+    }
+  });
+  console.log(`Gene activity matrix: ${nGenes} genes x ${nCells} cells, ${vals.length} non-zeros`);
+
+  const matrix = {
+    source: peakMatrix,
+    geneNames,
+    nCells,
+    row(g) {
+      const out = new Float32Array(nCells);
+      for (let p = rowPtr[g]; p < rowPtr[g + 1]; p++) out[cellIdx[p]] = vals[p];
+      return out;
+    },
+  };
+  loadedData._geneActivityMatrix = matrix;
+  return matrix;
+}
+
 function normalizeCoverageByGlobalMax(coverageByCluster) {
   if (!coverageByCluster || coverageByCluster.length === 0) return;
   let globalMax = 0;
@@ -13027,7 +12639,6 @@ function normalizeCoverageByGlobalMax(coverageByCluster) {
   }
 }
 
-/** Compute per-cluster normalized signal over peaks in region (Signac CoveragePlot-style). Returns top N clusters by cell count. */
 function computeCoverageByCluster(normMatrix, clusters, peakRows) {
   const nCells = normMatrix.numberOfColumns();
   const uniqueClusters = Array.from(new Set(clusters)).filter((c) => c !== null && c !== undefined);
@@ -13064,7 +12675,6 @@ function computeCoverageByCluster(normMatrix, clusters, peakRows) {
   return coverageByCluster.slice(0, ATAC_MAX_CLUSTERS_COVERAGE);
 }
 
-/** Deep-copy coverageByCluster for cache (array of { clusterId, label, cellCount, signal }). */
 function copyCoverageByCluster(coverageByCluster) {
   if (!coverageByCluster || !coverageByCluster.length) return undefined;
   return coverageByCluster.map((c) => ({
@@ -13073,10 +12683,6 @@ function copyCoverageByCluster(coverageByCluster) {
   }));
 }
 
-/**
- * Plot gene activity (peak-derived score) for ATAC: sum peak counts per cell for peaks linked to the gene.
- * Also returns peaksOnGene for the Peak View track.
- */
 async function plotAtacGeneActivity(params) {
   const { gene, colorMap } = params;
   const showPeakView = params.showPeakView === true;
@@ -13087,6 +12693,7 @@ async function plotAtacGeneActivity(params) {
   const cacheKey = geneName.toLowerCase().trim();
   const cached = scAtacGeneActivityCache.get(cacheKey);
   if (cached) {
+    console.log('scATAC: serving gene activity from cache for', geneName);
     const cachedData = {
       ...cached,
       expression: [...cached.expression],
@@ -13123,13 +12730,11 @@ async function plotAtacGeneActivity(params) {
     }
   }
 
-  // Diagnostic logging for debugging gene activity
   const isIntegration = loadedData?.info?.modality === 'atac-integration';
   console.log(`scATAC gene activity [${geneName}]: modality=${loadedData?.info?.modality}, nCells=${nCells}, ` +
     `peakIndices=${peakIndices.length}, usedTSS=${usedTSS}, ` +
     `totalAnnotations=${peakAnnotation.length}, totalPeakNames=${peakNames.length}`);
   if (isIntegration && peakIndices.length > 0) {
-    // Log matched peak details for debugging
     const samplePeaks = peakIndices.slice(0, 5).map(idx => `${peakNames[idx]}(gene=${peakAnnotation[idx]?.gene || '?'})`);
     console.log(`  Matched peaks (first 5): ${samplePeaks.join(', ')}`);
   }
@@ -13137,7 +12742,6 @@ async function plotAtacGeneActivity(params) {
   const expression = new Float32Array(nCells);
   const cscForExpr = peakMatrix.getCSC ? peakMatrix.getCSC() : null;
   if (cscForExpr) {
-    // Fast path: iterate CSC non-zeros directly — avoids allocating a dense column per cell
     const peakSet = new Set(peakIndices);
     const { colPtr, rowIdx, values } = cscForExpr;
 
@@ -13156,7 +12760,6 @@ async function plotAtacGeneActivity(params) {
       expression[c] = sum;
     }
   }
-  // Diagnostic: expression stats before normalization
   if (isIntegration) {
     let nNonZero = 0, exprSum = 0, exprMax = 0;
     for (let c = 0; c < nCells; c++) {
@@ -13165,7 +12768,6 @@ async function plotAtacGeneActivity(params) {
     }
     console.log(`  Expression stats (raw): nonzero=${nNonZero}/${nCells} (${(nNonZero/nCells*100).toFixed(1)}%), ` +
       `mean=${(exprSum/nCells).toFixed(3)}, max=${exprMax}`);
-    // Per-sample breakdown
     if (loadedData.integrationViews) {
       for (const [vName, vData] of Object.entries(loadedData.integrationViews)) {
         const indices = vData.indices || [];
@@ -13180,16 +12782,9 @@ async function plotAtacGeneActivity(params) {
     }
   }
 
-  // For integration: depth-normalize per cell so cross-sample comparison is fair,
-  // then apply log1p for sharper color contrast (same principle as scRNA-seq library-size normalization).
-  // Standalone single-sample ATAC uses raw counts (cells from one experiment have uniform depth),
-  // but integration combines samples with potentially very different total fragment counts per cell,
-  // causing the raw-count color scale to appear flat.
   if (isIntegration) {
     const colSumsForNorm = loadedData.atacColSums;
     if (Array.isArray(colSumsForNorm) && colSumsForNorm.length === nCells) {
-      // Step 1: Depth-normalize per cell so cross-sample depth differences don't drive color.
-      // Scale to median library size so absolute values stay interpretable.
       const depthsSorted = Float64Array.from(colSumsForNorm).sort();
       const mid = Math.floor(depthsSorted.length / 2);
       const medianDepth = depthsSorted.length % 2 === 1
@@ -13201,12 +12796,6 @@ async function plotAtacGeneActivity(params) {
         expression[c] = Math.log1p((expression[c] / depth) * targetDepth);
       }
 
-      // Step 2: Background subtraction — remove the noise floor.
-      // In the unified peak set, even non-expressing cells accumulate small counts
-      // across many gene-linked peaks, shifting them off zero and washing out color contrast.
-      // Subtract the p15 level (noise floor) and clip to 0, so background cells collapse
-      // to pure blue while truly expressing cells keep their signal. This mirrors what
-      // Seurat ScaleData / Signac does to create sharp FeaturePlot colors.
       const exprSorted = Float64Array.from(expression).sort();
       const noiseFloor = exprSorted[Math.floor(0.15 * exprSorted.length)];
       if (noiseFloor > 0) {
@@ -13238,12 +12827,8 @@ async function plotAtacGeneActivity(params) {
     const regionEnd = maxEnd + ATAC_EXTEND_DOWNSTREAM;
     const { peakRows: regionPeakRows } = getPeaksInRegion(peakAnnotation, peakNames, chrom, regionStart, regionEnd);
 
-    // atac-integration: rebuild regionPeakRows using original per-sample peak coordinates
-    // instead of merged/unified coordinates, so coverage curves look like single-sample mode.
-    // Each original peak is mapped to its unified matrix row by coordinate overlap.
     let effectivePeakRows = regionPeakRows;
     if (loadedData?.info?.modality === 'atac-integration' && Array.isArray(loadedData.atacSamples) && regionPeakRows.length > 0) {
-      // Build lookup: for a given genomic position, find the unified peak row that contains it
       const unifiedRowsByRange = regionPeakRows.map(pr => ({
         rowIndex: pr.rowIndex,
         start: Number(pr.start) || 0,
@@ -13251,19 +12836,15 @@ async function plotAtacGeneActivity(params) {
       }));
       unifiedRowsByRange.sort((a, b) => a.start - b.start);
 
-      // Find unified row index for an original peak by coordinate overlap
       function findUnifiedRow(oStart, oEnd) {
         for (const u of unifiedRowsByRange) {
           if (u.end <= oStart) continue;
           if (u.start >= oEnd) break;
-          // Overlap found
           return u.rowIndex;
         }
         return -1;
       }
 
-      // Collect original per-sample peaks in the region.
-      // Use peakNames (peaks.bed, always present) parsed as chr-start-end coordinates.
       const origRows = [];
       const seenCoords = new Set();
       const chromNorm = String(chrom || '').toLowerCase();
@@ -13296,12 +12877,9 @@ async function plotAtacGeneActivity(params) {
     if (effectivePeakRows.length > 0) {
       coverageByCluster = computeCoverageByClusterRaw(peakMatrix, clusters, effectivePeakRows, loadedData.atacColSums);
       region = { chrom, start: regionStart, end: regionEnd };
-      // atac-integration: compute per-sample coverage (mask cells outside each sample to null)
-      // Use a global medianScale so all samples are on the same scale for comparison
       if (loadedData?.info?.modality === 'atac-integration') {
         const iViews = getAtacIntegrationViewsForPlot();
         if (iViews) {
-          // Compute global median scale factor from ALL cells (same as the global coverageByCluster above)
           const hasCS = Array.isArray(loadedData.atacColSums) && loadedData.atacColSums.length === nCells;
           let globalMedianScale = null;
           if (hasCS) {
@@ -13323,7 +12901,6 @@ async function plotAtacGeneActivity(params) {
             }
           }
           viewCoverageByCluster = {};
-          // Full list of all cluster IDs in the dataset (no cap) for consistent order and empty tracks
           const allClusterIds = Array.from(new Set(clusters)).filter((c) => c !== null && c !== undefined);
           allClusterIds.sort((a, b) => (typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b))));
           const maxClustersUncap = Math.max(100000, allClusterIds.length);
@@ -13336,7 +12913,6 @@ async function plotAtacGeneActivity(params) {
               peakMatrix, maskedClusters, effectivePeakRows, loadedData.atacColSums, globalMedianScale, maxClustersUncap
             );
           }
-          // Ensure every view has the same set of clusters (all clusters); fill missing with empty tracks
           for (const vName of Object.keys(viewCoverageByCluster)) {
             const cov = viewCoverageByCluster[vName];
             if (!Array.isArray(cov)) continue;
@@ -13358,10 +12934,6 @@ async function plotAtacGeneActivity(params) {
     }
   }
 
-  // atac-integration: replace peaksOnGene with original per-sample peaks (un-merged)
-  // so the PEAKS track matches what single-sample mode shows.
-  // The unified (merged) peaks were used above for region/coverage computation which is correct,
-  // but for display we want the original discrete peaks from each sample.
   if (loadedData?.info?.modality === 'atac-integration' && Array.isArray(loadedData.atacSamples) && peaksOnGene.length > 0) {
     const origPeaks = [];
     const seen = new Set();
@@ -13369,7 +12941,6 @@ async function plotAtacGeneActivity(params) {
     for (const sample of loadedData.atacSamples) {
       const sAnno = sample.peakAnnotation || [];
       const sPeakNames = sample.peakNames || [];
-      // Try gene-based lookup first, then TSS-based fallback (same logic as main path)
       let sResult = getPeaksForGene(geneName, sAnno, sPeakNames);
       if (sResult.peaksOnGene.length === 0) {
         sResult = getPeaksForGeneByTSS(geneName, sAnno, sPeakNames, undefined, genome);
@@ -13388,8 +12959,6 @@ async function plotAtacGeneActivity(params) {
     }
   }
 
-  // Get filtered/ordered barcodes that match the clusters array
-  // For legacy path, try to apply filter mask if available
   let cellBarcodes = null;
   if (loadedData.cellBarcodes && Array.isArray(loadedData.cellBarcodes)) {
     const state = loadedData.state;
@@ -13418,19 +12987,12 @@ async function plotAtacGeneActivity(params) {
         console.warn('Failed to get keep mask for barcode filtering (legacy):', e.message);
       }
     }
-    // Fallback: use original barcodes if lengths match
     if (!cellBarcodes && loadedData.cellBarcodes.length === nCells) {
       cellBarcodes = loadedData.cellBarcodes;
       console.log('Using original barcodes (legacy, no filtering):', cellBarcodes.length);
     }
   }
 
-  // Percentile-based range for color scale.
-  // For integration: after background subtraction most cells are 0, so percentiles over the full
-  // array are dominated by zeros. Use only the non-zero cells to set the upper bound — this
-  // ensures that moderate expressors map to the middle of the color scale (white) rather than
-  // appearing as barely-visible pale blue. Min is always 0 (background-subtracted baseline).
-  // For single-sample: use 2nd-98th percentile of full array as before.
   let expressionRange = null;
   if (expression.length > 0) {
     if (isIntegration) {
@@ -13438,8 +13000,6 @@ async function plotAtacGeneActivity(params) {
       for (let c = 0; c < nCells; c++) { if (expression[c] > 0) nonZero.push(expression[c]); }
       if (nonZero.length > 0) {
         nonZero.sort((a, b) => a - b);
-        // Use p95 of non-zero cells as max — the top 5% of expressors saturate at red,
-        // and cells with moderate accessibility get a full color spread.
         const p95nz = nonZero[Math.floor(0.95 * nonZero.length)];
         const rangeMax = p95nz > 0 ? p95nz : nonZero[nonZero.length - 1];
         if (Number.isFinite(rangeMax) && rangeMax > 0) {
@@ -13468,7 +13028,6 @@ async function plotAtacGeneActivity(params) {
     barcodesMatchClusters: cellBarcodes?.length === clusters?.length,
   });
 
-  // Compute per-cluster mean depth for Signac-style fragment normalization
   let clusterMeanDepths = undefined;
   const colSums = loadedData.atacColSums;
   if (Array.isArray(colSums) && colSums.length === nCells && Array.isArray(clusters) && clusters.length === nCells) {
@@ -13502,7 +13061,6 @@ async function plotAtacGeneActivity(params) {
     clusterMeanDepths: clusterMeanDepths || undefined,
     isAtac: true,
     viewCoverageByCluster: viewCoverageByCluster || undefined,
-    // Include integration views so frontend can query per-sample fragments
     integrationViews: (loadedData?.info?.modality === 'atac-integration' && loadedData.integrationViews)
       ? loadedData.integrationViews : undefined,
     datasetNames: (loadedData?.info?.modality === 'atac-integration' && loadedData.info?.datasetNames)
@@ -13522,7 +13080,6 @@ async function plotAtacGeneActivity(params) {
     cellBarcodes: payload.cellBarcodes ? [...payload.cellBarcodes] : undefined,
     clusters: payload.clusters ? [...payload.clusters] : undefined,
   });
-  // Strip coverage fields when user only asked for gene activity UMAP (not coverage plot)
   const responsePayload = showPeakView ? payload : {
     ...payload,
     coverageByCluster: undefined,
@@ -13536,11 +13093,6 @@ async function plotAtacGeneActivity(params) {
   });
 }
 
-/**
- * Signac-style per-cluster coverage: raw sum per peak, normalized by
- * group_scale_factor = mean_depth * n_cells, rescaled to median(group_scale_factors).
- * Falls back to simple mean-per-cell when colSums is unavailable.
- */
 function computeCoverageByClusterRaw(peakMatrix, clusters, peakRows, colSums, globalMedianScale, maxClustersCap) {
   const nCells = peakMatrix.numberOfColumns();
   const uniqueClusters = Array.from(new Set(clusters)).filter((c) => c !== null && c !== undefined);
@@ -13553,7 +13105,6 @@ function computeCoverageByClusterRaw(peakMatrix, clusters, peakRows, colSums, gl
     clusterToCells.get(c).push(i);
   }
 
-  // Signac-style: compute group scale factors = mean_depth * n_cells per cluster
   const hasColSums = Array.isArray(colSums) && colSums.length === nCells;
   const groupScaleFactors = new Map();
   if (hasColSums) {
@@ -13565,8 +13116,6 @@ function computeCoverageByClusterRaw(peakMatrix, clusters, peakRows, colSums, gl
       const meanDepth = depthSum / cellIndices.length;
       groupScaleFactors.set(clusterId, meanDepth * cellIndices.length);
     }
-    // Global scale factor = median of group scale factors
-    // If globalMedianScale is provided (e.g. for cross-sample comparability), use it instead
     const gsVals = Array.from(groupScaleFactors.values()).sort((a, b) => a - b);
     var medianScale;
     if (globalMedianScale != null && globalMedianScale > 0) {
@@ -13579,13 +13128,11 @@ function computeCoverageByClusterRaw(peakMatrix, clusters, peakRows, colSums, gl
     }
   }
 
-  // Fast path: pre-accumulate per-cluster sums by scanning CSC non-zeros once
   const cscForCov = peakMatrix.getCSC ? peakMatrix.getCSC() : null;
-  const peakRowMap = new Map(); // peakRow rowIndex → index in peakRows array
+  const peakRowMap = new Map();
   for (let ri = 0; ri < peakRows.length; ri++) peakRowMap.set(peakRows[ri].rowIndex, ri);
   const clusterIdxMap = new Map();
   for (let ci = 0; ci < uniqueClusters.length; ci++) clusterIdxMap.set(uniqueClusters[ci], ci);
-  // sums[clusterIdx][peakRowIdx] = raw sum
   const sums = Array.from({ length: uniqueClusters.length }, () => new Float64Array(peakRows.length));
   if (cscForCov) {
     const { colPtr, rowIdx, values } = cscForCov;
@@ -13600,7 +13147,6 @@ function computeCoverageByClusterRaw(peakMatrix, clusters, peakRows, colSums, gl
       }
     }
   } else {
-    // Fallback: original row-access approach
     for (let ci = 0; ci < uniqueClusters.length; ci++) {
       const cellIndices = clusterToCells.get(uniqueClusters[ci]) || [];
       for (let ri = 0; ri < peakRows.length; ri++) {
@@ -13620,11 +13166,9 @@ function computeCoverageByClusterRaw(peakMatrix, clusters, peakRows, colSums, gl
       const sum = sums[ci][ri];
       let value;
       if (hasColSums) {
-        // Signac: norm = raw_sum / group_scale_factor * median_scale_factor
         const gsf = groupScaleFactors.get(clusterId) || 1;
         value = (sum / gsf) * medianScale;
       } else {
-        // Fallback: simple mean per cell
         value = cellIndices.length > 0 ? sum / cellIndices.length : 0;
       }
       signal.push({ start: p.start, end: p.end, value });
@@ -13636,7 +13180,6 @@ function computeCoverageByClusterRaw(peakMatrix, clusters, peakRows, colSums, gl
   return coverageByCluster.slice(0, cap);
 }
 
-/** Per-cluster mean raw count over peaks when clusters map to full-matrix column indices (multiome). */
 function computeCoverageByClusterRawFromColumnMap(peakMatrix, clusterToColumnIndices, peakRows) {
   const coverageByCluster = [];
   const clusterIds = Array.from(clusterToColumnIndices.keys()).filter(c => c !== null && c !== undefined);
@@ -13660,10 +13203,6 @@ function computeCoverageByClusterRawFromColumnMap(peakMatrix, clusterToColumnInd
   return coverageByCluster.slice(0, ATAC_MAX_CLUSTERS_COVERAGE);
 }
 
-/**
- * Plot gene activity for ATAC when we have state (runFullAnalysisPipeline) and peakAnnotation:
- * sum normalized peak rows linked to the gene, then log-scale. Returns peaksOnGene and coverageByCluster for Peak View (Signac CoveragePlot-style).
- */
 async function plotAtacGeneActivityFromState(params) {
   const { gene, colorMap } = params;
   const showPeakView = params.showPeakView === true;
@@ -13688,7 +13227,6 @@ async function plotAtacGeneActivityFromState(params) {
   }
   const peakAnnotation = loadedData.peakAnnotation;
   const state = loadedData.state;
-  // Use raw count matrix (not normalized) for linear-scale ATAC gene activity
   const countMatrixContainer = state.inputs.fetchCountMatrix();
   const countModality = countMatrixContainer.available()[0];
   const normMatrix = countMatrixContainer.get(countModality);
@@ -13719,7 +13257,6 @@ async function plotAtacGeneActivityFromState(params) {
     }
     expression[c] = sum;
   }
-  // Use raw counts directly (linear scale) for ATAC gene activity
 
   const coordinates = currentResults.umap;
   if (!coordinates || coordinates.length !== nCells) {
@@ -13742,8 +13279,6 @@ async function plotAtacGeneActivityFromState(params) {
     }
   }
 
-  // Get filtered/ordered barcodes that match the clusters array
-  // This is critical: after cell filtering, the indices don't match original barcodes
   let cellBarcodes = null;
   if (loadedData.cellBarcodes && Array.isArray(loadedData.cellBarcodes)) {
     const state = loadedData.state;
@@ -13772,7 +13307,6 @@ async function plotAtacGeneActivityFromState(params) {
         console.warn('Failed to get keep mask for barcode filtering:', e.message);
       }
     }
-    // Fallback: if no filtering or lengths match, use original barcodes
     if (!cellBarcodes && loadedData.cellBarcodes.length === nCells) {
       cellBarcodes = loadedData.cellBarcodes;
       console.log('Using original barcodes (no filtering detected):', cellBarcodes.length);
@@ -13801,7 +13335,6 @@ async function plotAtacGeneActivityFromState(params) {
     barcodesMatchClusters: cellBarcodes?.length === clusters?.length,
   });
 
-  // Compute per-cluster mean depth for Signac-style fragment normalization
   let clusterMeanDepths = undefined;
   const colSumsState = loadedData.atacColSums;
   if (Array.isArray(colSumsState) && colSumsState.length === nCells && Array.isArray(clusters) && clusters.length === nCells) {
@@ -13870,7 +13403,6 @@ async function plotGeneExpression(params) {
 
   const isPeakId = /^chr\w+[:-]\d+[:-]\d+$/i.test(String(gene || '').trim());
 
-  // scATAC (single-sample or atac-integration) + peak ID: plot single peak expression on UMAP
   if ((loadedData?.info?.modality === 'atac' || loadedData?.info?.modality === 'atac-integration') &&
       loadedData.atacPeakMatrix && isPeakId) {
     const peakMatrix = loadedData.atacPeakMatrix;
@@ -13914,14 +13446,12 @@ async function plotGeneExpression(params) {
     return;
   }
 
-  // ATAC with legacy runAtacPipeline (atacPeakMatrix): plot gene activity from peaks linked to gene
   if ((loadedData?.info?.modality === 'atac' || loadedData?.info?.modality === 'atac-integration') && loadedData.atacPeakMatrix && loadedData.peakAnnotation) {
     console.log('>>> ROUTING: plotAtacGeneActivity (legacy raw peak matrix path)');
     await plotAtacGeneActivity(params);
     return;
   }
 
-  // ATAC with state + peakAnnotation: if "gene" is a gene name (not peak ID), plot gene activity from state matrix
   if (
     loadedData?.info?.modality === 'atac' &&
     loadedData.state &&
@@ -13933,12 +13463,10 @@ async function plotGeneExpression(params) {
     return;
   }
 
-  // Multiome: plot RNA expression AND ATAC gene activity for the same gene
   if (loadedData?.info?.modality === 'multiome' && !isPeakId) {
     console.log('Multiome: will plot both RNA expression and ATAC gene activity for', gene);
   }
 
-  // Multiome + peak ID: plot ATAC-only using peak matrix (no RNA dual-plot)
   if (loadedData?.info?.modality === 'multiome' && isPeakId) {
     console.log('Multiome: plotting peak', gene, 'in ATAC view only');
     const multiomePeak = await getMultiomePeakMatrix();
@@ -13947,7 +13475,6 @@ async function plotGeneExpression(params) {
     const peakIdx = findPeakIndex(gene, peakNames);
     if (peakIdx === -1) throw new Error(`Peak ${gene} not found in peak matrix (${peakNames.length} peaks available).`);
 
-    // Extract peak values for filtered cells
     const filteredBarcodes = loadedData.cellBarcodes || [];
     const nFiltered = filteredBarcodes.length;
     const barcodeToColIdx = new Map();
@@ -13960,7 +13487,6 @@ async function plotGeneExpression(params) {
       if (colIdx !== undefined) peakExpression[j] = Math.log1p(fullRow[colIdx] || 0);
     }
 
-    // Get ATAC coordinates + clusters
     let atacCoordinates = loadedData.precomputed?.atacAligned?.coordinates || currentResults.umap;
     let atacClusters = loadedData.precomputed?.atacAligned?.clusters || currentResults.clusters;
     if (atacCoordinates && atacCoordinates.length !== nFiltered) {
@@ -13969,7 +13495,6 @@ async function plotGeneExpression(params) {
     }
     if (!atacClusters || atacClusters.length !== nFiltered) atacClusters = currentResults.clusters;
 
-    // Build region from peak coordinates
     const peakMatch = gene.match(/^(chr\w+):(\d+)-(\d+)$/i);
     const region = peakMatch ? {
       chrom: peakMatch[1],
@@ -14003,7 +13528,6 @@ async function plotGeneExpression(params) {
     return;
   }
 
-  // ATAC with state: "gene" can be a peak ID (chrN:start-end); use state matrix. RNA: use resolveGeneExpression.
   if (!loadedData || (!loadedData.state && !loadedData.jsNormMatrix && !loadedData.jsH5TmpFile)) {
     const error = new Error('No data loaded. Please load data first.');
     console.error('plotGeneExpression error:', error.message);
@@ -14017,9 +13541,6 @@ async function plotGeneExpression(params) {
     console.log('Expression array length:', logExpression.length);
     console.log('Expression sample (first 10):', Array.from(logExpression.slice(0, 10)));
 
-    // Always fetch UMAP coordinates for the UMAP view.
-    // For "Load previous results", prefer the restored saved coordinates to avoid stale
-    // currentResults.umap from other branches that may have different cell ordering/length.
     const restoredPrev = loadedData?.restoredPreviousResults;
     let umapCoordinates = Array.isArray(restoredPrev?.umapCoordinates) ? restoredPrev.umapCoordinates : currentResults.umap;
     if (!umapCoordinates && loadedData.state) {
@@ -14029,16 +13550,12 @@ async function plotGeneExpression(params) {
       for (let i = 0; i < umapResults.x.length; i++) {
         umapCoordinates.push([umapResults.x[i], umapResults.y[i]]);
       }
-      currentResults.umap = umapCoordinates; // cache for later
+      currentResults.umap = umapCoordinates;
       console.log('UMAP coordinates fetched:', umapCoordinates.length);
     } else {
       console.log('Using cached UMAP coordinates:', umapCoordinates.length);
     }
 
-    // For spatial datasets, also include spatial coordinates
-    // The spatial view will use spatialIndex coordinates (which match spatialData.coordinates order)
-    // The UMAP view will use the umapCoordinates from the artifact
-    // IMPORTANT: Check loadedData.spatialData directly instead of relying on global spatialData variable
     let spatialCoordinates = null;
     const spatialDataSource = loadedData?.spatialData || spatialData;
     console.log('Checking for spatial coordinates:', {
@@ -14064,12 +13581,9 @@ async function plotGeneExpression(params) {
       console.log('No spatial coordinates available - spatial data source:', spatialDataSource);
     }
 
-    // Use UMAP coordinates as the primary coordinates (for backward compatibility with UMAP view)
-    // The spatial view will use its own spatialIndex coordinates, which should match spatialCoordinates
     let coordinates = umapCoordinates;
     console.log(`Using UMAP coordinates for gene expression plot: ${coordinates.length} cells`);
 
-    // Ensure expression array length matches coordinates length
     let finalExpression = logExpression;
     if (logExpression.length !== coordinates.length) {
       console.warn(`Expression array length (${logExpression.length}) does not match coordinates length (${coordinates.length})`);
@@ -14093,7 +13607,6 @@ async function plotGeneExpression(params) {
         }
       }
 
-      // Prefer barcode-based realignment when restored previous results changed cell ordering.
       const preferredTargetBarcodes =
         Array.isArray(restoredPrev?.cellBarcodes) && restoredPrev.cellBarcodes.length === coordinates.length
           ? restoredPrev.cellBarcodes
@@ -14122,8 +13635,6 @@ async function plotGeneExpression(params) {
       }
 
       if (!realigned) {
-        // Coordinate-key fallback for legacy saves without cellBarcodes:
-        // map expression from current state-order spatial coords to restored spatial coords.
         if (
           loadedData?.state &&
           spatialDataSource?.idToCoord instanceof Map &&
@@ -14195,9 +13706,6 @@ async function plotGeneExpression(params) {
       }
 
       if (!realigned) {
-        // If restore metadata is incomplete (e.g. older saves without cellBarcodes),
-        // fall back to the *current analysis-state order* so expression and coordinates
-        // are still aligned by cell index.
         if (loadedData?.state && spatialDataSource?.idToCoord instanceof Map) {
           try {
             const nExpr = logExpression.length;
@@ -14263,7 +13771,6 @@ async function plotGeneExpression(params) {
       }
 
       if (!realigned) {
-        // Last resort fallback: truncate/pad to avoid hard failure.
         if (logExpression.length > coordinates.length) {
           console.warn('Truncating expression array to match coordinates length');
           finalExpression = logExpression.slice(0, coordinates.length);
@@ -14276,9 +13783,6 @@ async function plotGeneExpression(params) {
       }
     }
 
-    // Compute percentile-based expression range for better color mapping.
-    // Without this, outlier max values cause most cells to map near the bottom of the
-    // color scale (appearing white/blue). Use 2nd-98th percentile like ATAC modules.
     let expressionRange = null;
     if (finalExpression.length > 0) {
       const sorted = Array.from(finalExpression).sort((a, b) => a - b);
@@ -14305,8 +13809,8 @@ async function plotGeneExpression(params) {
       type: 'ANALYSIS_COMPLETE',
       data: {
         type: 'gene_expression',
-        coordinates: coordinates, // UMAP coordinates for UMAP view
-        spatialCoordinates: spatialCoordinates, // Spatial coordinates (spatial view uses spatialIndex instead)
+        coordinates: coordinates,
+        spatialCoordinates: spatialCoordinates,
         expression: finalExpression,
         geneName,
         colorMap,
@@ -14316,8 +13820,6 @@ async function plotGeneExpression(params) {
 
     console.log('Gene expression plot message sent successfully');
 
-    // Multiome: also compute ATAC gene activity (peak-derived) and send to ATAC view
-    // RNA view shows gene expression (already sent above); ATAC view shows gene activity from peak matrix (same as scATAC-seq).
     if (loadedData?.info?.modality === 'multiome' && loadedData.peakAnnotation?.length > 0) {
       try {
         const atacCacheKey = (geneName || '').toLowerCase().trim();
@@ -14336,13 +13838,10 @@ async function plotGeneExpression(params) {
         console.log('Multiome: computing ATAC gene activity for', geneName);
         const peakAnnotation = loadedData.peakAnnotation;
         const multiomePeak = await getMultiomePeakMatrix();
-        // Always get peaksOnGene from peak annotation (works with or without peak matrix)
         const peakNames = multiomePeak?.peakNames || [];
         const { peakIndices, peaksOnGene } = getPeaksForGene(geneName, peakAnnotation, peakNames);
 
         if (multiomePeak && peakIndices.length > 0) {
-          // Full path: gene activity UMAP coloring + region/barcodes/clusters for fragment-based coverage
-          // (same approach as scATAC: fragment-based coverage is computed in App.jsx via Electron IPC)
           const { peakMatrix, fullBarcodeOrder } = multiomePeak;
           const filteredBarcodes = loadedData.cellBarcodes || [];
           const nFiltered = filteredBarcodes.length;
@@ -14351,7 +13850,6 @@ async function plotGeneExpression(params) {
             barcodeToColIdx.set(fullBarcodeOrder[i], i);
           }
 
-            // Gene activity: sum raw peak counts per cell for peaks linked to the gene (same as scATAC plotAtacGeneActivity)
             const atacExpression = new Float32Array(nFiltered);
             for (let j = 0; j < nFiltered; j++) {
               const colIdx = barcodeToColIdx.get(filteredBarcodes[j]);
@@ -14363,8 +13861,6 @@ async function plotGeneExpression(params) {
               }
               atacExpression[j] = sum;
             }
-            // Use raw counts directly (linear scale) for ATAC gene activity
-            // Compute 2nd-98th percentile range for color scale (matching plot_gene_activity_linear.mjs)
             let atacExpressionRange = null;
             if (atacExpression.length > 0) {
               const sortedAtac = Array.from(atacExpression).sort((a, b) => a - b);
@@ -14381,17 +13877,15 @@ async function plotGeneExpression(params) {
             let atacClusters = loadedData.precomputed?.atacAligned?.clusters || currentResults.clusters;
             if (atacCoordinates && atacCoordinates.length !== nFiltered) {
               console.warn('Multiome: ATAC coordinates length', atacCoordinates.length, '!= filtered', nFiltered, '- falling back');
-              atacCoordinates = currentResults.umap; // try RNA UMAP
+              atacCoordinates = currentResults.umap;
               if (atacCoordinates && atacCoordinates.length !== nFiltered) {
                 atacCoordinates = null;
               }
             }
-            // Ensure clusters are always available (needed for fragment query + coverage computation)
             if (!atacClusters || atacClusters.length !== nFiltered) {
               atacClusters = currentResults.clusters;
             }
 
-            // Compute region from peaks (needed for fragment-based coverage query in App.jsx)
             let region = null;
             if (peaksOnGene.length > 0) {
               const ATAC_EXTEND_UP = 5000;
@@ -14402,7 +13896,6 @@ async function plotGeneExpression(params) {
               region = { chrom, start: Math.max(0, minStart - ATAC_EXTEND_UP), end: maxEnd + ATAC_EXTEND_DOWN };
             }
 
-            // Cache ATAC gene activity for same-gene repeat requests (copy so postMessage doesn't transfer away)
             const atacPayload = {
               type: 'gene_expression',
               multiomeModality: 'atac',
@@ -14421,7 +13914,6 @@ async function plotGeneExpression(params) {
             };
             atacGeneActivityCache.set(atacCacheKey, atacPayload);
 
-            // Send ATAC data — coverage is computed via fragment query in App.jsx (same as scATAC)
             self.postMessage({
               type: 'ANALYSIS_COMPLETE',
               data: {
@@ -14444,8 +13936,6 @@ async function plotGeneExpression(params) {
             console.log('Multiome: sent ATAC gene activity for', geneName, 'with', peakIndices.length, 'peaks');
 
         } else if (peaksOnGene.length > 0 && params.showPeakView) {
-          // Coverage-only path: peak matrix unavailable or no matching indices, but peaks exist
-          // in annotation. Send peaksOnGene + region so frontend can query fragment-based coverage.
           console.log('Multiome: no peak matrix indices, using coverage-only path for', geneName, '(', peaksOnGene.length, 'peaks from annotation)');
           const filteredBarcodes = loadedData.cellBarcodes || [];
           const nFiltered = filteredBarcodes.length;
@@ -14485,11 +13975,11 @@ async function plotGeneExpression(params) {
               type: 'gene_expression',
               multiomeModality: 'atac',
               coordinates: atacCoordinates,
-              expression: new Float32Array(nFiltered), // zeros — no gene activity without peak matrix
+              expression: new Float32Array(nFiltered),
               geneName,
               colorMap,
               peaksOnGene,
-              coverageByCluster: null, // frontend will query atac_fragments.tsv.gz
+              coverageByCluster: null,
               region,
               genome: loadedData.info?.genome || 'hg38',
               cellBarcodes: filteredBarcodes.length ? filteredBarcodes : undefined,
@@ -14500,7 +13990,7 @@ async function plotGeneExpression(params) {
           console.log('Multiome: sent coverage-only ATAC data for', geneName);
 
         } else if (peaksOnGene.length > 0) {
-          console.log('Multiome: peaks found for', geneName, 'but no peak matrix indices — skipping ATAC gene activity (use "coverage plot" for fragment-based view)');
+          console.log('Multiome: peaks found for', geneName, 'but no peak matrix indices, skipping ATAC gene activity (use "coverage plot" for fragment-based view)');
         } else {
           console.log('Multiome: no peaks found for gene', geneName, '- skipping ATAC view');
         }
@@ -14512,7 +14002,6 @@ async function plotGeneExpression(params) {
   } catch (error) {
     console.error('Gene expression plot failed:', error);
     console.error('Error details:', error.stack);
-    // Send error message to UI
     self.postMessage({
       type: 'ANALYSIS_ERROR',
       error: error.message,
@@ -14532,7 +14021,6 @@ async function plotGeneViolin(params) {
 
   const isPeakId = /^chr\w+[:-]\d+[:-]\d+$/i.test(String(gene || '').trim());
 
-  // Multiome + peak ID: violin plot ATAC-only using peak matrix
   if (loadedData?.info?.modality === 'multiome' && isPeakId) {
     console.log('Multiome violin: plotting peak', gene, 'in ATAC view only');
     const multiomePeak = await getMultiomePeakMatrix();
@@ -14541,7 +14029,6 @@ async function plotGeneViolin(params) {
     const peakIdx = findPeakIndex(gene, peakNames);
     if (peakIdx === -1) throw new Error(`Peak ${gene} not found in peak matrix.`);
 
-    // Extract peak values for filtered cells
     const filteredBarcodes = loadedData.cellBarcodes || [];
     const nFiltered = filteredBarcodes.length;
     const barcodeToColIdx = new Map();
@@ -14554,7 +14041,6 @@ async function plotGeneViolin(params) {
       if (colIdx !== undefined) peakValues[j] = Math.log1p(fullRow[colIdx] || 0);
     }
 
-    // Get ATAC clusters
     let atacClusters = loadedData.precomputed?.atacAligned?.clusters || currentResults.clusters;
     if (!atacClusters || atacClusters.length !== nFiltered) atacClusters = currentResults.clusters;
     const clusters = Array.from(atacClusters || []);
@@ -14594,7 +14080,6 @@ async function plotGeneViolin(params) {
     return;
   }
 
-  // ── scATAC / atac-integration + peak ID: violin plot single peak ───────────
   if ((loadedData.info?.modality === 'atac' || loadedData.info?.modality === 'atac-integration') && isPeakId && loadedData.atacPeakMatrix) {
     const peakMatrix = loadedData.atacPeakMatrix;
     const peakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
@@ -14670,7 +14155,6 @@ async function plotGeneViolin(params) {
     return;
   }
 
-  // ── scATAC-only (or atac-integration) violin via gene activity ────────────
   if (loadedData.info?.modality === 'atac' || loadedData.info?.modality === 'atac-integration') {
     const geneName = (gene && String(gene).trim()) || 'gene';
     const peakMatrix = loadedData.atacPeakMatrix;
@@ -14699,7 +14183,6 @@ async function plotGeneViolin(params) {
       for (let p = 0; p < peakIndices.length; p++) sum += col[peakIndices[p]] || 0;
       expr[c] = sum;
     }
-    // Use raw counts directly (linear scale) for ATAC gene activity
 
     const clusters = currentResults.clusters;
     if (!clusters || clusters.length === 0) {
@@ -14726,7 +14209,6 @@ async function plotGeneViolin(params) {
 
     const atacIntegrationViews = getAtacIntegrationViewsForPlot();
     if (atacIntegrationViews) {
-      // Build per-view violin data for atac-integration
       const { integrationViews: iViews, datasetNames: iNames } = atacIntegrationViews;
       const viewData = {};
       let globalMin = Infinity, globalMax = -Infinity;
@@ -14775,7 +14257,6 @@ async function plotGeneViolin(params) {
     console.log('scATAC violin: sent gene activity violin for', geneName);
     return;
   }
-  // ─────────────────────────────────────────────────────────────────────────
 
   try {
     const { geneName, logExpression } = await resolveGeneExpression(gene);
@@ -14790,7 +14271,6 @@ async function plotGeneViolin(params) {
       precomputedClustersLength: loadedData.precomputed?.clusters?.length,
     });
 
-    // Try to use existing clusters - for multiome RNA use precomputed RNA so RNA view is unchanged after ATAC-only update
     let clusterArray = null;
     if (loadedData?.info?.modality === 'multiome' && loadedData.precomputed?.rnaAligned?.clusters) {
       clusterArray = loadedData.precomputed.rnaAligned.clusters;
@@ -14801,7 +14281,6 @@ async function plotGeneViolin(params) {
       console.log('Using cached clusters for violin plot (aligned with filtered data):', clusterArray.length);
     }
 
-    // Second, try fetching from state (if analysis was run)
     if (!clusterArray && state) {
       clusterArray = state.choose_clustering.fetchClusters();
       if (clusterArray && clusterArray.length > 0) {
@@ -14809,31 +14288,25 @@ async function plotGeneViolin(params) {
       }
     }
 
-    // Third, try precomputed clusters (for Xenium data) - only as fallback
-    // Note: These may not be aligned with filtered data, so only use if nothing else available
     if (!clusterArray && loadedData.precomputed?.clusters && Array.isArray(loadedData.precomputed.clusters)) {
       clusterArray = loadedData.precomputed.clusters;
       console.log('Using precomputed clusters for violin plot (may need alignment):', clusterArray.length);
     }
 
-    // Only if no clusters exist at all, run clustering (this should rarely happen)
     if (!clusterArray || clusterArray.length === 0) {
       if (!state) {
         throw new Error('No clustering data available. Please run analysis first or wait for data to finish loading.');
       }
       console.log('No clusters available; running implicit clustering & UMAP for violin plot...');
-      await runClusteringAndUMAP(false); // false = don't send UMAP message
+      await runClusteringAndUMAP(false);
       clusterArray = state.choose_clustering.fetchClusters();
     }
 
     const clusters = Array.from(clusterArray);
 
-    // Handle length mismatch (happens when cells are filtered during QC)
-    // Truncate clusters to match expression length (filtered cells)
     let alignedClusters = clusters;
     if (clusters.length !== logExpression.length) {
       if (clusters.length > logExpression.length) {
-        // Expected: some cells filtered during QC, truncate clusters to match
         alignedClusters = clusters.slice(0, logExpression.length);
       } else {
         console.error(`Expression array (${logExpression.length}) is longer than clusters (${clusters.length}) - this should not happen`);
@@ -14841,7 +14314,6 @@ async function plotGeneViolin(params) {
       }
     }
 
-    // Filter out null/undefined clusters and get unique valid clusters
     const uniqueClusters = Array.from(new Set(alignedClusters))
       .filter(c => c !== null && c !== undefined);
     uniqueClusters.sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
@@ -14852,7 +14324,6 @@ async function plotGeneViolin(params) {
     const expressionByCluster = uniqueClusters.map(() => []);
     for (let i = 0; i < alignedClusters.length; i++) {
       const clusterId = alignedClusters[i];
-      // Skip null/undefined clusters
       if (clusterId === null || clusterId === undefined) {
         continue;
       }
@@ -14866,7 +14337,6 @@ async function plotGeneViolin(params) {
     const typedExpression = expressionByCluster.map((values) => Float32Array.from(values));
     const transferableBuffers = typedExpression.map((arr) => arr.buffer);
 
-    // Integration: per-sample violin with global normalization (same gene expression scale across views)
     const integrationMeta = getIntegrationViewsForPlot(logExpression.length);
     if (integrationMeta) {
       const { integrationViews, datasetNames } = integrationMeta;
@@ -14927,7 +14397,6 @@ async function plotGeneViolin(params) {
       return;
     }
 
-    // For spatial datasets, also include spatial coordinates so the spatial view can show gene expression scatter plot
     let spatialCoordinates = null;
     const spatialDataSource = loadedData?.spatialData || spatialData;
     console.log('Checking for spatial coordinates in violin plot:', {
@@ -14944,7 +14413,6 @@ async function plotGeneViolin(params) {
         return Array.isArray(coord) ? [coord[0] ?? 0, coord[1] ?? 0] : [coord.x ?? 0, coord.y ?? 0];
       });
 
-      // IMPORTANT: Truncate spatial coordinates to match expression length (same filtering as clusters)
       if (allSpatialCoords.length > logExpression.length) {
         console.log(`Truncating spatial coordinates from ${allSpatialCoords.length} to ${logExpression.length} to match expression (QC filtered)`);
         spatialCoordinates = allSpatialCoords.slice(0, logExpression.length);
@@ -14971,13 +14439,11 @@ async function plotGeneViolin(params) {
         expressionByCluster: typedExpression,
         summary: summaries,
         totalCells: logExpression.length,
-        // Include expression and spatial coordinates for the spatial view
         expression: logExpression,
         spatialCoordinates: spatialCoordinates,
       }
     }, transferableBuffers);
 
-    // Multiome: also compute ATAC gene activity violin and send to ATAC view
     if (loadedData?.info?.modality === 'multiome' && loadedData.peakAnnotation?.length > 0) {
       try {
         console.log('Multiome violin: computing ATAC gene activity violin for', geneName);
@@ -14997,7 +14463,6 @@ async function plotGeneViolin(params) {
               barcodeToColIdx.set(fullBarcodeOrder[i], i);
             }
 
-            // Gene activity: sum peak counts per cell
             const atacExpression = new Float32Array(nFiltered);
             for (let j = 0; j < nFiltered; j++) {
               const colIdx = barcodeToColIdx.get(filteredBarcodes[j]);
@@ -15009,12 +14474,10 @@ async function plotGeneViolin(params) {
               }
               atacExpression[j] = sum;
             }
-            // Use raw counts directly (linear scale) for ATAC gene activity
 
-            // Use ATAC clusters
             let atacClusters = loadedData.precomputed?.atacAligned?.clusters;
             if (!atacClusters || atacClusters.length !== nFiltered) {
-              atacClusters = alignedClusters; // fallback to RNA clusters
+              atacClusters = alignedClusters;
             }
             let atacClusterArr = Array.from(atacClusters);
             if (atacClusterArr.length > nFiltered) {
@@ -15093,7 +14556,6 @@ async function plotGeneDotplot(params) {
       throw new Error('No data loaded. Please load data first.');
     }
 
-    // ── scATAC-only (or atac-integration) dotplot via gene activity ──────────
     if (loadedData.info?.modality === 'atac' || loadedData.info?.modality === 'atac-integration') {
       const peakMatrix = loadedData.atacPeakMatrix;
       const peakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
@@ -15103,7 +14565,6 @@ async function plotGeneDotplot(params) {
         throw new Error('ATAC peak matrix not available for dot plot.');
       }
 
-      // Collect unique gene names from params
       const scatacRequestedGenes = [];
       const scatacCollect = (value) => {
         if (typeof value !== 'string') return;
@@ -15167,7 +14628,6 @@ async function plotGeneDotplot(params) {
           for (let p = 0; p < peakIndices.length; p++) sum += col[peakIndices[p]] || 0;
           expr[c] = sum;
         }
-        // Use raw counts directly (linear scale) for ATAC gene activity
         resolvedGeneNames.push(peakIdRegex.test(gName) ? peakNames[peakIndices[0]] : gName);
         geneActivityExprs.push(expr);
       }
@@ -15176,7 +14636,6 @@ async function plotGeneDotplot(params) {
         throw new Error(`No peaks found for the requested gene(s). Try another gene or check spelling.`);
       }
 
-      // Align clusters to nCells
       let alignedClusters = Array.from(clusters);
       if (alignedClusters.length > nCells) alignedClusters = alignedClusters.slice(0, nCells);
       const nAligned = alignedClusters.length;
@@ -15227,7 +14686,6 @@ async function plotGeneDotplot(params) {
       }
       const atacIntegrationViewsDotplot = getAtacIntegrationViewsForPlot();
       if (atacIntegrationViewsDotplot) {
-        // Build per-view dotplot data for atac-integration
         const { integrationViews: iViews, datasetNames: iNames } = atacIntegrationViewsDotplot;
         const viewData = {};
         for (const viewName of iNames) {
@@ -15296,7 +14754,6 @@ async function plotGeneDotplot(params) {
       console.log('scATAC dotplot: sent gene activity dot plot for', resolvedGeneNames.join(', '));
       return;
     }
-    // ─────────────────────────────────────────────────────────────────────
 
     if (!loadedData.state) {
       throw new Error('No data loaded. Please load data first.');
@@ -15346,7 +14803,6 @@ async function plotGeneDotplot(params) {
       throw new Error('No valid genes provided for dot plot.');
     }
 
-    // For spatial data (Xenium), only use the first gene
     const modality = loadedData.info?.modality || loadedData.modality;
     console.log('Dot plot: Detected modality:', modality);
     const genesToPlot = (modality === 'spatial' && uniqueGenes.length > 1)
@@ -15357,7 +14813,6 @@ async function plotGeneDotplot(params) {
       console.log(`Spatial data: using only first gene (${genesToPlot[0]}) out of ${uniqueGenes.length} requested genes`);
     }
 
-    // Multiome + all peak IDs: dotplot ATAC-only using peak matrix
     const peakIdRegex = /^chr\w+:\d+-\d+$/i;
     const allPeakIds = genesToPlot.every(g => peakIdRegex.test(g.trim()));
     if (modality === 'multiome' && allPeakIds) {
@@ -15366,7 +14821,6 @@ async function plotGeneDotplot(params) {
       if (!multiomePeak) throw new Error('No peak matrix available for ATAC peak dotplot.');
       const { peakMatrix, peakNames, fullBarcodeOrder } = multiomePeak;
 
-      // Resolve each peak
       const resolvedPeakNames = [];
       const peakExpressions = [];
       for (const p of genesToPlot) {
@@ -15391,7 +14845,6 @@ async function plotGeneDotplot(params) {
 
       if (!resolvedPeakNames.length) throw new Error('No valid peaks found in peak matrix.');
 
-      // Get ATAC clusters
       const filteredBarcodes = loadedData.cellBarcodes || [];
       const nFiltered = filteredBarcodes.length;
       let atacClusters = loadedData.precomputed?.atacAligned?.clusters || currentResults.clusters;
@@ -15480,7 +14933,6 @@ async function plotGeneDotplot(params) {
 
     const state = loadedData.state;
 
-    // Ensure clustering has been performed; for multiome RNA use precomputed RNA clusters so RNA view is unchanged after ATAC-only update
     let clusters = currentResults.clusters;
     if (loadedData?.info?.modality === 'multiome' && loadedData.precomputed?.rnaAligned?.clusters) {
       clusters = loadedData.precomputed.rnaAligned.clusters;
@@ -15491,7 +14943,7 @@ async function plotGeneDotplot(params) {
       let clusterArray = state.choose_clustering.fetchClusters();
       if (!clusterArray || clusterArray.length === 0) {
         console.log('Dot plot: No clusters in state, running clustering...');
-        await runClusteringAndUMAP(false); // false = don't send UMAP message
+        await runClusteringAndUMAP(false);
         clusterArray = state.choose_clustering.fetchClusters();
       }
       clusters = Array.from(clusterArray);
@@ -15499,13 +14951,10 @@ async function plotGeneDotplot(params) {
 
     console.log('Dot plot: Using clusters, length:', clusters.length);
 
-    // Get the number of cells in the normalized matrix
     const normMatrix = state.rna_normalization.fetchNormalizedMatrix();
     const nCellsInMatrix = normMatrix.numberOfColumns();
     console.log('Dot plot: Normalized matrix columns:', nCellsInMatrix);
 
-    // If clusters array is longer than the normalized matrix, it means some cells were filtered
-    // We need to match the lengths - assume the first nCellsInMatrix cells are retained
     if (clusters.length > nCellsInMatrix) {
       console.log(`Dot plot: Trimming clusters array from ${clusters.length} to ${nCellsInMatrix} to match filtered cells`);
       clusters = clusters.slice(0, nCellsInMatrix);
@@ -15593,7 +15042,6 @@ async function plotGeneDotplot(params) {
     globalMax = globalMin + 1e-3;
   }
 
-  // Integration: per-sample dotplot with global normalization (same expression scale across views)
   const integrationMeta = getIntegrationViewsForPlot(nCells);
   if (integrationMeta) {
     const { integrationViews, datasetNames } = integrationMeta;
@@ -15667,8 +15115,6 @@ async function plotGeneDotplot(params) {
   percentExpressing.forEach((row) => transferables.push(row.buffer));
   averageExpression.forEach((row) => transferables.push(row.buffer));
 
-  // For spatial data, also include gene expression data for the first gene
-  // so the spatial view can show the scatter plot
   let spatialGeneExpression = null;
   if (modality === 'spatial' && geneNames.length > 0) {
     spatialGeneExpression = {
@@ -15699,7 +15145,7 @@ async function plotGeneDotplot(params) {
       totalCells: nCells,
       expressionRange: [globalMin, globalMax],
       colorMap: appliedColorMap,
-      spatialGeneExpression, // Include gene expression for spatial view
+      spatialGeneExpression,
     }
   };
   
@@ -15716,7 +15162,6 @@ async function plotGeneDotplot(params) {
   self.postMessage(messageData, transferables);
   console.log('====== DOT PLOT: Message sent successfully ======');
 
-  // Multiome: also compute ATAC gene activity dotplot and send to ATAC view
   if (loadedData?.info?.modality === 'multiome' && loadedData.peakAnnotation?.length > 0) {
     try {
       console.log('Multiome dotplot: computing ATAC gene activity dotplot for', geneNames);
@@ -15733,7 +15178,6 @@ async function plotGeneDotplot(params) {
           barcodeToColIdx.set(fullBarcodeOrder[i], i);
         }
 
-        // Compute gene activity (sum peak counts) for each gene
         const atacLogExpressions = [];
         const atacResolvedGenes = [];
         for (let gIdx = 0; gIdx < geneNames.length; gIdx++) {
@@ -15754,16 +15198,14 @@ async function plotGeneDotplot(params) {
             }
             atacExpr[j] = sum;
           }
-          // Use raw counts directly (linear scale) for ATAC gene activity
           atacLogExpressions.push(atacExpr);
           atacResolvedGenes.push(gName);
         }
 
         if (atacResolvedGenes.length > 0) {
-          // Use ATAC clusters
           let atacClusters = loadedData.precomputed?.atacAligned?.clusters;
           if (!atacClusters || atacClusters.length !== nFiltered) {
-            atacClusters = clusters; // fallback to RNA clusters
+            atacClusters = clusters;
           }
           let atacClusterArr = Array.from(atacClusters);
           if (atacClusterArr.length > nFiltered) {
@@ -15902,7 +15344,6 @@ async function loadCellChatLrDatabase(species) {
   try {
     if (workerHref) candidates.push(new URL('../../cellchatdb/' + fileName, workerHref).href);
   } catch (e) {
-    // Ignore malformed worker URLs and try simpler fallbacks below.
   }
   if (origin && origin !== 'null') {
     candidates.push(`${origin}/cellchatdb/${fileName}`);
@@ -16268,11 +15709,14 @@ async function findMarkers(params = {}) {
     throw new Error('No data loaded. Please load data first.');
   }
   const isAtacIntegration = loadedData.info?.modality === 'atac-integration';
-  if (!loadedData.state && !isAtacIntegration) {
+  const useGeneActivity = (loadedData.info?.modality === 'atac' || isAtacIntegration) &&
+    params.markerFeature !== 'peak' && !params.spatialRegionMode &&
+    !!loadedData.atacPeakMatrix && (loadedData.peakAnnotation?.length ?? 0) > 0;
+  const useAtacPeaks = loadedData.info?.modality === 'atac' && !useGeneActivity && !!loadedData.atacPeakMatrix;
+  if (!loadedData.state && !isAtacIntegration && !useGeneActivity && !useAtacPeaks) {
     throw new Error('No data loaded. Please load data first.');
   }
 
-  // Support both single cluster and array of clusters (for merged/renamed clusters)
   const { cluster, clusters: mergedClusters, multiomeTarget, spatialRegionMode = false } = params;
   const rawSelectedCellIndices = Array.isArray(params.selectedCellIndices)
     ? params.selectedCellIndices
@@ -16281,15 +15725,13 @@ async function findMarkers(params = {}) {
       : [];
   const state = loadedData.state;
 
-  // For atac-integration: no bakana state; use currentResults.clusters from runAtacIntegrationPipeline
   let clusterAssignments = currentResults.clusters;
-  if (isAtacIntegration) {
+  if (isAtacIntegration || useGeneActivity || useAtacPeaks) {
     if (!clusterAssignments || !clusterAssignments.length) {
-      throw new Error('Cluster assignments are unavailable. Please load and run ATAC integration first.');
+      throw new Error('Cluster assignments are unavailable. Please wait for the ATAC clustering to finish.');
     }
     clusterAssignments = Array.from(clusterAssignments);
   } else {
-    // For multiome: use RNA or ATAC precomputed clusters so RNA view is unchanged after ATAC-only update
     if (loadedData?.info?.modality === 'multiome' && loadedData.precomputed) {
       if (multiomeTarget === 'atac' && loadedData.precomputed.atacAligned) {
         clusterAssignments = loadedData.precomputed.atacAligned.clusters;
@@ -16349,15 +15791,12 @@ async function findMarkers(params = {}) {
     return String(a).localeCompare(String(b));
   });
 
-  // Handle merged clusters (multiple cluster IDs renamed to the same label)
   let targetClusterIds = [];
   let isMergedClusterRequest = false;
 
   if (Array.isArray(mergedClusters) && mergedClusters.length > 1) {
-    // Multiple clusters merged to the same label - treat as one group
     isMergedClusterRequest = true;
     targetClusterIds = mergedClusters.map(c => {
-      // Match each cluster ID against uniqueClusters
       const numVal = typeof c === 'number' ? c : parseInt(c);
       const matched = uniqueClusters.find(uc =>
         uc === c || uc === numVal || String(uc) === String(c) || Number(uc) === numVal
@@ -16367,7 +15806,6 @@ async function findMarkers(params = {}) {
     console.log('findMarkers: Merged cluster request, target IDs:', targetClusterIds);
   }
 
-  // Debug: Log cluster types and values
   console.log('findMarkers: Cluster debug info:', {
     requestedClusterInput: cluster,
     mergedClustersInput: mergedClusters,
@@ -16384,17 +15822,13 @@ async function findMarkers(params = {}) {
     requestedCluster = uniqueClusters[0];
   }
 
-  // Try to find the matching cluster in uniqueClusters
-  // First, check if the exact value exists
   let matchedCluster = uniqueClusters.find(c => c === requestedCluster);
 
-  // If not found and requestedCluster is a string, try parsing as number
   if (matchedCluster === undefined && typeof requestedCluster === 'string') {
     const trimmed = requestedCluster.trim();
     const numMatch = trimmed.match(/(\d+)/);
     if (numMatch) {
       const numValue = Number(numMatch[1]);
-      // Try to find matching cluster as number or string
       matchedCluster = uniqueClusters.find(c =>
         c === numValue || c === String(numValue) || String(c) === String(numValue)
       );
@@ -16404,7 +15838,6 @@ async function findMarkers(params = {}) {
     }
   }
 
-  // If requestedCluster is a number, try to find matching cluster
   if (matchedCluster === undefined && typeof requestedCluster === 'number') {
     matchedCluster = uniqueClusters.find(c =>
       c === requestedCluster || c === String(requestedCluster) || Number(c) === requestedCluster
@@ -16429,16 +15862,13 @@ async function findMarkers(params = {}) {
     );
   }
 
-  // Use the matched cluster value for all subsequent comparisons
   requestedCluster = matchedCluster;
 
-  // For merged clusters, use targetClusterIds instead of single requestedCluster
   const targetClustersSet = isMergedClusterRequest
     ? new Set(targetClusterIds.map(c => String(c)))
     : new Set([String(requestedCluster)]);
 
-  // ATAC marker detection: use peak matrix (multiome ATAC or atac-integration)
-  const isAtacMarkers = (loadedData?.info?.modality === 'multiome' && multiomeTarget === 'atac') || isAtacIntegration;
+  const isAtacMarkers = (loadedData?.info?.modality === 'multiome' && multiomeTarget === 'atac') || isAtacIntegration || useGeneActivity || useAtacPeaks;
   let markerState = null;
   let normMatrix = null;
   let geneNames = [];
@@ -16448,24 +15878,37 @@ async function findMarkers(params = {}) {
   let atacFilteredCellCount = 0;
 
   if (isAtacMarkers) {
-    if (isAtacIntegration) {
-      // atac-integration: peak matrix and cell order from loadedData (set by runAtacIntegrationPipeline)
-      console.log('findMarkers: ATAC integration mode - using unified peak matrix');
+    if (useGeneActivity) {
+      self.postMessage({ type: 'STATUS_UPDATE', message: 'Computing gene activity from peaks...' });
+      const activity = getAtacGeneActivityMatrix();
+      if (activity.nCells !== clusterAssignments.length) {
+        throw new Error(`Gene activity has ${activity.nCells} cells but the clustering has ${clusterAssignments.length}. Recluster and try again.`);
+      }
+      atacPeakMatrixRef = activity;
+      geneNames = activity.geneNames;
+      nGenes = geneNames.length;
+      atacFilteredCellCount = activity.nCells;
+      atacFilteredColIndices = new Int32Array(activity.nCells);
+      for (let j = 0; j < activity.nCells; j++) atacFilteredColIndices[j] = j;
+      console.log(`findMarkers: scATAC gene activity mode - ${nGenes} genes`);
+    } else if (isAtacIntegration || useAtacPeaks) {
+      console.log('findMarkers: ATAC peak mode - using the loaded peak matrix');
       const peakMatrix = loadedData.atacPeakMatrix;
       const atacPeakNames = loadedData.atacPeakNames || loadedData.peakNames || [];
       const nCells = loadedData.cellBarcodes?.length ?? peakMatrix?.numberOfColumns() ?? 0;
       if (!peakMatrix || !atacPeakNames.length || nCells === 0) {
-        throw new Error('No peak matrix available for ATAC integration marker detection.');
+        throw new Error('No peak matrix available for ATAC marker detection.');
+      }
+      if (nCells !== clusterAssignments.length) {
+        throw new Error(`The peak matrix has ${nCells} cells but the clustering has ${clusterAssignments.length}. Recluster and try again.`);
       }
       atacPeakMatrixRef = peakMatrix;
       geneNames = atacPeakNames;
       nGenes = atacPeakNames.length;
       atacFilteredCellCount = nCells;
-      // Matrix columns are in same order as loadedData.cellBarcodes
       atacFilteredColIndices = new Int32Array(nCells);
       for (let j = 0; j < nCells; j++) atacFilteredColIndices[j] = j;
     } else {
-      // Multiome ATAC: use getMultiomePeakMatrix and map filtered barcodes to matrix columns
       console.log('findMarkers: ATAC mode - using peak matrix directly');
       const multiomePeak = await getMultiomePeakMatrix();
       if (!multiomePeak) {
@@ -16493,7 +15936,7 @@ async function findMarkers(params = {}) {
     console.log(`findMarkers: ATAC mode - ${nGenes} peaks in peak matrix`);
     self.postMessage({
       type: 'STATUS_UPDATE',
-      message: `Finding marker peaks across ${nGenes} peaks...`,
+      message: useGeneActivity ? `Finding marker genes across ${nGenes} genes (gene activity)...` : `Finding marker peaks across ${nGenes} peaks...`,
     });
   } else if (state && state.marker_detection && state.rna_normalization) {
     markerState = state.marker_detection;
@@ -16502,8 +15945,6 @@ async function findMarkers(params = {}) {
     geneNames = lookup.geneNames;
     nGenes = geneNames.length;
   } else if ((loadedData.jsNormMatrix || loadedData.jsH5TmpFile) && loadedData.jsGeneNames) {
-    // Pure-JS streaming pipeline: restrict markers to HVG genes for performance
-    // (non-HVG genes would require full H5 re-scan per gene — too slow for marker detection)
     const hvgIndices = loadedData.jsHvgIndices;
     if (hvgIndices && hvgIndices.length > 0) {
       const allNames = loadedData.jsGeneNames;
@@ -16514,15 +15955,12 @@ async function findMarkers(params = {}) {
       geneNames = lookup.geneNames;
       nGenes = geneNames.length;
     }
-    // normMatrix stays null — getGeneRow below handles jsNormMatrix or H5 fallback
   } else {
     throw new Error('No normalized matrix available for marker detection');
   }
 
-  // Helper: get feature values (RNA normalized expression or ATAC peak counts)
   async function getGeneRow(geneIndex) {
     if (atacPeakMatrixRef) {
-      // Extract peak row from peak matrix, filtered to cells in the dataset
       const fullRow = atacPeakMatrixRef.row(geneIndex);
       const filtered = new Float32Array(atacFilteredCellCount);
       for (let j = 0; j < atacFilteredCellCount; j++) {
@@ -16535,8 +15973,6 @@ async function findMarkers(params = {}) {
     if (normMatrix) {
       return normMatrix.row(geneIndex, { asTypedArray: true });
     }
-    // Pure-JS streaming pipeline: geneIndex is the HVG row index
-    // (findMarkers already restricted geneNames to HVG, so index maps directly)
     if (loadedData.jsNormMatrix) {
       const jsMatrix = loadedData.jsNormMatrix;
       const row = new Float32Array(jsMatrix.ncols);
@@ -16550,7 +15986,6 @@ async function findMarkers(params = {}) {
       }
       return row;
     }
-    // H5 fallback: geneIndex is HVG index, map back to original gene index
     if (loadedData.jsH5TmpFile && loadedData.jsHvgIndices) {
       const origGeneIdx = loadedData.jsHvgIndices[geneIndex];
       const nKeptCells = loadedData.jsFilteredBarcodes?.length || 0;
@@ -16568,21 +16003,13 @@ async function findMarkers(params = {}) {
     throw new Error('No matrix available for gene expression lookup');
   }
 
-  // Check if bakana's marker detection has been computed
   let markerResults = markerState?.fetchResults?.();
   let rnaMarkers = markerResults?.RNA;
 
-  // For ATAC markers, skip bakana's RNA marker results - compute from peak matrix instead
   if (isAtacMarkers) {
     rnaMarkers = null;
   }
 
-  // Determine if we should use precomputed clusters for marker detection
-  // This is true ONLY for spatial/Xenium data that loaded with precomputed UMAP/clusters
-  // and hasn't been fully processed through bakana's pipeline yet.
-  // For single-cell data, we always use bakana's marker statistics even after cluster merges,
-  // because the Wilcoxon test (which determines gene ranking) uses the current cluster
-  // assignments from currentResults.clusters anyway.
   const hasPrecomputedData = loadedData.precomputed &&
                               loadedData.precomputed.umap &&
                               loadedData.precomputed.clusters;
@@ -16592,7 +16019,6 @@ async function findMarkers(params = {}) {
   let groupCount = uniqueClusters.length;
   const totalCells = clusterAssignments.length;
 
-  // Build cluster counts using precomputed clusters
   const clusterCounts = new Map();
   for (const c of uniqueClusters) {
     clusterCounts.set(c, 0);
@@ -16603,7 +16029,6 @@ async function findMarkers(params = {}) {
     }
   }
 
-  // For merged clusters, sum up all cluster sizes
   let targetClusterSize;
   if (isMergedClusterRequest) {
     targetClusterSize = 0;
@@ -16616,7 +16041,6 @@ async function findMarkers(params = {}) {
   }
   const otherCells = Math.max(0, totalCells - targetClusterSize);
 
-  // Log the decision path
   console.log('findMarkers: Decision path', {
     usePrecomputedClusters,
     hasRnaMarkers: !!rnaMarkers,
@@ -16624,21 +16048,8 @@ async function findMarkers(params = {}) {
     otherCells,
   });
 
-  // Always derive RNA means and detection fractions from the normalized matrix.
-  // Bakana's cached ScoreMarkersResults can be stale after cluster restoration,
-  // relabelling, or reclustering, and its factorized group order is not guaranteed
-  // to stay aligned with currentResults.clusters. The Wilcoxon test below already
-  // reads these same matrix rows, so using the matrix here keeps pct.1/pct.2 and
-  // avg_logFC consistent with the expression plot and the tested cell groups.
   const computeStatsFromMatrix = !isAtacMarkers || usePrecomputedClusters || !rnaMarkers;
   if (computeStatsFromMatrix) {
-    // Compute marker statistics directly from expression matrix using current cluster assignments
-    // This is used when:
-    // 1. Using precomputed clusters (e.g., Xenium data) without bakana marker detection
-    // 2. Marker detection hasn't been run yet
-    // Note: For single-cell data with merged clusters, we still use bakana's marker statistics
-    // because the Wilcoxon test (which determines gene ranking) uses the current merged
-    // cluster assignments from currentResults.clusters.
     const reason = !isAtacMarkers
       ? 'use current RNA matrix and cluster assignments'
       : usePrecomputedClusters
@@ -16650,24 +16061,17 @@ async function findMarkers(params = {}) {
       message: 'Computing marker genes from expression data...',
     });
 
-    // Initialize arrays for mean and detection statistics
     meanTarget = new Float64Array(nGenes);
     detectedTarget = new Float64Array(nGenes);
     meanOther = new Float64Array(nGenes);
     detectedOther = new Float64Array(nGenes);
 
-    // Compute mean expression and detection rate per cluster directly from matrix
-    // For each gene, iterate through cells and accumulate statistics
     const targetCellCount = targetClusterSize;
     const otherCellCount = otherCells;
 
-    // Build cell index lists for target and other clusters
-    // Use flexible matching to handle type differences (number vs string)
-    // For merged clusters, match against all cluster IDs in the target set
     const targetIndices = [];
     const otherIndices = [];
     clusterAssignments.forEach((value, index) => {
-      // Match if value is in the target clusters set (handles merged clusters)
       const matches = targetClustersSet.has(String(value));
       if (matches) {
         targetIndices.push(index);
@@ -16690,7 +16094,6 @@ async function findMarkers(params = {}) {
       MISMATCH: clusterAssignments.length !== matrixCols ? `CLUSTERS(${clusterAssignments.length}) != MATRIX(${matrixCols})` : 'OK',
     });
 
-    // ATAC: single-pass over CSC for O(nnz) stats (avoids N row extractions)
     if (isAtacMarkers && atacPeakMatrixRef?.getCSC) {
       const csc = atacPeakMatrixRef.getCSC();
       const { colPtr, rowIdx, values: cscValues } = csc;
@@ -16727,7 +16130,6 @@ async function findMarkers(params = {}) {
       }
       console.log(`Computed ATAC marker statistics (single-pass over ${csc.values?.length ?? 0} nnz)`);
     } else {
-      // Process each gene (RNA or when CSC single-pass not available)
       for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
         const row = await getGeneRow(geneIndex);
 
@@ -16755,28 +16157,21 @@ async function findMarkers(params = {}) {
 
     console.log(`Computed marker statistics: ${targetIndices.length} cells in cluster ${requestedCluster}, ${otherIndices.length} in other clusters`);
 
-    // Debug: Log stats for first few genes to verify computation
     console.log('findMarkers DEBUG - First 5 genes stats:', {
       gene0: { mean: meanTarget[0], detected: detectedTarget[0], meanOther: meanOther[0] },
       gene1: { mean: meanTarget[1], detected: detectedTarget[1], meanOther: meanOther[1] },
       gene2: { mean: meanTarget[2], detected: detectedTarget[2], meanOther: meanOther[2] },
     });
   } else {
-    // Use bakana's pre-computed marker statistics
-    // But check if clusters have been merged - if so, compute stats from matrix
-    // to get accurate pct.1/pct.2 values for the merged population
     const bakanaGroupCount = typeof rnaMarkers.numberOfGroups === 'function'
       ? rnaMarkers.numberOfGroups()
       : uniqueClusters.length;
 
     const clustersWereMerged = bakanaGroupCount !== uniqueClusters.length;
 
-    // Also treat as merged if multiple cluster IDs were passed (visual merge without data merge)
     const needsRecomputation = clustersWereMerged || isMergedClusterRequest;
 
     if (needsRecomputation) {
-      // Clusters were merged OR multiple clusters renamed to same label - compute statistics
-      // directly from expression matrix to get accurate values for the merged population
       const reason = isMergedClusterRequest ? 'multiple clusters renamed to same label' : 'clusters were merged';
       console.log(`Computing stats from expression matrix (reason: ${reason})`);
 
@@ -16785,8 +16180,6 @@ async function findMarkers(params = {}) {
       meanOther = new Float64Array(nGenes);
       detectedOther = new Float64Array(nGenes);
 
-      // Build cell indices for the merged cluster
-      // For merged clusters (multiple IDs renamed to same label), match against all target IDs
       const targetIndices = [];
       const otherIndicesForStats = [];
       clusterAssignments.forEach((value, index) => {
@@ -16801,11 +16194,9 @@ async function findMarkers(params = {}) {
       const targetCellCount = targetIndices.length;
       const otherCellCount = otherIndicesForStats.length;
 
-      // Process each gene to compute actual statistics
       for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
         const row = await getGeneRow(geneIndex);
 
-        // Compute statistics for target (merged) cluster
         let sumTarget = 0;
         let detectedCountTarget = 0;
         for (const idx of targetIndices) {
@@ -16816,7 +16207,6 @@ async function findMarkers(params = {}) {
         meanTarget[geneIndex] = targetCellCount > 0 ? sumTarget / targetCellCount : 0;
         detectedTarget[geneIndex] = targetCellCount > 0 ? detectedCountTarget / targetCellCount : 0;
 
-        // Compute statistics for other clusters combined
         let sumOther = 0;
         let detectedCountOther = 0;
         for (const idx of otherIndicesForStats) {
@@ -16830,7 +16220,6 @@ async function findMarkers(params = {}) {
 
       console.log(`Computed merged cluster stats: ${targetCellCount} cells in cluster, ${otherCellCount} in other clusters`);
     } else {
-      // No merge - use bakana's pre-computed statistics directly
       groupCount = bakanaGroupCount;
 
       if (
@@ -16872,9 +16261,6 @@ async function findMarkers(params = {}) {
     }
   }
 
-  // Build cell index lists for Wilcoxon test
-  // Use flexible matching to handle type differences (number vs string)
-  // For merged clusters, match against all cluster IDs in the target set
   const inIndices = [];
   const outIndices = [];
   clusterAssignments.forEach((value, index) => {
@@ -16893,9 +16279,9 @@ async function findMarkers(params = {}) {
 
   const wilcoxonWorkspace = createWilcoxonWorkspace(inIndices.length, outIndices.length);
   const pValues = new Float64Array(nGenes);
-  pValues.fill(1); // Default for skipped peaks
+  pValues.fill(1);
+  const aucValues = new Float64Array(nGenes).fill(0.5);
 
-  // ATAC: pre-filter to peaks with >0.1% detection to avoid Wilcoxon on 100k+ peaks
   const MIN_DETECTION = 0.001;
   let genesToIterate;
   if (isAtacMarkers && nGenes > 10000) {
@@ -16911,7 +16297,7 @@ async function findMarkers(params = {}) {
     genesToIterate = Array.from({ length: nGenes }, (_, i) => i);
   }
   const BATCH_SIZE = 2000;
-  const featureLabel = isAtacMarkers ? 'peaks' : 'genes';
+  const featureLabel = isAtacMarkers && !useGeneActivity ? 'peaks' : 'genes';
 
   for (let k = 0; k < genesToIterate.length; k++) {
     if (k > 0 && k % BATCH_SIZE === 0) {
@@ -16925,6 +16311,7 @@ async function findMarkers(params = {}) {
     const row = await getGeneRow(geneIndex);
     const p = wilcoxonRankSumPValue(row, inIndices, outIndices, wilcoxonWorkspace);
     pValues[geneIndex] = Number.isFinite(p) && p > 0 ? p : Number.MIN_VALUE;
+    aucValues[geneIndex] = wilcoxonWorkspace.auc;
   }
 
   const adjustedP = benjaminiHochberg(Array.from(pValues));
@@ -16948,21 +16335,17 @@ async function findMarkers(params = {}) {
       p_val_adj: adjustedP[geneIndex],
       mean_in: meanIn,
       mean_out: meanOut,
+      auc: aucValues[geneIndex],
     };
   }
 
-  // Keep only upregulated markers (positive logFC = higher in target cluster).
-  // The Wilcoxon test floors p-values of strongly downregulated genes to
-  // Number.MIN_VALUE. Because that is strictly smaller than the p-values of
-  // moderately upregulated genes, downregulated markers sort first even though
-  // they have negative logFC — the opposite of what "find markers" means.
   const positiveRows = rows.filter(r => r.avg_logFC > 0);
   positiveRows.sort((a, b) => {
     if (a.p_val !== b.p_val) return a.p_val - b.p_val;
+    if (useGeneActivity && a.auc !== b.auc) return b.auc - a.auc;
     return b.avg_logFC - a.avg_logFC;
   });
 
-  // Debug: Log top 5 markers being returned
   console.log('findMarkers DEBUG - Top 5 markers:', positiveRows.slice(0, 5).map(r => ({
     gene: r.gene,
     pval: r.p_val,
@@ -17015,9 +16398,9 @@ async function findMarkers(params = {}) {
       } : undefined,
       suppressNeutralSummary: spatialRegionMode ? !!params.suppressNeutralSummary : undefined,
       multiomeTarget: multiomeTarget || null,
-      featureType: isAtacMarkers ? 'peak' : 'gene',
+      featureType: isAtacMarkers && !useGeneActivity ? 'peak' : 'gene',
+      featureSource: useGeneActivity ? 'gene_activity' : undefined,
       cluster: spatialRegionMode ? 'Selected spatial region' : requestedCluster,
-      // Include info about merged clusters
       mergedClusters: isMergedClusterRequest ? targetClusterIds : null,
       isMergedCluster: isMergedClusterRequest,
       totalCells,
@@ -17269,10 +16652,6 @@ function normalizePathwayGene(gene) {
   return String(gene || '').trim().toUpperCase();
 }
 
-/**
- * Differential gene expression between two samples within a cluster (integration only).
- * Uses Wilcoxon rank-sum test; returns DEG table and data for volcano plot.
- */
 async function degBetweenSamples(params = {}) {
   if (!loadedData || !loadedData.state) {
     throw new Error('No data loaded. Please load data first.');
@@ -17436,8 +16815,6 @@ async function degBetweenSamples(params = {}) {
       mean_out: m2,
     });
   }
-  // DEG between samples: keep both directions but sort by descending logFC
-  // so upregulated genes in sample1 appear first.
   rows.sort((a, b) => {
     if (a.p_val !== b.p_val) return a.p_val - b.p_val;
     return b.avg_logFC - a.avg_logFC;
@@ -17462,10 +16839,6 @@ async function degBetweenSamples(params = {}) {
   });
 }
 
-/**
- * Differential peak accessibility between two samples within a cluster (atac-integration only).
- * Same interface as degBetweenSamples but uses peak matrix; returns table + volcano data with featureType: 'peak'.
- */
 async function degPeaksBetweenSamples(params = {}) {
   if (!loadedData) {
     throw new Error('No data loaded. Please load data first.');
@@ -17645,9 +17018,6 @@ async function degPeaksBetweenSamples(params = {}) {
   });
 }
 
-/**
- * Cell fraction (proportion) per cluster per sample for integration. Returns counts and % for bar charts.
- */
 async function plotCellFraction(params = {}) {
   if (!loadedData || !loadedData.state) {
     throw new Error('No data loaded. Please load data first.');
@@ -17791,11 +17161,9 @@ async function getClusterInfo(params = {}) {
     throw new Error('No data loaded. Please load data first.');
   }
 
-  // Support both single cluster and array of clusters (for merged/renamed clusters)
   const { cluster, clusters: mergedClusters, multiomeTarget } = params;
   const state = loadedData.state;
 
-  // Get clusters – for multiome use RNA or ATAC precomputed so RNA view is unchanged after ATAC-only update
   let clusterAssignments = currentResults.clusters;
   if (loadedData?.info?.modality === 'multiome' && loadedData.precomputed) {
     if (multiomeTarget === 'atac' && loadedData.precomputed.atacAligned) {
@@ -17829,12 +17197,10 @@ async function getClusterInfo(params = {}) {
     return String(a).localeCompare(String(b));
   });
 
-  // Handle merged clusters (multiple cluster IDs renamed to the same label)
   let targetClusterIds = [];
   let isMergedClusterRequest = false;
 
   if (Array.isArray(mergedClusters) && mergedClusters.length > 1) {
-    // Multiple clusters merged to the same label - treat as one group
     isMergedClusterRequest = true;
     targetClusterIds = mergedClusters.map(c => {
       const numVal = typeof c === 'number' ? c : parseInt(c);
@@ -17846,13 +17212,11 @@ async function getClusterInfo(params = {}) {
     console.log('getClusterInfo: Merged cluster request, target IDs:', targetClusterIds);
   }
 
-  // Determine the requested cluster
   let requestedCluster = cluster;
   if (requestedCluster === undefined || requestedCluster === null || requestedCluster === '') {
     requestedCluster = uniqueClusters[0];
   }
 
-  // Match the cluster (handle number/string type differences)
   let matchedCluster = uniqueClusters.find(c => c === requestedCluster);
   if (matchedCluster === undefined && typeof requestedCluster === 'string') {
     const numMatch = requestedCluster.trim().match(/(\d+)/);
@@ -17883,12 +17247,10 @@ async function getClusterInfo(params = {}) {
 
   requestedCluster = matchedCluster;
 
-  // For merged clusters, use targetClusterIds instead of single requestedCluster
   const targetClustersSet = isMergedClusterRequest
     ? new Set(targetClusterIds.map(c => String(c)))
     : new Set([String(requestedCluster)]);
 
-  // Count cells in the target cluster(s)
   let clusterCellCount = 0;
   clusterAssignments.forEach((value) => {
     if (targetClustersSet.has(String(value))) {
@@ -17898,8 +17260,6 @@ async function getClusterInfo(params = {}) {
 
   const clusterFraction = clusterCellCount / totalCells;
 
-  // Now get top 10 markers for this cluster
-  // We'll call findMarkers internally and extract the top 10
   console.log(`getClusterInfo: Getting top markers for cluster ${requestedCluster}`);
 
   const normMatrix = state.rna_normalization.fetchNormalizedMatrix();
@@ -17909,11 +17269,6 @@ async function getClusterInfo(params = {}) {
   let meanTarget, detectedTarget, meanOther, detectedOther;
   const otherCells = totalCells - clusterCellCount;
 
-  // Always compute cluster-info marker summaries from the current normalized
-  // matrix. The old cached-results branch populated meanTarget/detectedTarget
-  // from Bakana but left meanOther/detectedOther as zero-filled arrays. Since
-  // cluster_info is rendered as the same marker table as find_markers, that
-  // produced pct.2 = 0 and pseudo-count-inflated logFC values.
   meanTarget = new Float64Array(nGenes);
   detectedTarget = new Float64Array(nGenes);
   meanOther = new Float64Array(nGenes);
@@ -17950,8 +17305,6 @@ async function getClusterInfo(params = {}) {
     detectedOther[geneIndex] = otherIndicesForStats.length > 0 ? detectedCountOther / otherIndicesForStats.length : 0;
   }
 
-  // Compute Wilcoxon p-values for ranking
-  // For merged clusters, match against all cluster IDs in the target set
   const inIndices = [];
   const outIndices = [];
   clusterAssignments.forEach((value, index) => {
@@ -17971,7 +17324,6 @@ async function getClusterInfo(params = {}) {
     pValues[geneIndex] = Number.isFinite(p) && p > 0 ? p : Number.MIN_VALUE;
   }
 
-  // Build marker rows and sort
   const pseudoCount = 1e-6;
   const rows = [];
   for (let geneIndex = 0; geneIndex < nGenes; geneIndex++) {
@@ -17988,16 +17340,13 @@ async function getClusterInfo(params = {}) {
     });
   }
 
-  // Only positive logFC markers (same reasoning as findMarkers)
   const positiveMarkerRows = rows.filter(r => r.avg_logFC > 0);
   positiveMarkerRows.sort((a, b) => {
     if (a.p_val !== b.p_val) return a.p_val - b.p_val;
     return b.avg_logFC - a.avg_logFC;
   });
 
-  // Get top 10 markers for the summary text
   const topMarkers = positiveMarkerRows.slice(0, 10);
-  // Get more markers for the full table display (same as find_markers)
   const maxRows = 200;
   const allMarkers = positiveMarkerRows.slice(0, maxRows);
 
@@ -18014,7 +17363,6 @@ async function getClusterInfo(params = {}) {
       fraction: clusterFraction,
       topMarkers: topMarkers,
       requestAnnotation: !!params.annotateCellType,
-      // Include full marker data for table display (same format as 'markers' type)
       markers: allMarkers,
       totalGenes: nGenes,
       method: 'wilcoxon_rank_sum',
@@ -18031,7 +17379,6 @@ async function runQC() {
   try {
     const state = loadedData.state;
 
-    // Get QC metrics from bakana
     const qcMetrics = state.rna_quality_control.fetchMetrics();
     
     const sums = Array.from(qcMetrics.sum());
@@ -18045,7 +17392,6 @@ async function runQC() {
       mitoPercent = new Array(sums.length).fill(NaN);
     }
     
-    // Calculate medians
     const median = (arr) => {
       const sorted = arr.slice().sort((a, b) => a - b);
       const mid = Math.floor(sorted.length / 2);
@@ -18107,7 +17453,6 @@ async function mergeClusters(params = {}) {
 
   const state = loadedData.state;
 
-  // Get current clusters
   let clusters = currentResults.clusters;
   if (!clusters || !clusters.length) {
     if (!state) throw new Error('No cluster assignments available');
@@ -18122,13 +17467,10 @@ async function mergeClusters(params = {}) {
   console.log('Original clusters sample:', clusters.slice(0, 10));
   console.log('Merging clusters', sourceClusterIds, 'into', targetClusterId);
 
-  // Merge: replace all occurrences of sourceClusterIds with targetClusterId
   let mergedCount = 0;
   for (let i = 0; i < clusters.length; i++) {
     const currentCluster = clusters[i];
-    // Check if current cluster is one of the source clusters
     const shouldMerge = sourceClusterIds.some(srcId => {
-      // Handle both numeric and string comparisons
       if (typeof currentCluster === 'number' && typeof srcId === 'number') {
         return currentCluster === srcId;
       }
@@ -18144,10 +17486,8 @@ async function mergeClusters(params = {}) {
   console.log(`Merged ${mergedCount} cells from clusters ${sourceClusterIds} into cluster ${targetClusterId}`);
   console.log('Updated clusters sample:', clusters.slice(0, 10));
 
-  // Update the cached clusters
   currentResults.clusters = clusters;
 
-  // Store the updated clusters back into the state (skip for atac-integration: no bakana state)
   if (state) {
     try {
       state.choose_clustering.storeClusters(clusters);
@@ -18157,7 +17497,6 @@ async function mergeClusters(params = {}) {
     }
   }
 
-  // Get updated unique clusters
   const uniqueClusters = Array.from(new Set(clusters));
   uniqueClusters.sort((a, b) => {
     if (typeof a === 'number' && typeof b === 'number') {
@@ -18168,7 +17507,6 @@ async function mergeClusters(params = {}) {
 
   console.log('New unique clusters:', uniqueClusters);
 
-  // Re-fetch UMAP coordinates to send back
   let umapCoordinates = currentResults.umap;
   if (!umapCoordinates && state) {
     const umapResults = await state.umap.fetchResults();
@@ -18179,7 +17517,6 @@ async function mergeClusters(params = {}) {
     currentResults.umap = umapCoordinates;
   }
 
-  // Build the response message
   const uniqueAfterMerge = new Set(clusters.filter((c) => c !== null && c !== undefined));
   const messageData = {
     type: 'umap',
@@ -18187,9 +17524,9 @@ async function mergeClusters(params = {}) {
     clusters: clusters,
     nClusters: uniqueAfterMerge.size,
     source: 'merged',
+    wnnMerged: params.multiomeTarget === 'wnn',
   };
 
-  // Include spatial coordinates if available (for spatial modality)
   if (spatialData && Array.isArray(spatialData.coordinates)) {
     messageData.spatialCoordinates = spatialData.coordinates;
     messageData.spatialMatched = spatialData.matched;
@@ -18200,23 +17537,19 @@ async function mergeClusters(params = {}) {
     console.log('Including spatialCoordinates from loadedData in merge response:', loadedData.spatialData.coordinates.length);
   }
 
-  // Include clusterLabelMap if it exists, so App can preserve cluster merges
   if (currentClusterLabelMap && Object.keys(currentClusterLabelMap).length > 0) {
     messageData.clusterLabelMap = currentClusterLabelMap;
     console.log('Including clusterLabelMap in merge response:', currentClusterLabelMap);
   }
 
-  // atac-integration: include integrationViews + datasetNames so per-sample cards keep their cell indices
   if (loadedData?.info?.modality === 'atac-integration' && loadedData.integrationViews) {
     messageData.integrationViews = loadedData.integrationViews;
     messageData.datasetNames = loadedData.info.datasetNames;
   }
 
-  // Clear gene-activity cache so re-plots use updated cluster assignments
   scAtacGeneActivityCache.clear();
   atacGeneActivityCache.clear();
 
-  // Send the updated UMAP with merged clusters
   self.postMessage({
     type: 'ANALYSIS_COMPLETE',
     data: messageData,
@@ -18226,7 +17559,6 @@ async function mergeClusters(params = {}) {
 }
 
 async function runGeneralAnalysis(params) {
-  // Run a default analysis pipeline
   await runClusteringAndUMAP();
 }
 
@@ -18235,9 +17567,8 @@ async function showAnalysisParameters(params = {}) {
     throw new Error('No analysis has been run yet. Please run analysis first.');
   }
 
-  const { step } = params; // Optional step filter: 'umap', 'clustering', 'pca', etc.
+  const { step } = params;
 
-  // Extract and format key parameters from each analysis step
   const allParams = {
     cellFiltering: {},
     geneFiltering: {},
@@ -18247,7 +17578,6 @@ async function showAnalysisParameters(params = {}) {
     umap: {}
   };
 
-  // Cell filtering (QC) parameters
   if (currentParameters.rna_quality_control) {
     const qc = currentParameters.rna_quality_control;
     allParams.cellFiltering = {
@@ -18257,7 +17587,6 @@ async function showAnalysisParameters(params = {}) {
     };
   }
 
-  // Gene filtering parameters
   if (currentParameters.feature_selection) {
     const fs = currentParameters.feature_selection;
     allParams.geneFiltering = {
@@ -18265,21 +17594,18 @@ async function showAnalysisParameters(params = {}) {
     };
   }
 
-  // Variable genes (feature selection) parameters
   if (currentParameters.rna_pca) {
     allParams.featureSelection = {
       numVariableGenes: currentParameters.rna_pca.num_hvgs ?? 'N/A'
     };
   }
 
-  // PCA parameters
   if (currentParameters.rna_pca) {
     allParams.pca = {
       numPCs: currentParameters.rna_pca.num_pcs ?? 'N/A'
     };
   }
 
-  // Clustering parameters
   if (currentParameters.snn_graph_cluster) {
     const cluster = currentParameters.snn_graph_cluster;
     allParams.clustering = {
@@ -18288,7 +17614,6 @@ async function showAnalysisParameters(params = {}) {
     };
   }
 
-  // UMAP parameters
   if (currentParameters.umap) {
     const umap = currentParameters.umap;
     allParams.umap = {
@@ -18297,7 +17622,6 @@ async function showAnalysisParameters(params = {}) {
     };
   }
 
-  // Filter to specific step if requested
   let filteredParams = allParams;
   if (step) {
     filteredParams = {};

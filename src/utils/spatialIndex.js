@@ -1,12 +1,3 @@
-/**
- * Spatial tiling utilities for progressive rendering of large point clouds.
- *
- * The index stores the full coordinate arrays plus a pyramid of sampled tiles.
- * Each level doubles the number of tiles on each axis, similar to a quadtree.
- * Tiles retain their true counts so callers can decide when to switch to
- * density rendering.
- */
-
 const DEFAULT_OPTIONS = {
   maxLevels: 8,
   baseSamplesPerTile: 600,
@@ -84,7 +75,6 @@ export const buildSpatialIndex = (points, options = {}) => {
   const ys = new Float32Array(count);
 
   points.forEach((point, idx) => {
-    // Handle null/undefined points gracefully
     if (point == null) {
       xs[idx] = 0;
       ys[idx] = 0;
@@ -104,8 +94,6 @@ export const buildSpatialIndex = (points, options = {}) => {
     }
   });
 
-  // When all points are null/zero (e.g. CosMX 0 matches), use default bounds so we still return a valid index
-  // and the spatial view can render (points stacked at origin) instead of showing nothing
   if (!Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
     xMin = 0;
     xMax = 1;
@@ -236,11 +224,6 @@ const gatherForLevel = (index, level, viewBounds, options = {}) => {
   };
 };
 
-/**
- * Gather a sample suitable for point rendering. The function tries progressively
- * finer levels until the requested sample budget is exceeded, at which point it
- * falls back to the last acceptable level.
- */
 export const gatherSamplesForViewport = (index, viewBounds, options = {}) => {
   if (!index) {
     return null;
@@ -271,11 +254,6 @@ export const gatherSamplesForViewport = (index, viewBounds, options = {}) => {
   return chosen;
 };
 
-/**
- * Prepare a weight-scaled sample for density rendering. Each returned datum
- * contains the point index and a weight factor corresponding to the ratio
- * between the tile population and its sampled subset.
- */
 export const gatherDensitySample = (index, viewBounds, options = {}) => {
   if (!index) {
     return null;
@@ -303,5 +281,4 @@ export const gatherDensitySample = (index, viewBounds, options = {}) => {
 };
 
 export const defaultViewBounds = (index) => index?.bounds || null;
-
 

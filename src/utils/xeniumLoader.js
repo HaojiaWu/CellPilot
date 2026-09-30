@@ -1,29 +1,14 @@
-/**
- * Utility functions for loading Xenium spatial transcriptomics data
- */
-
 import { buildSpatialIndex } from './spatialIndex';
 
-/**
- * Parse Parquet file (simplified for cells and transcripts)
- * Note: Full Parquet parsing would require parquetjs library
- * For now, we'll use CSV fallback if available
- */
 const parseParquetOrCSV = (data, filename) => {
-  // Check if it's gzipped CSV
   if (filename.endsWith('.csv.gz') || filename.endsWith('.csv')) {
     const text = new TextDecoder().decode(data);
     return parseCSV(text);
   }
 
-  // For .parquet files, we'll need to use a Parquet reader
-  // For now, throw error suggesting CSV format
   throw new Error('Parquet format not yet supported. Please use CSV format files if available.');
 };
 
-/**
- * Parse CSV data into structured format
- */
 const parseCSV = (text) => {
   const lines = text.trim().split('\n');
   if (lines.length === 0) {
@@ -59,10 +44,6 @@ const parseCSV = (text) => {
   return { headers, rows };
 };
 
-/**
- * Load Xenium cells data
- * Expected columns: cell_id, x_centroid, y_centroid, transcript_counts, etc.
- */
 export const parseXeniumCells = (data, filename) => {
   const parsed = parseParquetOrCSV(data, filename);
   const cells = [];
@@ -109,14 +90,9 @@ export const parseXeniumCells = (data, filename) => {
   };
 };
 
-/**
- * Load Xenium transcripts data (subset for visualization)
- * Expected columns: transcript_id, cell_id, feature_name, x_location, y_location, z_location, qv
- */
 export const parseXeniumTranscripts = (data, filename, maxTranscripts = 100000) => {
   const parsed = parseParquetOrCSV(data, filename);
 
-  // Sample if too many transcripts
   let rows = parsed.rows;
   if (rows.length > maxTranscripts) {
     const step = Math.floor(rows.length / maxTranscripts);
@@ -140,15 +116,10 @@ export const parseXeniumTranscripts = (data, filename, maxTranscripts = 100000) 
   };
 };
 
-/**
- * Parse UMAP coordinates from Xenium analysis output
- * Expected CSV format with columns matching cell IDs
- */
 export const parseXeniumUMAP = (data, filename) => {
   const text = new TextDecoder().decode(data);
   const parsed = parseCSV(text);
 
-  // UMAP files typically have format: cell_id, UMAP-1, UMAP-2
   const coordinates = parsed.rows.map(row => {
     const cellId = row['Barcode'] || row['cell_id'] || row[''];
     const umap1 = parseFloat(row['UMAP-1'] || row['umap_1'] || row['0']);
@@ -166,14 +137,10 @@ export const parseXeniumUMAP = (data, filename) => {
   };
 };
 
-/**
- * Parse clustering results from Xenium analysis output
- */
 export const parseXeniumClusters = (data, filename) => {
   const text = new TextDecoder().decode(data);
   const parsed = parseCSV(text);
 
-  // Clustering files typically have format: cell_id, Cluster
   const clusters = {};
 
   parsed.rows.forEach(row => {
@@ -189,14 +156,10 @@ export const parseXeniumClusters = (data, filename) => {
   };
 };
 
-/**
- * Load complete Xenium dataset
- * @param {Object} files: Object containing all Xenium files
- * @param {Object} metadata: Metadata about file formats
- * @returns {Promise<Object>}: Complete Xenium dataset
- */
 export async function loadXeniumData(files, metadata) {
   try {
+    console.log('Loading Xenium data...', metadata);
+
     const result = {
       format: '10X Xenium',
       modality: 'spatial',
@@ -209,13 +172,11 @@ export async function loadXeniumData(files, metadata) {
       spatialIndex: null,
     };
 
-    // Load cells data (required for spatial coordinates)
     if (files.cells) {
       const cellsData = parseXeniumCells(files.cells.data, files.cells.name);
       result.cells = cellsData.cells;
       result.spatialExtent = cellsData.spatialExtent;
 
-      // Extract spatial coordinates for plotting
       result.spatialCoordinates = cellsData.cells.map(cell => [cell.x, cell.y]);
       if (Array.isArray(result.spatialCoordinates) && result.spatialCoordinates.length) {
         result.spatialIndex = buildSpatialIndex(result.spatialCoordinates, {
@@ -226,9 +187,9 @@ export async function loadXeniumData(files, metadata) {
         });
       }
 
+      console.log(`Loaded ${cellsData.count} cells with spatial coordinates`);
     }
 
-    // Load transcripts data (optional, for transcript-level visualization)
     if (files.transcripts) {
       try {
         const transcriptsData = parseXeniumTranscripts(
@@ -236,32 +197,29 @@ export async function loadXeniumData(files, metadata) {
           files.transcripts.name
         );
         result.transcripts = transcriptsData.transcripts;
+        console.log(`Loaded ${transcriptsData.count} transcripts (sampled from ${transcriptsData.totalCount})`);
       } catch (error) {
         console.warn('Could not load transcripts data:', error.message);
       }
     }
 
-    // Load UMAP coordinates from analysis
     if (files.analysis && files.analysis.umap) {
       try {
-        // Get the first available UMAP projection
         const umapKeys = Object.keys(files.analysis.umap);
         if (umapKeys.length > 0) {
           const umapFile = files.analysis.umap[umapKeys[0]];
           const umapData = parseXeniumUMAP(umapFile.data, umapFile.name);
           result.umap = umapData.coordinates;
+          console.log(`Loaded UMAP coordinates for ${umapData.count} cells`);
         }
       } catch (error) {
         console.warn('Could not load UMAP data:', error.message);
       }
     }
 
-    // Load clustering results
-    // TODO: Parse clustering from analysis folder
-
-    // Store cell feature matrix files for later processing by bakana
     if (files.cellFeatureMatrix) {
       result.cellFeatureMatrix = files.cellFeatureMatrix;
+      console.log('Cell feature matrix files loaded');
     }
 
     return result;
@@ -272,9 +230,6 @@ export async function loadXeniumData(files, metadata) {
   }
 }
 
-/**
- * Detect if a path contains Xenium data
- */
 export async function isXeniumData(path) {
   if (!window.electron) {
     return false;
@@ -288,7 +243,6 @@ export async function isXeniumData(path) {
 
     const files = result.files.map(f => f.toLowerCase());
 
-    // Check for Xenium-specific files
     return files.includes('experiment.xenium') ||
            files.includes('cells.parquet') ||
            files.includes('transcripts.parquet');

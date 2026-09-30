@@ -1,19 +1,10 @@
 import { SparseMatrixCSC } from './sparse.js';
 
-/**
- * Parse a peak name string into { chr, start, end }.
- * Handles "chr-start-end", "chr:start-end", and tab-separated formats.
- * @param {string} name
- * @returns {{ chr: string, start: number, end: number }}
- */
 export function parsePeakName(name) {
-  // colon-separated: "chr1:10000-20000"
   const mc = name.match(/^([^:]+):(\d+)-(\d+)$/);
   if (mc) return { chr: mc[1], start: parseInt(mc[2]), end: parseInt(mc[3]) };
-  // dash-separated: "chr1-10000-20000"
   const m = name.match(/^([^-]+)-(\d+)-(\d+)$/);
   if (m) return { chr: m[1], start: parseInt(m[2]), end: parseInt(m[3]) };
-  // fallback: tab-separated
   const parts = name.split('\t');
   if (parts.length >= 3) {
     return { chr: parts[0], start: parseInt(parts[1]), end: parseInt(parts[2]) };
@@ -21,16 +12,10 @@ export function parsePeakName(name) {
   return { chr: name, start: 0, end: 0 };
 }
 
-/**
- * Peak name string: chr-start-end
- */
 function peakNameStr(p) {
   return `${p.chr}-${p.start}-${p.end}`;
 }
 
-/**
- * Chromosome comparison for sorting.
- */
 function compareChr(a, b) {
   const na = chrNum(a), nb = chrNum(b);
   if (na !== nb) return na - nb;
@@ -47,29 +32,24 @@ function chrNum(chr) {
   return 1000;
 }
 
-/**
- * Create unified (non-overlapping) peak set from multiple peak arrays
- * by merging overlapping intervals across all samples.
- *
- * @param {Array<Array<{chr: string, start: number, end: number}>>} peakSets
- * @returns {Array<{chr: string, start: number, end: number}>} sorted, non-overlapping unified peaks
- */
 export function createUnifiedPeaks(peakSets) {
+  console.log('Creating unified peak set...');
   const t0 = Date.now();
 
   const all = [];
   for (let s = 0; s < peakSets.length; s++) {
+    console.log(`  Sample ${s + 1}: ${peakSets[s].length} peaks`);
     for (const p of peakSets[s]) {
       all.push({ chr: p.chr, start: p.start, end: p.end });
     }
   }
-  // Sort by chromosome then start
+  console.log(`  Total input peaks: ${all.length}`);
+
   all.sort((a, b) => {
     const c = compareChr(a.chr, b.chr);
     return c !== 0 ? c : a.start - b.start;
   });
 
-  // Merge overlapping intervals
   const merged = [];
   let cur = null;
   for (const p of all) {
@@ -84,16 +64,11 @@ export function createUnifiedPeaks(peakSets) {
   }
   if (cur) merged.push(cur);
 
+  console.log(`  Unified peak set: ${merged.length} peaks (merged ${all.length - merged.length} overlapping)`);
+  console.log(`  Peak unification completed in ${Date.now() - t0}ms`);
   return merged;
 }
 
-/**
- * Map original peaks to unified peaks by genomic overlap.
- *
- * @param {Array<{chr: string, start: number, end: number}>} originalPeaks
- * @param {Array<{chr: string, start: number, end: number}>} unifiedPeaks
- * @returns {Int32Array} mapping[i] = unified peak index for original peak i, or -1
- */
 export function mapPeaksToUnified(originalPeaks, unifiedPeaks) {
   const chrRanges = new Map();
   for (let i = 0; i < unifiedPeaks.length; i++) {
@@ -129,24 +104,17 @@ export function mapPeaksToUnified(originalPeaks, unifiedPeaks) {
     }
   }
 
+  console.log(`  Mapped ${mapped}/${originalPeaks.length} peaks to unified set (${(mapped / originalPeaks.length * 100).toFixed(1)}%)`);
   return mapping;
 }
 
-/**
- * Remap a count matrix from original peak space to unified peak space.
- *
- * @param {SparseMatrixCSC} matrix: original peaks x cells
- * @param {Int32Array} peakMapping: original peak index -> unified peak index
- * @param {number} nUnifiedPeaks
- * @returns {SparseMatrixCSC}: unified peaks x cells
- */
 export function remapCountMatrix(matrix, peakMapping, nUnifiedPeaks) {
+  console.log(`  Remapping matrix: ${matrix.nrows} -> ${nUnifiedPeaks} peaks, ${matrix.ncols} cells...`);
   const t0 = Date.now();
 
   const { ncols, colPtr, rowIdx, values } = matrix;
   const denseCol = new Float32Array(nUnifiedPeaks);
 
-  // First pass: count nnz per column
   const colNnz = new Int32Array(ncols);
   for (let j = 0; j < ncols; j++) {
     let nUsed = 0;
@@ -194,15 +162,11 @@ export function remapCountMatrix(matrix, peakMapping, nUnifiedPeaks) {
       denseCol[idx] = 0;
     }
   }
+  console.log(`  Remapped: ${ncols} cells, ${totalNnz} nnz in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
   return new SparseMatrixCSC(nUnifiedPeaks, ncols, newColPtr, newRowIdx, newValues);
 }
 
-/**
- * Horizontally concatenate sparse matrices (same number of rows).
- *
- * @param {Array<SparseMatrixCSC>} matrices
- * @returns {SparseMatrixCSC}
- */
 export function hconcatMatrices(matrices) {
   const nrows = matrices[0].nrows;
   let totalCols = 0, totalNnz = 0;
@@ -230,14 +194,10 @@ export function hconcatMatrices(matrices) {
   }
   cp[totalCols] = totalNnz;
 
+  console.log(`  Merged matrix: ${nrows} x ${totalCols}, nnz = ${totalNnz}`);
   return new SparseMatrixCSC(nrows, totalCols, cp, ri, vl);
 }
 
-/**
- * Convert unified peaks array to peak name strings.
- * @param {Array<{chr: string, start: number, end: number}>} peaks
- * @returns {string[]}
- */
 export function peaksToNames(peaks) {
   return peaks.map(peakNameStr);
 }

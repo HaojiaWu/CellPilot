@@ -1,26 +1,15 @@
-/**
- * Utility functions for loading 10x data
- */
-
-/**
- * Load 10x MatrixMarket format data
- * @param {string} folderPath: Path to folder containing matrix.mtx, features.tsv, barcodes.tsv
- * @returns {Promise<object>}: Loaded data object
- */
 export async function load10xMatrixMarket(folderPath) {
   if (!window.electron) {
     throw new Error('File system access requires Electron');
   }
 
   try {
-    // List files in directory
     const result = await window.electron.listDirectory(folderPath);
     
     if (!result.success) {
       throw new Error(result.error);
     }
 
-    // Find the matrix, features, and barcodes files
     const files = result.files;
     const matrixFile = files.find(f => 
       f.toLowerCase().includes('matrix') && 
@@ -53,11 +42,6 @@ export async function load10xMatrixMarket(folderPath) {
   }
 }
 
-/**
- * Load 10x HDF5 format data
- * @param {string} filePath: Path to .h5 file
- * @returns {Promise<object>}: Loaded data object
- */
 export async function load10xHDF5(filePath) {
   if (!window.electron) {
     throw new Error('File system access requires Electron');
@@ -82,30 +66,22 @@ export async function load10xHDF5(filePath) {
   }
 }
 
-/**
- * Detect the format of 10x data
- * @param {string} path: Path to file or folder
- * @returns {Promise<string>}: Detected format ('h5', 'mtx', or 'unknown')
- */
 export async function detect10xFormat(path) {
   if (!window.electron) {
     return 'unknown';
   }
 
   try {
-    // Check if it's a file or directory
     const isDir = await window.electron.pathExists(path);
     
     if (!isDir) {
       return 'unknown';
     }
 
-    // If it's a file
     if (path.endsWith('.h5') || path.endsWith('.hdf5')) {
       return 'h5';
     }
 
-    // If it's a directory, check for mtx files
     const result = await window.electron.listDirectory(path);
     
     if (result.success) {

@@ -3,6 +3,7 @@ import {
   getOpenAIChatReasoningParams,
   getOpenAIReasoningEffort,
   getOpenAITemperatureParams,
+  getClaudeTemperatureParams,
   getOpenAITokenParams,
   isOpenAINewChatModel,
   isOpenAIResponsesPreferredModel,
@@ -17,7 +18,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 const OPENROUTER_MODEL = 'deepseek/deepseek-v4-pro';
-const AGENT_RESULT_SUMMARY_MAX_TOKENS = 3500;
+const AGENT_RESULT_SUMMARY_MAX_TOKENS = 5000;
 
 export const AGENT_PROVIDERS = {
   chatgpt: 'ChatGPT',
@@ -31,10 +32,9 @@ function getAgentModel(provider, fallbackModel) {
   return getSelectedApiModel(provider) || fallbackModel;
 }
 
-// Opus 4.7+ (and any future numbered Opus 4 variants) deprecated the temperature param.
 function claudeTemperature(value = 0) {
-  const model = getAgentModel('claude', '');
-  return /claude-opus-4-\d/.test(model) ? {} : { temperature: value };
+  const model = getAgentModel('claude', 'claude-sonnet-4-20250514');
+  return getClaudeTemperatureParams(model, value);
 }
 
 function getGeminiModelUrl(apiKey, model) {
@@ -490,7 +490,7 @@ async function requestOpenAIPlan(apiKey, userMessage, context) {
       model,
       system: buildAgentSystemPrompt(context),
       user: userMessage,
-      maxTokens: 900,
+      maxTokens: 5000,
       json: true,
     });
   }
@@ -507,7 +507,7 @@ async function requestOpenAIPlan(apiKey, userMessage, context) {
         { role: 'user', content: userMessage },
       ],
       response_format: { type: 'json_object' },
-      ...getOpenAITokenParams(model, 900),
+      ...getOpenAITokenParams(model, 5000),
       ...getOpenAITemperatureParams(model, 0),
       ...getOpenAIChatReasoningParams(model),
     }),
@@ -537,7 +537,7 @@ async function requestClaudePlan(apiKey, userMessage, context) {
       messages: [
         { role: 'user', content: `${userMessage}\n\nReturn valid JSON only. Escape all quotes inside string values.` },
       ],
-      max_tokens: 900,
+      max_tokens: 5000,
       ...claudeTemperature(0),
     }),
   });
@@ -567,7 +567,7 @@ async function requestGeminiPlan(apiKey, userMessage, context) {
         }],
       }],
       generationConfig: {
-        maxOutputTokens: 900,
+        maxOutputTokens: 5000,
         temperature: 0,
         responseMimeType: 'application/json',
       },
@@ -597,7 +597,7 @@ async function requestGroqPlan(apiKey, userMessage, context) {
         { role: 'user', content: `${userMessage}\n\nReturn valid JSON only.` },
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 900,
+      max_tokens: 5000,
       temperature: 0,
     }),
   });
@@ -616,7 +616,7 @@ async function requestOpenRouterPlan(apiKey, userMessage, context) {
     model: getAgentModel('openrouter', OPENROUTER_MODEL),
     system: buildAgentSystemPrompt(context),
     user: `${userMessage}\n\nReturn valid JSON only.`,
-    maxTokens: 900,
+    maxTokens: 5000,
     temperature: 0,
     json: true,
   });
@@ -629,7 +629,7 @@ async function repairOpenAIPlan(apiKey, rawText, parseError) {
       model,
       system: 'You repair invalid JSON. Return valid JSON only.',
       user: buildJsonRepairPrompt(rawText, parseError),
-      maxTokens: 900,
+      maxTokens: 5000,
       json: true,
     });
   }
@@ -646,7 +646,7 @@ async function repairOpenAIPlan(apiKey, rawText, parseError) {
         { role: 'user', content: buildJsonRepairPrompt(rawText, parseError) },
       ],
       response_format: { type: 'json_object' },
-      ...getOpenAITokenParams(model, 900),
+      ...getOpenAITokenParams(model, 5000),
       ...getOpenAITemperatureParams(model, 0),
       ...getOpenAIChatReasoningParams(model),
     }),
@@ -676,7 +676,7 @@ async function repairClaudePlan(apiKey, rawText, parseError) {
       messages: [
         { role: 'user', content: buildJsonRepairPrompt(rawText, parseError) },
       ],
-      max_tokens: 900,
+      max_tokens: 5000,
       ...claudeTemperature(0),
     }),
   });
@@ -704,7 +704,7 @@ async function repairGeminiPlan(apiKey, rawText, parseError) {
         parts: [{ text: buildJsonRepairPrompt(rawText, parseError) }],
       }],
       generationConfig: {
-        maxOutputTokens: 900,
+        maxOutputTokens: 5000,
         temperature: 0,
         responseMimeType: 'application/json',
       },
@@ -734,7 +734,7 @@ async function repairGroqPlan(apiKey, rawText, parseError) {
         { role: 'user', content: buildJsonRepairPrompt(rawText, parseError) },
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 900,
+      max_tokens: 5000,
       temperature: 0,
     }),
   });
@@ -753,7 +753,7 @@ async function repairOpenRouterPlan(apiKey, rawText, parseError) {
     model: getAgentModel('openrouter', OPENROUTER_MODEL),
     system: 'You repair invalid JSON. Return valid JSON only.',
     user: buildJsonRepairPrompt(rawText, parseError),
-    maxTokens: 900,
+    maxTokens: 5000,
     temperature: 0,
     json: true,
   });
@@ -946,7 +946,7 @@ async function requestOpenAIAnnotation(apiKey, clusterData, context) {
       model,
       system: 'You are a cautious single-cell biology annotation assistant.',
       user: buildClusterAnnotationPrompt(clusterData, context),
-      maxTokens: 700,
+      maxTokens: 5000,
       json: true,
     });
     return normalizeClusterAnnotation(text);
@@ -964,7 +964,7 @@ async function requestOpenAIAnnotation(apiKey, clusterData, context) {
         { role: 'user', content: buildClusterAnnotationPrompt(clusterData, context) },
       ],
       response_format: { type: 'json_object' },
-      ...getOpenAITokenParams(model, 700),
+      ...getOpenAITokenParams(model, 5000),
       ...getOpenAITemperatureParams(model, 0.2),
       ...getOpenAIChatReasoningParams(model),
     }),
@@ -994,7 +994,7 @@ async function requestClaudeAnnotation(apiKey, clusterData, context) {
       messages: [
         { role: 'user', content: buildClusterAnnotationPrompt(clusterData, context) },
       ],
-      max_tokens: 700,
+      max_tokens: 5000,
       ...claudeTemperature(0.2),
     }),
   });
@@ -1024,7 +1024,7 @@ async function requestGeminiAnnotation(apiKey, clusterData, context) {
         parts: [{ text: buildClusterAnnotationPrompt(clusterData, context) }],
       }],
       generationConfig: {
-        maxOutputTokens: 1200,
+        maxOutputTokens: 5000,
         temperature: 0.2,
         responseMimeType: 'application/json',
       },
@@ -1054,7 +1054,7 @@ async function requestGroqAnnotation(apiKey, clusterData, context) {
         { role: 'user', content: buildClusterAnnotationPrompt(clusterData, context) },
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 1200,
+      max_tokens: 5000,
       temperature: 0.2,
     }),
   });
@@ -1073,7 +1073,7 @@ async function requestOpenRouterAnnotation(apiKey, clusterData, context) {
     model: getAgentModel('openrouter', OPENROUTER_MODEL),
     system: 'You are a cautious single-cell biology annotation assistant. Return valid JSON only.',
     user: buildClusterAnnotationPrompt(clusterData, context),
-    maxTokens: 1200,
+    maxTokens: 5000,
     temperature: 0.2,
     json: true,
   });
@@ -1104,8 +1104,6 @@ export async function generateClusterAnnotation(provider, clusterData, context =
   }
   throw new Error(`Unknown annotation provider: ${provider}`);
 }
-
-// Bulk annotation (all clusters in one LLM call)
 
 function buildBulkAnnotationPrompt(allClustersData, context = {}) {
   const clusterLines = allClustersData.map(c => {
@@ -1177,7 +1175,6 @@ function extractBalancedArray(text) {
 }
 
 function salvageBulkAnnotation(text) {
-  // Extract every complete {...} object from a truncated JSON array
   const items = [];
   let depth = 0, start = -1, inString = false, escaped = false;
   for (let i = 0; i < text.length; i++) {
@@ -1190,7 +1187,7 @@ function salvageBulkAnnotation(text) {
     if (c === '}') {
       depth--;
       if (depth === 0 && start >= 0) {
-        try { items.push(JSON.parse(text.slice(start, i + 1))); } catch { /* skip malformed */ }
+        try { items.push(JSON.parse(text.slice(start, i + 1))); } catch {  }
         start = -1;
       }
     }
@@ -1532,7 +1529,7 @@ Rules:
 - Do not invent a dataset result.`;
 }
 
-async function requestCellTypeMarkerJson(provider, apiKey, prompt, maxTokens = 700) {
+async function requestCellTypeMarkerJson(provider, apiKey, prompt, maxTokens = 5000) {
   if (provider === 'chatgpt') {
     const model = getAgentModel('chatgpt', 'gpt-5-mini');
     if (isOpenAIResponsesPreferredModel(model)) {
@@ -1674,7 +1671,7 @@ async function normalizeCellTypeMarkersWithRepair(provider, apiKey, rawText, fal
       provider,
       apiKey,
       buildCellTypeMarkerRepairPrompt(rawText, parseError, fallbackCellType),
-      700
+      5000
     );
     return normalizeCellTypeMarkers(repairedText, fallbackCellType);
   }
@@ -1685,7 +1682,7 @@ async function reviewCellTypeMarkers(provider, apiKey, cellType, context, marker
     provider,
     apiKey,
     buildCellTypeMarkerReviewPrompt(cellType, context, markerInfo),
-    700
+    5000
   );
   const reviewed = await normalizeCellTypeMarkersWithRepair(provider, apiKey, reviewedText, markerInfo.cellType || cellType);
   const excluded = Array.from(new Set([
@@ -1709,7 +1706,7 @@ async function requestOpenAICellTypeMarkers(apiKey, cellType, context) {
       model,
       system: 'You choose cautious canonical marker genes for single-cell analysis. Return valid JSON only.',
       user: buildCellTypeMarkerPrompt(cellType, context),
-      maxTokens: 600,
+      maxTokens: 5000,
       json: true,
     });
     return normalizeCellTypeMarkersWithRepair('chatgpt', apiKey, text, cellType);
@@ -1727,7 +1724,7 @@ async function requestOpenAICellTypeMarkers(apiKey, cellType, context) {
         { role: 'user', content: buildCellTypeMarkerPrompt(cellType, context) },
       ],
       response_format: { type: 'json_object' },
-      ...getOpenAITokenParams(model, 600),
+      ...getOpenAITokenParams(model, 5000),
       ...getOpenAITemperatureParams(model, 0),
       ...getOpenAIChatReasoningParams(model),
     }),
@@ -1757,7 +1754,7 @@ async function requestClaudeCellTypeMarkers(apiKey, cellType, context) {
       messages: [
         { role: 'user', content: buildCellTypeMarkerPrompt(cellType, context) },
       ],
-      max_tokens: 600,
+      max_tokens: 5000,
       ...claudeTemperature(0),
     }),
   });
@@ -1787,7 +1784,7 @@ async function requestGeminiCellTypeMarkers(apiKey, cellType, context) {
         parts: [{ text: buildCellTypeMarkerPrompt(cellType, context) }],
       }],
       generationConfig: {
-        maxOutputTokens: 600,
+        maxOutputTokens: 5000,
         temperature: 0,
         responseMimeType: 'application/json',
       },
@@ -1817,7 +1814,7 @@ async function requestGroqCellTypeMarkers(apiKey, cellType, context) {
         { role: 'user', content: buildCellTypeMarkerPrompt(cellType, context) },
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 600,
+      max_tokens: 5000,
       temperature: 0,
     }),
   });
@@ -1836,7 +1833,7 @@ async function requestOpenRouterCellTypeMarkers(apiKey, cellType, context) {
     model: getAgentModel('openrouter', OPENROUTER_MODEL),
     system: 'You choose cautious canonical marker genes for single-cell analysis. Return valid JSON only.',
     user: buildCellTypeMarkerPrompt(cellType, context),
-    maxTokens: 600,
+    maxTokens: 5000,
     temperature: 0,
     json: true,
   });

@@ -50,7 +50,6 @@
   color: #333;
 }
 
-/* Fixed header: chromosome, PEAKS track, Gene track, always visible, never scrolls */
 .coverage-plot-header-tracks {
   width: 100%;
   min-width: 600px;
@@ -62,8 +61,6 @@
   overflow: hidden;
 }
 
-/* Only this part scrolls (cluster coverage tracks); header stays fixed */
-/* Explicit height so container never grows to fit content, scrollbar appears when many clusters */
 .coverage-plot-container {
   width: 100%;
   min-width: 600px;
@@ -79,7 +76,6 @@
   scrollbar-color: #adb5bd #f1f3f5;
 }
 
-/* Visible scrollbars (vertical for cluster tracks, horizontal if plot is wide) */
 .coverage-plot-container::-webkit-scrollbar {
   width: 12px;
   height: 12px;

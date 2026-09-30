@@ -1,23 +1,11 @@
-/**
- * Randomized truncated SVD (LSI) for scATAC with WASM acceleration and pure-JS fallback.
- * Uses: WASM SIMD for QR, dense matmul, Gram matrix, and optional sparse-dense multiply;
- * pure JS fallback if WASM fails.
- */
-
 import { EigenvalueDecomposition, Matrix } from 'ml-matrix';
 import * as wasmOps from './wasmOps.js';
 
-/**
- * Box-Muller transform for normal samples. Uses optional RNG for reproducibility.
- * @param {() => number} [randomFn]: optional PRNG returning [0,1); defaults to Math.random
- */
 function randn(randomFn = Math.random) {
   const u1 = randomFn();
   const u2 = randomFn();
   return Math.sqrt(-2 * Math.log(u1 || 1e-300)) * Math.cos(2 * Math.PI * u2);
 }
-
-/* ---------- Pure-JS fallbacks ---------- */
 
 function qrJS(A, m, n) {
   const Q = new Float64Array(A);
@@ -68,38 +56,6 @@ function gramMatrixJS(C, nRows, l) {
   return CTC;
 }
 
-/**
- * Randomized truncated SVD for sparse matrices (features x cells).
- * Uses WASM for QR, dense matmul, Gram, and optional sparse-dense multiply; falls back to pure JS.
- *
- * @param {import('./sparse.js').SparseMatrixCSC} tfidf: features x cells sparse matrix
- * @param {number} [nComponents=50]
- * @param {number} [nOversamples=10]
- * @param {number} [nIter=2]
- * @param {boolean} [scaleEmbeddings=true]
- * @param {(msg: string) => void} [statusCallback]
- * @param {() => number} [randomFn]: optional PRNG for reproducible SVD (same dataset → same LSI)
- * @returns {Promise<{ cellEmbeddings: Float64Array, singularValues: Float64Array, sdev: Float64Array, nCells: number, nComponents: number }>}
- */
-/**
- * Randomized PCA for scRNA-seq (log-normalized sparse data).
- * Matches bakana/scran.js convention: each gene is centered (subtract mean)
- * but NOT scaled by SD.  The centering is applied implicitly during the
- * randomized SVD so the sparse matrix is never densified.
- *
- * For centered matrix  Â = A: μ·1ᵀ  (genes × cells, μ = row means):
- *   Âᵀ·B  =  Aᵀ·B  −  1·(μᵀ·B)      (transpose multiply)
- *   Â·B   =  A·B   −  μ·(1ᵀ·B)       (forward multiply)
- *
- * @param {import('./sparse.js').SparseMatrixCSC} matrix: features × cells log-normalised sparse matrix
- * @param {number} [nComponents=50]
- * @param {number} [nOversamples=20]
- * @param {number} [nIter=5]
- * @param {boolean} [scaleEmbeddings=true]
- * @param {(msg: string) => void} [statusCallback]
- * @param {() => number} [randomFn]
- * @returns {Promise<{ cellEmbeddings: Float64Array, singularValues: Float64Array, sdev: Float64Array, nCells: number, nComponents: number }>}
- */
 export async function runPCA(matrix, nComponents = 50, nOversamples = 20, nIter = 5, scaleEmbeddings = true, statusCallback = null, randomFn = null) {
   const post = (msg) => { if (statusCallback) statusCallback(msg); };
   const rng = randomFn || Math.random;
@@ -111,7 +67,6 @@ export async function runPCA(matrix, nComponents = 50, nOversamples = 20, nIter 
 
   post(`Running PCA (${k} components)...`);
 
-  // Compute row (gene) means from sparse matrix for centering (matching bakana/scran.js)
   const geneMeans = new Float64Array(nFeatures);
   for (let c = 0; c < nCells; c++) {
     const lo = matrix.colPtr[c];
@@ -143,9 +98,6 @@ export async function runPCA(matrix, nComponents = 50, nOversamples = 20, nIter 
     }
   };
 
-  // Implicit centering wrappers for Â = A: μ·1ᵀ:
-  //   transposeMultiply(B): Âᵀ B = Aᵀ B: 1·(μᵀ · B)
-  //   B is nFeatures × l, result is nCells × l
   const transposeMultiply = async (B) => {
     let AtB;
     if (sparseHandle) {
@@ -160,8 +112,7 @@ export async function runPCA(matrix, nComponents = 50, nOversamples = 20, nIter 
     } else {
       AtB = matrix.transposeMultiplyDense(B, l);
     }
-    // Subtract centering correction: result -= 1 · (μᵀ · B)
-    const muB = new Float64Array(l); // μᵀ · B (1 × l)
+    const muB = new Float64Array(l);
     for (let g = 0; g < nFeatures; g++) {
       const m = geneMeans[g];
       if (m === 0) continue;
@@ -177,8 +128,6 @@ export async function runPCA(matrix, nComponents = 50, nOversamples = 20, nIter 
     return AtB;
   };
 
-  //   forwardMultiply(B): Â B = A B: μ·(1ᵀ B)
-  //   B is nCells × l, result is nFeatures × l
   const forwardMultiply = async (B) => {
     let AB;
     if (sparseHandle) {
@@ -193,8 +142,7 @@ export async function runPCA(matrix, nComponents = 50, nOversamples = 20, nIter 
     } else {
       AB = matrix.multiplyDense(B, l);
     }
-    // Subtract centering correction: row g of result -= μ[g] · colSums(B)
-    const colSums = new Float64Array(l); // 1ᵀ · B  (1 × l)
+    const colSums = new Float64Array(l);
     for (let c = 0; c < nCells; c++) {
       for (let j = 0; j < l; j++) {
         colSums[j] += B[c * l + j];
@@ -219,7 +167,6 @@ export async function runPCA(matrix, nComponents = 50, nOversamples = 20, nIter 
     return qrJS(A, m, n);
   };
 
-  // Randomized range finder with power iterations
   const Omega = new Float64Array(nFeatures * l);
   for (let i = 0; i < Omega.length; i++) Omega[i] = randn(rng);
 
@@ -327,16 +274,13 @@ export async function randomizedSVD(tfidf, nComponents = 50, nOversamples = 10, 
   if (useWasm) post('Using WASM SIMD for QR, matmul, and sparse multiply.');
   else post('Using pure JavaScript (WASM unavailable).');
 
-  // Separate WASM tracking for sparse multiply (large, can OOM) vs dense ops (small, safe).
-  // Inspired by kana's pattern: WASM for small dense kernels; JS fallback for large sparse ops.
-  let sparseWasm = useWasm; // tracks if WASM sparse multiply is still available
+  let sparseWasm = useWasm;
   let sparseHandle = null;
   if (sparseWasm) {
     try {
       sparseHandle = wasmOps.loadSparse(tfidf.colPtr, tfidf.rowIdx, tfidf.values, nFeatures, nCells);
       post(`Sparse matrix loaded into WASM (${(tfidf.nnz * 12 / 1e6).toFixed(0)} MB).`);
     } catch (e) {
-      // Matrix too large for WASM heap, use pure-JS sparse multiply; QR/gram stay on WASM.
       console.warn('SVD: WASM loadSparse OOM, sparse multiply will use pure JS:', e.message);
       sparseWasm = false;
       sparseHandle = null;
@@ -360,7 +304,6 @@ export async function randomizedSVD(tfidf, nComponents = 50, nOversamples = 10, 
         freeHandle();
       }
     }
-    // Pure-JS sparse×dense: works directly on Float32/Float64 values without WASM copy.
     return Promise.resolve(tfidf.transposeMultiplyDense(B, l));
   };
 
@@ -377,8 +320,6 @@ export async function randomizedSVD(tfidf, nComponents = 50, nOversamples = 10, 
     return Promise.resolve(tfidf.multiplyDense(B, l));
   };
 
-  // QR and gramMatrix operate on small dense matrices (nCells×l and nFeatures×l):
-  // they never trigger OOM, so always try WASM for these.
   const doQR = (A, m, n) => {
     if (useWasm) {
       try { return wasmOps.qr(A, m, n); } catch (e) {

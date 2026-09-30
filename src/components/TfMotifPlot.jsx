@@ -1,17 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import * as d3 from 'd3';
 
-/**
- * Horizontal bar chart ranking enriched TF motifs using RENIN-inspired scoring.
- * Props:
- *   cluster        string   cluster label
- *   results        Array    [{tfName, negLogP, foldEnrichment, pvalueAdj, queryHits,
- *                             reninScore, meanExprInCluster}]
- *   topMarkers     Array    top marker gene names used as input
- *   nQueryPeaks    number
- *   nBgPeaks       number
- *   genome         string
- */
 export default function TfMotifPlot({
   cluster,
   results = [],
@@ -23,7 +12,6 @@ export default function TfMotifPlot({
   const svgRef = useRef(null);
   const wrapRef = useRef(null);
 
-  // Detect whether RENIN scores are available (any non-zero reninScore)
   const hasRenin = results.some(r => r.reninScore != null && r.reninScore > 0);
 
   useEffect(() => {
@@ -33,7 +21,6 @@ export default function TfMotifPlot({
 
     d3.select(svgEl).selectAll('*').remove();
 
-    // Sort by RENIN score if available, otherwise by fold enrichment
     const top = results
       .slice()
       .sort((a, b) => {
@@ -53,7 +40,6 @@ export default function TfMotifPlot({
     d3.select(svgEl).attr('width', w).attr('height', totalH);
     const g = d3.select(svgEl).append('g').attr('transform', `translate(${margin.left},${margin.top})`);
 
-    // X scale: RENIN score (or fold enrichment as fallback)
     const xMax = hasRenin
       ? (d3.max(top, d => d.reninScore ?? 0) || 1)
       : (d3.max(top, d => Math.min(d.foldEnrichment, 50)) || 5);
@@ -61,7 +47,6 @@ export default function TfMotifPlot({
 
     const BAR_COLOR = '#4a90c4';
 
-    // Bars
     top.forEach((d, i) => {
       const y = i * (barH + barGap);
       const barVal = hasRenin ? (d.reninScore ?? 0) : Math.min(d.foldEnrichment, xMax);
@@ -73,7 +58,6 @@ export default function TfMotifPlot({
         .attr('fill', BAR_COLOR)
         .attr('rx', 2);
 
-      // TF name label (left)
       g.append('text')
         .attr('x', -6).attr('y', y + barH / 2)
         .attr('text-anchor', 'end').attr('dominant-baseline', 'middle')
@@ -81,7 +65,6 @@ export default function TfMotifPlot({
         .attr('font-weight', '400')
         .text(d.tfName);
 
-      // Right-side annotation
       let annotText;
       if (hasRenin) {
         const feStr = d.foldEnrichment < 90 ? d.foldEnrichment.toFixed(1) + '×' : '>90×';
@@ -99,7 +82,6 @@ export default function TfMotifPlot({
         .text(annotText);
     });
 
-    // X axis
     const xAxis = d3.axisBottom(xScale).ticks(5).tickFormat(d3.format('.2g'));
     g.append('g')
       .attr('transform', `translate(0,${innerH + 4})`)
@@ -110,7 +92,6 @@ export default function TfMotifPlot({
       .attr('x', innerW / 2).attr('y', innerH + 30)
       .attr('text-anchor', 'middle').attr('font-size', '10px').attr('fill', '#555')
       .text(hasRenin ? 'RENIN score (expr × fold enrichment)' : 'Fold enrichment');
-
 
   }, [results, cluster, hasRenin]);
 
@@ -127,7 +108,7 @@ export default function TfMotifPlot({
   return (
     <div ref={wrapRef} style={{ width: '100%', fontFamily: 'sans-serif', padding: '4px 8px' }}>
       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2, color: '#111' }}>
-        TF Prioritization: Cluster {cluster}
+        TF Prioritization, Cluster {cluster}
         {genome && <span style={{ fontWeight: 400, color: '#666', marginLeft: 8, fontSize: 11 }}>{genome}</span>}
       </div>
       <div style={{ fontSize: 11, color: '#555', marginBottom: 6 }}>

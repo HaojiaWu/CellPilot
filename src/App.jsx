@@ -13,10 +13,6 @@ import { Toaster, Position, Icon, Tooltip } from '@blueprintjs/core';
 import { buildSpatialIndex } from './utils/spatialIndex';
 import { downloadModel, isModelLoaded, getCurrentModel } from './llm/webllmService';
 
-// Patch window.Worker so ASAR paths are transparently redirected to the
-// physically-unpacked copy. Chromium's Worker fetch bypasses Electron's ASAR
-// protocol interceptor, so file:///...app.asar/... URLs fail silently.
-// This must run at module load time, before any Worker is constructed.
 if (typeof window !== 'undefined' && typeof Worker !== 'undefined' && !window.__electronWorkerPatched) {
   const _OriginalWorker = window.Worker;
   window.Worker = function ElectronAsarWorker(url, options) {
@@ -104,10 +100,16 @@ const getTutorialCommands = (dataInfo) => {
     ['xenium-integration', 'merfish-integration', 'cosmx-integration'].includes(modality);
 
   let moduleCommands = [];
+  let lastCommands = [];
+  const banksyCommands = [
+    'Run BANKSY region segmentation',
+    'Show regions',
+    'What cell types are in region 1?',
+    'Rename region 1 to cortex',
+  ];
 
   if (modality === 'multiome') {
     moduleCommands = [
-      'Run WNN analysis',
       'Coverage plot MS4A1',
       'Link peaks to genes',
       'Show peak-gene links for MS4A1',
@@ -157,20 +159,14 @@ const getTutorialCommands = (dataInfo) => {
         'Dotplot NPHS2 PODXL',
         'List 10 genes',
         'List cells',
-        'Run BANKSY region segmentation',
-        'Show regions',
-        'What cell types are in region 1?',
-        'Rename region 1 to cortex',
         'Find markers for the selected spatial region',
         'Run cell-cell interaction analysis across selected regions',
+        ...banksyCommands,
       ];
       return Array.from(new Set(visiumHdCommands)).slice(0, 15);
     }
+    lastCommands = banksyCommands;
     moduleCommands = [
-      'Run BANKSY region segmentation',
-      'Show regions',
-      'What cell types are in region 1?',
-      'Rename region 1 to cortex',
       'Find markers for the selected spatial region',
       'Run cell-cell interaction analysis across selected regions',
     ];
@@ -179,8 +175,12 @@ const getTutorialCommands = (dataInfo) => {
     }
   }
 
+  if (modality === 'multiome') {
+    const commands = Array.from(new Set([...moduleCommands, ...commonCommands]));
+    return [...commands.slice(0, 15), 'Run WNN analysis'];
+  }
   const commands = Array.from(new Set([...moduleCommands, ...commonCommands]));
-  return commands.slice(0, 15);
+  return [...commands.slice(0, 15 - lastCommands.length), ...lastCommands];
 };
 
 function App() {
@@ -192,8 +192,9 @@ function App() {
   const [artifacts, setArtifacts] = useState([]);
   const [lastActiveArtifactId, setLastActiveArtifactId] = useState(null);
   const [worker, setWorker] = useState(null);
+  const [geneNames, setGeneNames] = useState(null);
+  const geneNamesReadyRef = useRef(false);
   const [autoClusterIssued, setAutoClusterIssued] = useState(false);
-  // Previous results dialog: non-null when a saved cellpilot_results.json was found on load
   const [previousResultsDialog, setPreviousResultsDialog] = useState(null);
   const saveResultsDebounceRef = useRef(null);
   const toasterRef = useRef(null);
@@ -230,42 +231,29 @@ function App() {
   const [regionPlot, setRegionPlot] = useState(null);
   const [regionLabelMap, setRegionLabelMap] = useState({});
   const [spatialSelection, setSpatialSelection] = useState(null);
-  // Integration/atac-integration: when true, per-sample cards show UMAP by cluster only (no gene overlay from last plot)
   const [integrationShowClustersOnly, setIntegrationShowClustersOnly] = useState(false);
-  // Multiome: separate ATAC cluster/UMAP and active plot states
   const [atacClusterPlot, setAtacClusterPlot] = useState(null);
   const [atacActivePlot, setAtacActivePlot] = useState(null);
-  // scATAC: Peak View content (gene/coverage plot); kept when user says "plot clusters" so UMAP View updates only
   const [peakViewPlot, setPeakViewPlot] = useState(null);
   const [atacClusterLabelMap, setAtacClusterLabelMap] = useState({});
   const [atacClusterColorOverrides, setAtacClusterColorOverrides] = useState({});
   const [atacSelectedClusters, setAtacSelectedClusters] = useState(new Set());
   const [selectedClusters, setSelectedClusters] = useState(new Set());
-  // Multiome: highlight cells from this RNA cluster on the ATAC view (same cells, red highlight)
   const [rnaClusterHighlightOnAtac, setRnaClusterHighlightOnAtac] = useState(null);
-  // Multiome: highlight cells from this ATAC cluster on the RNA view (same cells, red highlight)
   const [atacClusterHighlightOnRna, setAtacClusterHighlightOnRna] = useState(null);
-  // Multiome: legend-click selection – same cells highlighted on both RNA and ATAC in cluster colors; { modality, clusterIds: Set, clusterIdToColor: { [id]: [r,g,b,a] } }
   const [legendHighlightSelection, setLegendHighlightSelection] = useState(null);
-  // WNN 3-panel mode: individual RNA/ATAC UMAPs + integrated view
   const [wnnRnaPlot, setWnnRnaPlot] = useState(null);
   const [wnnAtacPlot, setWnnAtacPlot] = useState(null);
   const [wnnActive, setWnnActive] = useState(false);
   const [wnnClusterLabelMap, setWnnClusterLabelMap] = useState({});
   const [wnnClusterColorOverrides, setWnnClusterColorOverrides] = useState({});
-  // WNN cross-panel highlight: { sourceClusters: Array, highlightClusterId: string, sourceModality: 'wnn-rna'|'wnn-atac'|'wnn-integrated' } | null
   const [wnnCrossHighlight, setWnnCrossHighlight] = useState(null);
-  // Cluster color overrides: { [clusterId: string]: '#rrggbb' }
   const [clusterColorOverrides, setClusterColorOverrides] = useState({});
-  // Cluster label map: { [originalClusterId: string]: 'newLabel' } for renaming clusters
   const [clusterLabelMap, setClusterLabelMap] = useState({});
-  // Agent annotation table from the most recent "annotate all clusters" run.
   const [agentAnnotationRows, setAgentAnnotationRows] = useState([]);
-  // Track when worker is processing an analysis request
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  // Realtime status message from worker (e.g. scATAC loading steps), shown in chat input when loading
+  const [isNormalizing, setIsNormalizing] = useState(false);
   const [workerStatusMessage, setWorkerStatusMessage] = useState('');
-  // Auto-load embedding model on app start
   const [autoModelLoadAttempted, setAutoModelLoadAttempted] = useState(false);
   const [layout, setLayout] = useState({
     topHeight: 60,
@@ -275,7 +263,6 @@ function App() {
   });
   const dataInfoRef = useRef(null);
   const dataPathRef = useRef(null);
-  // Refs mirroring state for use in async callbacks/saves
   const clusterLabelMapRef = useRef({});
   const clusterColorOverridesRef = useRef({});
   const atacClusterLabelMapRef = useRef({});
@@ -283,23 +270,15 @@ function App() {
   const wnnActiveRef = useRef(false);
   const clusterPlotRef = useRef(null);
   const regionLabelMapRef = useRef({});
-  // Stores latest UMAP/cluster data for auto-save (set after analysis completes)
   const pendingSaveDataRef = useRef(null);
-  // Hash of last saved payload to avoid redundant disk writes when save is triggered multiple times
   const lastSavedPayloadHashRef = useRef(null);
-  // When user says "coverage plot [gene]", show Peak View (CoveragePlot) as main content in ATAC view
   const pendingShowPeakViewRef = useRef(false);
-  // Multiome gene plot: timeout to re-enable chat if ATAC message never arrives (e.g. no peaks for gene)
   const multiomeGenePlotTimeoutRef = useRef(null);
-  // Set when we start a multiome plot_gene_expression so RNA handler knows to wait for ATAC
   const pendingMultiomeGenePlotRef = useRef(false);
-  // Cache fragment-based coverage by region (key: fragmentsPath|chrom|start|end) so repeat same-gene is instant
+  const pendingFragmentQueriesRef = useRef(0);
   const atacFragmentCoverageCacheRef = useRef(new Map());
-  /** Sync horizontal/vertical scroll across atac-integration per-sample coverage plots. */
   const coverageScrollSyncRef = useRef({ containers: {}, handlers: {}, syncing: false });
 
-  // Multiome / integration: handle legend cluster click – sync highlight on both views in cluster colors; Ctrl+click = multi-select
-  // In integration mode, when a label is merged (e.g. PT = clusters 0,1,3,5), clicking that label highlights all cluster IDs with that label
   const handleLegendClusterClick = useCallback((modality, clusterId, colorRgba, ctrlKey) => {
     const id = String(clusterId);
     const color = Array.isArray(colorRgba) ? colorRgba : [102, 126, 234, 255];
@@ -310,7 +289,6 @@ function App() {
         nextIds.clear();
         Object.keys(nextColors).forEach((k) => delete nextColors[k]);
       }
-      // Resolve all cluster IDs that share the same label (merged/renamed clusters), applies to all modalities
       const labelMapForModality = modality === 'atac' ? atacClusterLabelMap : clusterLabelMap;
       const idsToToggle = labelMapForModality
         ? (() => {
@@ -404,15 +382,14 @@ function App() {
     });
   }, []);
 
-  // WNN 3-panel cross-highlight: clicking a cluster in any panel highlights the same cells in all panels
   const wnnHighlightMask = useMemo(() => {
     if (!wnnCrossHighlight) return null;
-    const { sourceClusters, highlightClusterId } = wnnCrossHighlight;
+    const { sourceClusters, highlightClusterId, highlightClusterIds } = wnnCrossHighlight;
     if (!Array.isArray(sourceClusters)) return null;
-    return sourceClusters.map(c => String(c) === String(highlightClusterId));
+    const ids = new Set((highlightClusterIds || [highlightClusterId]).map(String));
+    return sourceClusters.map(c => ids.has(String(c)));
   }, [wnnCrossHighlight]);
 
-  // WNN legend click: called by onLegendClusterClick in each panel with its viewModality
   const handleWnnLegendClick = useCallback((viewModality, clusterId) => {
     const sourceClusters =
       viewModality === 'wnn-rna' ? wnnRnaPlot?.data?.clusters :
@@ -422,7 +399,7 @@ function App() {
     const id = String(clusterId);
     setWnnCrossHighlight((prev) => {
       if (prev && prev.sourceModality === viewModality && prev.highlightClusterId === id) {
-        return null; // toggle off when clicking same cluster again
+        return null;
       }
       return { sourceClusters, highlightClusterId: id, sourceModality: viewModality };
     });
@@ -577,7 +554,6 @@ function App() {
     atacFragmentCoverageCacheRef.current.clear();
   }, [dataPath]);
 
-  // Sync cluster state to refs so async save callbacks always read latest values
   useEffect(() => { clusterLabelMapRef.current = clusterLabelMap; }, [clusterLabelMap]);
   useEffect(() => { clusterColorOverridesRef.current = clusterColorOverrides; }, [clusterColorOverrides]);
   useEffect(() => { atacClusterLabelMapRef.current = atacClusterLabelMap; }, [atacClusterLabelMap]);
@@ -586,19 +562,18 @@ function App() {
   useEffect(() => { regionLabelMapRef.current = regionLabelMap; }, [regionLabelMap]);
   useEffect(() => { wnnActiveRef.current = wnnActive; }, [wnnActive]);
 
-  // Execute the actual save to cellpilot_results.json (skips write if payload unchanged to avoid redundant writes)
   const doSaveResults = useCallback(async () => {
     const savePath = dataPathRef.current;
-    // For H5/HDF5 files the save path is the file itself; write next to the file instead
     const saveFolder = /\.(h5|hdf5)$/i.test(savePath || '')
       ? savePath.substring(0, Math.max(savePath.lastIndexOf('/'), savePath.lastIndexOf('\\')))
       : savePath;
     const pending = pendingSaveDataRef.current;
-    // If regionData exists but umapData is missing, fall back to clusterPlot data
     if (pending && !pending.umapData && pending.regionData && clusterPlotRef.current?.data) {
       pending.umapData = clusterPlotRef.current.data;
+      console.log('doSaveResults: populated umapData from clusterPlotRef fallback');
     }
     if (!savePath || !pending?.umapData?.coordinates || !window.electron?.saveCellpilotResults) {
+      console.log('CellPilot save skipped:', { savePath: !!savePath, hasUmapData: !!pending?.umapData?.coordinates, hasRegionData: !!pending?.regionData, hasElectron: !!window.electron?.saveCellpilotResults });
       return;
     }
     const results = {
@@ -633,7 +608,6 @@ function App() {
         results.wnnAtacNClusters = pending.wnnAtacUmapData.nClusters;
       }
     }
-    // BANKSY region segmentation data (independent from transcriptomic clusters)
     if (pending.regionData?.regionClusters?.length > 0) {
       results.regionClusters = pending.regionData.regionClusters;
       results.regionCoordinates = pending.regionData.coordinates;
@@ -645,15 +619,12 @@ function App() {
         results.regionLabelMap = rlm;
       }
     }
-    // Include SpaGE-imputed gene arrays (plotting-only, never used in reanalysis)
     if (pending.imputedGenes && Object.keys(pending.imputedGenes).length > 0) {
       results.imputedGenes = pending.imputedGenes;
     }
-    // Persist peak-gene links so the expensive LinkPeaks analysis is not repeated on reload
     if (Array.isArray(pending.peakGeneLinks) && pending.peakGeneLinks.length > 0) {
       results.peakGeneLinks = pending.peakGeneLinks;
     }
-    // Persist filtered cell barcodes for barcode-to-cluster mapping in standalone scripts
     if (Array.isArray(pending.cellBarcodes) && pending.cellBarcodes.length > 0) {
       results.cellBarcodes = pending.cellBarcodes;
     }
@@ -665,12 +636,10 @@ function App() {
         pending.cellBarcodes || pending.umapData.cellBarcodes || []
       );
     }
-    // Persist spatial coordinates so "Load previous" can restore the exact same tissue view order.
     const savedSpatial = pending.umapData?.spatialCoordinates || dataInfoRef.current?.spatialCoordinates;
     if (Array.isArray(savedSpatial) && savedSpatial.length > 0) {
       results.spatialCoordinates = savedSpatial;
     }
-    // Skip write if content unchanged (avoids repeated saves when multiple triggers fire)
     const payloadHash = JSON.stringify({
       n: results.nCells,
       c: results.nClusters,
@@ -689,24 +658,23 @@ function App() {
     try {
       await window.electron.saveCellpilotResults(saveFolder, results);
       lastSavedPayloadHashRef.current = payloadHash;
+      console.log('CellPilot: results saved to', savePath, '| wnn:', !!results.wnnActive, '| nCells:', results.nCells, '| nClusters:', results.nClusters,
+        '| hasRegionClusters:', !!results.regionClusters, '| regionNclusters:', results.regionNclusters || 0, '| keys:', Object.keys(results).join(','));
     } catch (e) {
       console.warn('CellPilot: failed to save results:', e);
     }
   }, [buildAgentCellAnnotations]);
 
-  // Debounced save scheduler (coalesces rapid triggers into one save)
   const scheduleResultsSave = useCallback(() => {
     if (saveResultsDebounceRef.current) clearTimeout(saveResultsDebounceRef.current);
     saveResultsDebounceRef.current = setTimeout(doSaveResults, 2500);
   }, [doSaveResults]);
 
-  // Auto-save when cluster/region labels or colors change (user renamed clusters/regions etc.)
   useEffect(() => {
     if (pendingSaveDataRef.current?.umapData || pendingSaveDataRef.current?.regionData) scheduleResultsSave();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clusterLabelMap, clusterColorOverrides, atacClusterLabelMap, regionLabelMap, agentAnnotationRows]);
 
-  // Flush pending save synchronously when app closes so results are never lost
   useEffect(() => {
     const handleBeforeUnload = () => {
       const savePath = dataPathRef.current;
@@ -714,7 +682,6 @@ function App() {
         ? savePath.substring(0, Math.max(savePath.lastIndexOf('/'), savePath.lastIndexOf('\\')))
         : savePath;
       const pending = pendingSaveDataRef.current;
-      // If regionData exists but umapData is missing, fall back to clusterPlot data
       if (pending && !pending.umapData && pending.regionData && clusterPlotRef.current?.data) {
         pending.umapData = clusterPlotRef.current.data;
       }
@@ -787,16 +754,13 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-load first embedding model on app start (bundled model)
   useEffect(() => {
     const autoLoadModel = async () => {
-      // Only auto-load once on app start
       if (autoModelLoadAttempted) return;
 
-      // Check if model is already loaded (from cache)
       if (isModelLoaded()) {
+        console.log('Embedding model already loaded from cache');
         setAutoModelLoadAttempted(true);
-        // Ensure selected model matches what's loaded
         const currentModel = getCurrentModel();
         if (currentModel) {
           setSelectedModel(currentModel);
@@ -804,65 +768,61 @@ function App() {
         return;
       }
 
-      // Mark that we've attempted loading (even if it fails)
       setAutoModelLoadAttempted(true);
 
       const firstModelId = 'all-minilm-l6';
       const success = await downloadModel(firstModelId, (progress) => {
-        // Only show toast when fully loaded to avoid interrupting user
         if (progress === 100) {
-          // Don't show toast on initial load, it's expected behavior
+          console.log('Bundled embedding model loaded successfully');
         }
       });
 
       if (success) {
-        // Update selected model to match what was loaded
         setSelectedModel(firstModelId);
       } else {
         console.warn('Auto-load of embedding model failed');
       }
     };
 
-    // Load model immediately on app start (don't wait for data)
     autoLoadModel();
   }, [autoModelLoadAttempted]);
 
   const chatWidth = Math.max(MIN_CHAT_WIDTH, 100 - layout.guideWidth - layout.loaderWidth);
   const bottomHeight = Math.max(0, 100 - layout.topHeight);
 
-  // Initialize WebAssembly worker
   useEffect(() => {
-    // new URL() MUST be written directly inside new Worker() so webpack detects it
-    // as a worker entry and emits a compiled IIFE chunk to static/js/.
-    // The module-level window.Worker patch above handles the ASAR → ASAR.unpacked
-    // URL redirect at runtime, covering this worker and all others (ONNX, WebLLM).
+    console.log('Initializing worker... BUILD 2026-0520-V1');
     const analysisWorker = new Worker(
       new URL('./workers/analysis.worker.js', import.meta.url)
     );
+    console.log('Worker instance created:', analysisWorker);
 
-    // Handle worker messages
     analysisWorker.onmessage = (event) => {
       const { type, data, error, message } = event.data;
       
+      console.log('Worker message received:', type, data ?? message);
       
       if (type === 'INIT_SUCCESS') {
+        console.log('Analysis worker initialized');
         showToast({
           message: 'Analysis engine ready',
           intent: 'success',
           timeout: 2000,
         });
       } else if (type === 'DATA_LOADED') {
+        console.log('Data loaded successfully:', data);
 
-        // If this is spatial data with precomputed coordinates, or ATAC (pipeline runs on load), prevent auto-clustering
         if (data.modality === 'spatial' && data.spatialCoordinates) {
+          console.log('Spatial data with precomputed coordinates detected - disabling auto-clustering');
           setAutoClusterIssued(true);
         }
         if (data.modality === 'atac') {
+          console.log('ATAC data - pipeline runs on load, disabling auto-clustering');
           setAutoClusterIssued(true);
         }
         if (data.modality === 'multiome') {
+          console.log('Multiome data - precomputed analysis, disabling auto-clustering');
           setAutoClusterIssued(true);
-          // Store peak count if provided
           if (data.peaks) {
             setDataInfo(prev => prev ? { ...prev, peaks: data.peaks } : prev);
           }
@@ -871,15 +831,14 @@ function App() {
           setAutoClusterIssued(true);
         }
 
-        // Log polygon data if present (Visium HD)
         if (data.hasPolygons) {
+          console.log('Visium HD data with polygon boundaries detected:', data.polygons?.length, 'cells');
         }
 
         setDataInfo(prev => {
           const nextCoords = data.spatialCoordinates || prev?.spatialCoordinates;
           const nextExtent = data.spatialExtent || prev?.spatialExtent;
           const hasSpatialCoords = Array.isArray(nextCoords) && nextCoords.length > 0;
-          // Build spatial index whenever we have coordinates (including on first DATA_LOADED for Visium HD binned)
           const shouldBuildIndex = hasSpatialCoords;
           const modality = data.modality || prev?.modality || 'single-cell';
 
@@ -900,7 +859,6 @@ function App() {
                   if (prev?.format !== '10X Visium HD') {
                     return { maxLevels: 9, baseSamplesPerTile: 800, levelSampleMultiplier: 1.8, hardSampleCap: 25000 };
                   }
-                  // Binned needs 4x sampling (sparser bins); segmented uses 2x
                   return prev?.dataType === 'binned'
                     ? { maxLevels: 9, baseSamplesPerTile: 3200, levelSampleMultiplier: 1.8, hardSampleCap: 100000 }
                     : { maxLevels: 9, baseSamplesPerTile: 1600, levelSampleMultiplier: 1.8, hardSampleCap: 50000 };
@@ -909,9 +867,7 @@ function App() {
             spatialReady: prev?.spatialReady || (modality === 'spatial' && hasSpatialCoords),
             modality,
             datasetNames: data.datasetNames || prev?.datasetNames || null,
-            // Xenium integration: per-sample spatial data
             perSampleSpatial: data.perSampleSpatial || prev?.perSampleSpatial || null,
-            // Visium HD polygon data
             hasPolygons: data.hasPolygons || prev?.hasPolygons || false,
             polygons: data.polygons || prev?.polygons || null,
           };
@@ -923,19 +879,31 @@ function App() {
           timeout: 3000,
         });
       } else if (type === 'ANALYSIS_COMPLETE') {
+        console.log('====== ANALYSIS_COMPLETE received ======');
+        console.log('Data type:', data.type);
+        console.log('Full data:', data);
         if (data.type === 'dataset_list') {
           chatBotRef.current?.handleDatasetListResult?.(data);
           setIsAnalyzing(false);
           return;
         }
         chatBotRef.current?.handleAnalysisResultForAgent?.({ data });
+        console.log('Message type check:', {
+          isUmap: data.type === 'umap',
+          isGeneExpression: data.type === 'gene_expression',
+          isGeneViolin: data.type === 'gene_violin',
+          isGeneDotplot: data.type === 'gene_dotplot',
+          actualType: data.type,
+        });
         const modality = dataInfoRef.current?.modality;
         if (data.source === 'precomputed') {
           setAutoClusterIssued(true);
         }
+        if (data.type === 'umap' && !geneNamesReadyRef.current) {
+          analysisWorker.postMessage({ type: 'GET_GENE_NAMES' });
+        }
 
         if (data.type === 'umap') {
-          // Detect reclustering and reset labels/colors so merged clusters don't persist
           const isReclustered = data.source === 'reclustered';
           if (isReclustered) {
             setClusterLabelMap({});
@@ -952,18 +920,16 @@ function App() {
               pendingSaveDataRef.current = { ...pendingSaveDataRef.current, regionData: null };
             }
             atacFragmentCoverageCacheRef.current.clear();
+            console.log('Reclustering detected - cleared cluster labels, color overrides, region plot, and fragment coverage cache');
           }
 
-          // Multiome: clear cross-view highlights and legend-click selection so both views show full cluster colors
           if (modality === 'multiome') {
             setRnaClusterHighlightOnAtac(null);
             setAtacClusterHighlightOnRna(null);
             setLegendHighlightSelection(null);
           }
 
-          // Multiome: route to RNA or ATAC cluster plot based on multiomeModality
           if (data.multiomeModality === 'atac') {
-            // WNN individual ATAC UMAP: store for the ATAC panel of the 3-panel WNN layout
             if (data.source === 'wnn-individual') {
               setWnnAtacPlot({ source: 'analysis', data });
               setAtacClusterLabelMap({});
@@ -972,12 +938,12 @@ function App() {
               return;
             }
             const atacPayload = { source: 'analysis', data };
-            // When WNN is active, atacClusterPlot holds the WNN ATAC coordinates, don't overwrite with realigned precomputed data
             if (!data.realigned || !wnnActiveRef.current) {
               setAtacClusterPlot(atacPayload);
-              setAtacActivePlot(null); // Clear any active ATAC plot (dotplot/violin) so UMAP shows
+              setAtacActivePlot(null);
             }
             const isWNN = data.source === 'wnn';
+            console.log(isWNN ? 'Set ATAC cluster plot from WNN co-embedding' : 'Set ATAC cluster plot for multiome');
             showToast({
               message: isWNN
                 ? 'WNN complete, 3-panel view ready (RNA / ATAC / WNN)'
@@ -985,15 +951,12 @@ function App() {
               intent: 'success',
               timeout: isWNN ? 4000 : 2000,
             });
-            // Save multiome ATAC UMAP data for combined save
             pendingSaveDataRef.current = { ...(pendingSaveDataRef.current || {}), atacUmapData: data };
             scheduleResultsSave();
-            // WNN: force-save immediately (bypass hash check so WNN data is never skipped)
             if (isWNN) {
-              lastSavedPayloadHashRef.current = null; // force fresh write
+              lastSavedPayloadHashRef.current = null;
               doSaveResults();
             }
-            // Only re-enable chat if we're not waiting for multiome gene plot (RNA + ATAC gene_expression)
             if (!pendingMultiomeGenePlotRef.current) {
               setIsAnalyzing(false);
               setWorkerStatusMessage('');
@@ -1001,9 +964,7 @@ function App() {
             return;
           }
 
-          // Multiome RNA: clear active plot so UMAP shows instead of previous dotplot/violin
           if (modality === 'multiome') {
-            // WNN individual RNA UMAP: store for the RNA panel of the 3-panel WNN layout
             if (data.source === 'wnn-individual') {
               setWnnRnaPlot({ source: 'analysis', data });
               setClusterLabelMap({});
@@ -1011,30 +972,27 @@ function App() {
               pendingSaveDataRef.current = { ...(pendingSaveDataRef.current || {}), wnnRnaUmapData: data, wnnWasActive: true };
               return;
             }
-            // WNN integrated result: activate the 3-panel layout
             if (data.source === 'wnn') {
               setWnnActive(true);
               setWnnClusterLabelMap({});
               setWnnClusterColorOverrides({});
               setWnnCrossHighlight(null);
+            } else if (data.wnnMerged) {
+              setWnnCrossHighlight(null);
             } else if (!data.realigned) {
-              // Non-WNN cluster result (not a post-normalization realignment): deactivate WNN layout
-              // data.realigned=true means background normalization re-sent precomputed UMAPs, don't kill WNN
               setWnnActive(false);
             }
             setActivePlot(null);
             setLastActiveArtifactId(null);
           }
 
-          // Integration: store full UMAP + integrationViews for per-dataset panels
           if (data.integrationViews && data.datasetNames) {
             setClusterPlot({ source: 'analysis', data });
-            setIntegrationShowClustersOnly(true); // show UMAP by cluster only (no gene overlay) until user plots a gene again
+            setIntegrationShowClustersOnly(true);
             if (data.source !== 'merged') {
               setActivePlot(null);
               setLastActiveArtifactId(null);
             }
-            // Restore saved cluster labels/colors when loading previous results (so renamed clusters persist after reload)
             if (data.restoredClusterLabelMap && Object.keys(data.restoredClusterLabelMap).length > 0) {
               setClusterLabelMap(data.restoredClusterLabelMap);
             }
@@ -1044,7 +1002,6 @@ function App() {
             if (Array.isArray(data.restoredAgentClusterAnnotations) && data.restoredAgentClusterAnnotations.length > 0) {
               setAgentAnnotationRows(data.restoredAgentClusterAnnotations);
             }
-            // Xenium/VisiumHD integration: store per-sample spatial coordinates and build spatial indices
             if (data.perSampleSpatial) {
               const isHD = modality === 'visium-hd-integration';
               setDataInfo((prev) => ({
@@ -1075,7 +1032,6 @@ function App() {
                     ? 'MERFISH integration complete (per-sample spatial views)'
                     : 'Integration UMAP ready (per-dataset views)';
             showToast({ message: toastMsg, intent: 'success', timeout: 2000 });
-            // Save integration results (UMAP + clusters) to disk
             pendingSaveDataRef.current = { ...(pendingSaveDataRef.current || {}), umapData: data };
             scheduleResultsSave();
             return;
@@ -1084,18 +1040,12 @@ function App() {
           const umapPayload = { source: 'analysis', data };
 
           if (data.source === 'banksy') {
-            // BANKSY regions are stored independently, never overwrite transcriptomic clusterPlot
             setRegionPlot(umapPayload);
           } else {
-            // When WNN is active, clusterPlot holds the WNN integrated coordinates.
-            // A realigned post-normalization update would overwrite them with precomputed coords,
-            // making the WNN panel show the wrong UMAP shape. Skip it.
             if (!data.realigned || !wnnActiveRef.current) {
               setClusterPlot(umapPayload);
             }
           }
-          // For spatial: show UMAP in the main view. For scATAC: set activePlot so UMAP View updates;
-          // Peak View stays unchanged (uses peakViewPlot, not activePlot).
           if (modality === 'spatial' || modality === 'atac') {
             setActivePlot(umapPayload);
             setLastActiveArtifactId(null);
@@ -1103,7 +1053,6 @@ function App() {
           if (modality === 'atac') {
             setIsAnalyzing(false);
             setWorkerStatusMessage('');
-            // Set numeric cells/genes so dataLoaded is true and plot commands (e.g. plot Nphs2) work
             setDataInfo((prev) => {
               if (!prev || prev.modality !== 'atac') return prev;
               const cells = data.cells ?? data.nCells;
@@ -1118,12 +1067,11 @@ function App() {
               return prev;
             }
             
-            // Update spatial coordinates if they were sent with the analysis results
-            // (this happens after reanalysis where cell order may have changed)
             const coords = data.spatialCoordinates || prev.spatialCoordinates;
             const shouldRebuildIndex = data.spatialCoordinates && Array.isArray(coords) && coords.length > 0;
             
             if (data.spatialCoordinates) {
+              console.log(`Updating spatial coordinates from reanalysis: ${data.spatialMatched}/${coords.length} matched`);
             }
             
             return {
@@ -1151,7 +1099,6 @@ function App() {
             intent: 'success',
             timeout: data.source === 'banksy' ? 4000 : 2000,
           });
-          // Restore saved cluster labels/colors when loading previous results
           if (data.restoredClusterLabelMap && Object.keys(data.restoredClusterLabelMap).length > 0) {
             setClusterLabelMap(data.restoredClusterLabelMap);
           }
@@ -1161,7 +1108,6 @@ function App() {
           if (Array.isArray(data.restoredAgentClusterAnnotations) && data.restoredAgentClusterAnnotations.length > 0) {
             setAgentAnnotationRows(data.restoredAgentClusterAnnotations);
           }
-          // Restore saved region data when loading previous results
           if (data.restoredRegionData) {
             const rd = data.restoredRegionData;
             setRegionPlot({
@@ -1183,14 +1129,11 @@ function App() {
               setRegionLabelMap(rd.regionLabelMap);
             }
           }
-          // Schedule auto-save of results (UMAP + clusters) to the input folder
           if (data.source === 'banksy') {
-            // BANKSY: save region data separately, don't overwrite transcriptomic umapData
             const prev = pendingSaveDataRef.current || {};
-            // Ensure umapData is present so doSaveResults doesn't bail out.
-            // Fall back to current clusterPlot if umapData was never populated.
             if (!prev.umapData && clusterPlotRef.current?.data) {
               prev.umapData = clusterPlotRef.current.data;
+              console.log('BANKSY save: populated umapData from clusterPlotRef fallback');
             }
             pendingSaveDataRef.current = {
               ...prev,
@@ -1202,7 +1145,8 @@ function App() {
                 regionBanksyParams: data.banksyParams,
               },
             };
-            // Force immediate save (bypass debounce) to ensure region data is persisted
+            console.log('BANKSY save: regionData set, umapData present:', !!pendingSaveDataRef.current.umapData,
+              'regionClusters length:', data.clusters?.length, 'regionNclusters:', data.nClusters);
             lastSavedPayloadHashRef.current = null;
             doSaveResults();
           } else {
@@ -1214,11 +1158,9 @@ function App() {
           }
           scheduleResultsSave();
         } else if (data.type === 'gene_expression') {
-          // Multiome: this is the RNA (first) message, mark that we're waiting for ATAC so we don't re-enable chat yet
           if (!data.multiomeModality && modality === 'multiome') {
             pendingMultiomeGenePlotRef.current = true;
           }
-          // Multiome ATAC gene expression → route to ATAC view
           if (data.multiomeModality === 'atac') {
             const appliedColorMap = data.colorMap || pendingGeneColorMap || defaultColorMap;
             const atacArtifactId = `atac_plot_${Date.now()}`;
@@ -1241,7 +1183,6 @@ function App() {
               createdAt: new Date().toISOString(),
             };
 
-            // Handle fragment-based coverage async update (same as ATAC mode)
             const currentDataPath = dataPathRef.current;
             const willQueryFragments =
               data.region &&
@@ -1250,6 +1191,13 @@ function App() {
               currentDataPath &&
               window.electron?.queryAtacFragments;
 
+            console.log(`Multiome ATAC fragment query conditions:
+  - hasRegion: ${!!data.region} (${data.region ? `${data.region.chrom}:${data.region.start}-${data.region.end}` : 'null'})
+  - cellBarcodesLength: ${data.cellBarcodes?.length ?? 'undefined'}
+  - clustersLength: ${data.clusters?.length ?? 'undefined'}
+  - currentDataPath: ${currentDataPath ?? 'undefined'}
+  - hasQueryAtacFragments: ${!!window.electron?.queryAtacFragments}
+  - willQueryFragments: ${willQueryFragments}`);
 
             if (willQueryFragments) {
               const fragmentsPath = `${currentDataPath}/atac_fragments.tsv.gz`;
@@ -1258,11 +1206,12 @@ function App() {
               if (cachedCoverage) {
                 atacArtifact.coverageByCluster = cachedCoverage;
                 atacArtifact.fragmentBased = true;
+                console.log('Multiome: using cached fragment coverage for', data.geneName);
               } else {
-                // Show loading until fragment-based coverage is ready (smooth binned signal from fragments.tsv.gz).
                 atacArtifact.coverageByCluster = null;
-                (async () => {
+                runFragmentQuery(async () => {
                   try {
+                    console.log('Multiome: querying ATAC fragments from:', fragmentsPath);
                     const barcodeToCluster = {};
                     const numMapped = Math.min(data.cellBarcodes.length, data.clusters.length);
                     for (let i = 0; i < numMapped; i++) {
@@ -1277,7 +1226,6 @@ function App() {
                       binSize: 25,
                     });
                     if (result.success && result.coverageByCluster?.length > 0) {
-                      // Coverage is already Signac-style normalized by electron.js
                       atacFragmentCoverageCacheRef.current.set(fragmentCacheKey, result.coverageByCluster);
                       setArtifacts(prev => prev.map(a =>
                         a.id === atacArtifactId
@@ -1292,7 +1240,7 @@ function App() {
                   } catch (err) {
                     console.warn('Failed to query multiome ATAC fragments:', err);
                   }
-                })();
+                });
               }
             }
 
@@ -1314,21 +1262,36 @@ function App() {
               multiomeGenePlotTimeoutRef.current = null;
             }
             pendingMultiomeGenePlotRef.current = false;
-            setIsAnalyzing(false);
-            setWorkerStatusMessage('');
+            if (pendingFragmentQueriesRef.current === 0) {
+              setIsAnalyzing(false);
+              setWorkerStatusMessage('');
+            }
             return;
           }
 
-          // Use colorMap from the worker data if available, otherwise fall back to pending or default
           const appliedColorMap = data.colorMap || pendingGeneColorMap || defaultColorMap;
           setPendingGeneColorMap(null);
           const artifactId = `plot_${Date.now()}`;
 
+          console.log('App.jsx: Creating gene expression artifact', {
+            geneName: data.geneName,
+            expressionLength: data.expression?.length,
+            coordinatesLength: data.coordinates?.length,
+            spatialCoordinatesLength: data.spatialCoordinates?.length,
+            expressionType: data.expression?.constructor?.name,
+            hasExpression: !!data.expression,
+            isArray: Array.isArray(data.expression),
+            isTypedArray: ArrayBuffer.isView(data.expression),
+            hasCoordinates: Array.isArray(data.coordinates),
+            hasSpatialCoordinates: Array.isArray(data.spatialCoordinates),
+            expressionSample: data.expression ? Array.from(data.expression.slice(0, 5)) : null,
+            isAtac: data.isAtac,
+            hasCellBarcodes: !!data.cellBarcodes,
+            hasClusters: !!data.clusters,
+          });
 
-          // For ATAC data, try to compute fragment-based coverage for smoother peak plots
           const currentDataPath = dataPathRef.current;
 
-          // Check if we will query fragment-based coverage
           const willQueryFragments =
             data.isAtac &&
             data.region &&
@@ -1337,11 +1300,16 @@ function App() {
             currentDataPath &&
             window.electron?.queryAtacFragments;
 
-          // When we will fetch fragment-based coverage, do not show the initial peak-matrix (bin-bar) plot.
-          // Show loading until fragment-based coverage is ready, then a single peak coverage plot with chromosome + gene track.
           let finalCoverageByCluster = willQueryFragments ? null : data.coverageByCluster;
 
-          // Debug: Log fragment query conditions (explicit strings for easier debugging)
+          console.log(`Fragment query conditions:
+  - isAtac: ${data.isAtac}
+  - hasRegion: ${!!data.region} (${data.region ? `${data.region.chrom}:${data.region.start}-${data.region.end}` : 'null'})
+  - cellBarcodesLength: ${data.cellBarcodes?.length ?? 'undefined'}
+  - clustersLength: ${data.clusters?.length ?? 'undefined'}
+  - currentDataPath: ${currentDataPath ?? 'undefined'}
+  - hasQueryAtacFragments: ${!!window.electron?.queryAtacFragments}
+  - willQueryFragments: ${willQueryFragments}`);
 
           if (willQueryFragments) {
             const fragmentsPath = `${currentDataPath}/fragments.tsv.gz`;
@@ -1349,17 +1317,18 @@ function App() {
             const cachedCoverage = atacFragmentCoverageCacheRef.current.get(fragmentCacheKey);
             if (cachedCoverage) {
               finalCoverageByCluster = cachedCoverage;
+              console.log('Using cached fragment coverage for', data.geneName);
             } else {
-              // Query fragment-based coverage asynchronously
-              (async () => {
+              runFragmentQuery(async () => {
                 try {
+                  console.log('Querying ATAC fragments for region:', data.region, 'from:', fragmentsPath);
 
-                  // Build barcode to cluster mapping (only for cells that have clusters)
                   const barcodeToCluster = {};
                   const numMapped = Math.min(data.cellBarcodes.length, data.clusters.length);
                   for (let i = 0; i < numMapped; i++) {
                     barcodeToCluster[data.cellBarcodes[i]] = data.clusters[i];
                   }
+                  console.log('Built barcodeToCluster mapping:', numMapped, 'cells');
 
                   const result = await window.electron.queryAtacFragments({
                     fragmentsPath,
@@ -1367,17 +1336,14 @@ function App() {
                     cellBarcodes: data.cellBarcodes,
                     barcodeToCluster,
                     clusterMeanDepths: data.clusterMeanDepths || null,
-                    binSize: 25, // 25bp bins for fine-grained peak clusters like Signac
+                    binSize: 25,
                   });
 
                   if (result.success && result.coverageByCluster?.length > 0) {
+                    console.log(`Fragment-based coverage computed: ${result.fragmentCount} fragments, ${result.coverageByCluster.length} clusters`);
 
-                    // Coverage is already Signac-style normalized by electron.js
-                    // (raw / group_scale_factor * median_scale_factor)
-                    // Frontend CoveragePlot handles y-axis scaling
                     atacFragmentCoverageCacheRef.current.set(fragmentCacheKey, result.coverageByCluster);
 
-                    // Update the artifact with fragment-based coverage
                     setArtifacts(prev => prev.map(a =>
                       a.id === artifactId
                         ? { ...a, coverageByCluster: result.coverageByCluster, fragmentBased: true }
@@ -1391,7 +1357,6 @@ function App() {
                     });
                   } else if (!result.success) {
                     console.warn('Fragment query failed:', result.error);
-                    // Fall back to peak-matrix coverage so we still show one plot
                     if (data.coverageByCluster?.length > 0) {
                       setArtifacts(prev => prev.map(a =>
                         a.id === artifactId ? { ...a, coverageByCluster: data.coverageByCluster } : a
@@ -1400,26 +1365,20 @@ function App() {
                   }
                 } catch (err) {
                   console.warn('Failed to query ATAC fragments:', err);
-                  // Fall back to peak-matrix coverage so we still show one plot
                   if (data.coverageByCluster?.length > 0) {
                     setArtifacts(prev => prev.map(a =>
                       a.id === artifactId ? { ...a, coverageByCluster: data.coverageByCluster } : a
                     ));
                   }
                 }
-              })();
+              });
             }
           }
 
-          // Consume pendingShowPeakViewRef for scATAC / atac-integration.
-          // Multiome: the ATAC message handler (line 869) consumes it, do NOT consume here for the
-          // multiome RNA message or the flag will be reset before the ATAC handler reads it.
           const isMultiomeRnaMessage = modality === 'multiome' && !data.multiomeModality && !data.isAtac;
           const showPeakViewAsPrimary = isMultiomeRnaMessage ? false : pendingShowPeakViewRef.current;
           if (!isMultiomeRnaMessage && pendingShowPeakViewRef.current) pendingShowPeakViewRef.current = false;
 
-          // atac-integration: when we will query fragment-based coverage per sample, do not show the initial
-          // peak-matrix (binned/bar) coverage, show only after fragment-based (individual peak) data is ready.
           const willQueryIntegrationFragments =
             modality === 'atac-integration' &&
             data.isAtac &&
@@ -1434,20 +1393,19 @@ function App() {
             id: artifactId,
             type: 'gene_expression',
             geneName: data.geneName,
-            coordinates: data.coordinates, // UMAP coordinates for UMAP view
-            spatialCoordinates: data.spatialCoordinates, // Spatial coordinates (for reference, spatial view uses spatialIndex)
-            expression: data.expression, // Expression array aligned with analysis state cell order
-            expressionRange: data.expressionRange, // Percentile range for color scale
+            coordinates: data.coordinates,
+            spatialCoordinates: data.spatialCoordinates,
+            expression: data.expression,
+            expressionRange: data.expressionRange,
             colorMap: appliedColorMap,
-            peaksOnGene: data.peaksOnGene, // ATAC: peaks linked to this gene for Peak View track
-            coverageByCluster: finalCoverageByCluster, // ATAC: per-cluster signal for CoveragePlot-style view
-            fragmentBased: !!finalCoverageByCluster, // true when using cached fragment coverage
-            region: data.region, // ATAC: genomic region { chrom, start, end }
-            genome: data.genome, // ATAC: reference genome for IGV (e.g. hg38, mm10)
-            isAtac: data.isAtac || false, // true for scATAC and atac-integration
-            viewCoverageByCluster: initialViewCoverageByCluster, // atac-integration: per-sample coverage (null until fragment-based ready when willQueryIntegrationFragments)
-            showPeakViewAsPrimary: showPeakViewAsPrimary, // true when user said "coverage plot [gene]"
-            // Spatial integration: per-sample views (present for imputed genes on xenium/merfish/visium-hd integration)
+            peaksOnGene: data.peaksOnGene,
+            coverageByCluster: finalCoverageByCluster,
+            fragmentBased: !!finalCoverageByCluster,
+            region: data.region,
+            genome: data.genome,
+            isAtac: data.isAtac || false,
+            viewCoverageByCluster: initialViewCoverageByCluster,
+            showPeakViewAsPrimary: showPeakViewAsPrimary,
             integrationViews: data.integrationViews || null,
             datasetNames: data.datasetNames || null,
             perSampleSpatial: data.perSampleSpatial || null,
@@ -1476,8 +1434,6 @@ function App() {
               `**SpaGE imputation complete** ✓\n\nPredicted expression for **${data.geneName}** is now shown on the spatial tissue view.`,
               'success'
             );
-            // Persist imputed expression so it survives session close/reload.
-            // Strip the " (imputed)" suffix added by the worker and use lowercase as key.
             const imputedKey = data.geneName.replace(/ \(imputed\)$/i, '').toLowerCase();
             const imputedArr = data.expression instanceof Float32Array
               ? Array.from(data.expression)
@@ -1490,8 +1446,6 @@ function App() {
             scheduleResultsSave();
           }
 
-          // atac-integration: query fragment-based coverage per sample (same approach as single-sample scATAC)
-          // This replaces the peak-matrix viewCoverageByCluster with fine-grained 25bp-binned fragment pileup
           if (
             modality === 'atac-integration' &&
             data.isAtac &&
@@ -1506,12 +1460,11 @@ function App() {
             const allClusters = data.clusters;
             const region = data.region;
             const clusterMeanDepths = data.clusterMeanDepths || null;
-            // Get integrationViews from the worker response (not from clusterPlot state which may be stale in this closure)
             const iViews = data.integrationViews;
             const datasetNames = data.datasetNames || dataInfoRef.current?.datasetNames;
 
             if (iViews && datasetNames) {
-              (async () => {
+              runFragmentQuery(async () => {
                 try {
                   const updatedViewCoverage = {};
                   let totalFragments = 0;
@@ -1522,9 +1475,6 @@ function App() {
                     const viewIndices = iViews[viewName]?.indices;
                     if (!viewName || !Array.isArray(viewIndices) || viewIndices.length === 0) continue;
 
-                    // Build per-sample barcodes and barcode→cluster mapping.
-                    // Strip the sample-name prefix (e.g. "aa_ACGT..." → "ACGT...") since
-                    // fragments.tsv.gz contains original unprefixed barcodes.
                     const prefix = `${viewName}_`;
                     const sampleBarcodes = viewIndices.map(i => {
                       const bc = allBarcodes[i];
@@ -1538,16 +1488,17 @@ function App() {
                       if (bc != null && cl != null) barcodeToCluster[bc] = cl;
                     }
 
-                    // Look for fragments.tsv.gz in the sample's directory
                     const fragmentsPath = `${ds.path}/fragments.tsv.gz`;
                     const cacheKey = `${fragmentsPath}|${region.chrom}|${region.start}|${region.end}`;
                     const cached = atacFragmentCoverageCacheRef.current.get(cacheKey);
                     if (cached) {
                       updatedViewCoverage[viewName] = cached;
+                      console.log(`  ${viewName}: using cached fragment coverage`);
                       continue;
                     }
 
                     try {
+                      console.log(`  ${viewName}: querying fragments from ${fragmentsPath}`);
                       const result = await window.electron.queryAtacFragments({
                         fragmentsPath,
                         region,
@@ -1561,6 +1512,7 @@ function App() {
                         atacFragmentCoverageCacheRef.current.set(cacheKey, result.coverageByCluster);
                         updatedViewCoverage[viewName] = result.coverageByCluster;
                         totalFragments += result.fragmentCount || 0;
+                        console.log(`  ${viewName}: ${result.fragmentCount} fragments, ${result.coverageByCluster.length} clusters`);
                       } else {
                         console.warn(`  ${viewName}: fragment query failed or empty, keeping peak-matrix coverage`);
                       }
@@ -1569,11 +1521,9 @@ function App() {
                     }
                   }
 
-                  // Update the artifact with fragment-based per-sample coverage
                   if (Object.keys(updatedViewCoverage).length > 0) {
                     setArtifacts(prev => prev.map(a => {
                       if (a.id !== artifactId) return a;
-                      // Merge: keep peak-matrix coverage for samples where fragments failed
                       const merged = { ...(a.viewCoverageByCluster || {}) };
                       for (const [vn, cov] of Object.entries(updatedViewCoverage)) {
                         merged[vn] = cov;
@@ -1589,13 +1539,11 @@ function App() {
                 } catch (err) {
                   console.warn('atac-integration fragment coverage failed:', err);
                 }
-              })();
+              });
             }
           }
-          // Multiome: keep chat disabled until ATAC gene activity is also received
           if (pendingMultiomeGenePlotRef.current) {
             if (multiomeGenePlotTimeoutRef.current) clearTimeout(multiomeGenePlotTimeoutRef.current);
-            // ATAC peak matrix load + gene activity can take 10–30+ seconds; only re-enable after ATAC message or long fallback
             multiomeGenePlotTimeoutRef.current = setTimeout(() => {
               multiomeGenePlotTimeoutRef.current = null;
               pendingMultiomeGenePlotRef.current = false;
@@ -1605,12 +1553,10 @@ function App() {
             return;
           }
         } else if (data.type === 'gene_violin') {
-          // Multiome: mark that we're waiting for ATAC violin
           if (!data.multiomeModality && modality === 'multiome') {
             pendingMultiomeGenePlotRef.current = true;
           }
 
-          // Multiome ATAC violin → route to ATAC view
           if (data.multiomeModality === 'atac') {
             setAtacActivePlot({ source: 'analysis', data });
             showToast({
@@ -1625,7 +1571,6 @@ function App() {
 
           setPendingGeneColorMap(null);
 
-          // Integration: violin with per-view data → store as artifact and show in each sample view
           if (data.integrationViews && data.datasetNames && (dataInfo?.modality === 'integration' || modality === 'integration' || dataInfo?.modality === 'atac-integration' || modality === 'atac-integration' || dataInfo?.modality === 'xenium-integration' || modality === 'xenium-integration' || dataInfo?.modality === 'visium-hd-integration' || modality === 'visium-hd-integration' || dataInfo?.modality === 'merfish-integration' || modality === 'merfish-integration')) {
             setIntegrationShowClustersOnly(false);
             const artifactId = `plot_${Date.now()}`;
@@ -1648,10 +1593,7 @@ function App() {
               timeout: 2000,
             });
           } else if (modality === 'spatial' && data.expression && data.spatialCoordinates) {
-            // For spatial mode, create a gene expression artifact so the spatial view can show the scatter plot
             const artifactId = `plot_${Date.now()}`;
-            // Prefer worker-provided coordinates (already aligned with expression).
-            // Falling back to clusterPlot coordinates can re-introduce stale-length mismatches.
             const umapCoordinates = Array.isArray(data.coordinates) && data.coordinates.length > 0
               ? data.coordinates
               : (clusterPlot?.source === 'analysis' ? clusterPlot.data?.coordinates : null);
@@ -1680,15 +1622,25 @@ function App() {
               timeout: 2000,
             });
           }
-          } // end else (RNA violin)
+          }
         } else if (data.type === 'gene_dotplot') {
+          console.log('Received dot plot data:', {
+            type: data.type,
+            geneNames: data.geneNames,
+            clusterIds: data.clusterIds,
+            percentExpressing: data.percentExpressing,
+            averageExpression: data.averageExpression,
+            percentExpressingType: data.percentExpressing?.constructor?.name,
+            percentExpressingLength: data.percentExpressing?.length,
+            firstRowType: data.percentExpressing?.[0]?.constructor?.name,
+            hasSpatialGeneExpression: !!data.spatialGeneExpression,
+            multiomeModality: data.multiomeModality,
+          });
 
-          // Multiome: mark that we're waiting for ATAC dotplot
           if (!data.multiomeModality && modality === 'multiome') {
             pendingMultiomeGenePlotRef.current = true;
           }
 
-          // Multiome ATAC dotplot → route to ATAC view
           if (data.multiomeModality === 'atac') {
             const appliedColorMap = data.colorMap || pendingGeneColorMap || defaultColorMap;
             const atacArtifactId = `atac_dotplot_${Date.now()}`;
@@ -1719,11 +1671,9 @@ function App() {
             setWorkerStatusMessage('');
           } else {
 
-          // Use colorMap from the worker data if available, otherwise fall back to pending or default
           const appliedColorMap = data.colorMap || pendingGeneColorMap || defaultColorMap;
           setPendingGeneColorMap(null);
 
-          // Integration: dotplot with per-view data → store as artifact and show in each sample view
           if (data.integrationViews && data.datasetNames && (dataInfo?.modality === 'integration' || modality === 'integration' || dataInfo?.modality === 'atac-integration' || modality === 'atac-integration' || dataInfo?.modality === 'xenium-integration' || modality === 'xenium-integration' || dataInfo?.modality === 'visium-hd-integration' || modality === 'visium-hd-integration' || dataInfo?.modality === 'merfish-integration' || modality === 'merfish-integration')) {
             setIntegrationShowClustersOnly(false);
             const artifactId = `plot_${Date.now()}`;
@@ -1748,7 +1698,6 @@ function App() {
               timeout: 2000,
             });
           } else {
-          // Store dotplot as artifact (like gene expression) so it can be recolored
           const artifactId = `plot_${Date.now()}`;
           const dotplotArtifact = {
             id: artifactId,
@@ -1764,28 +1713,34 @@ function App() {
             createdAt: new Date().toISOString(),
           };
 
-          // For spatial data, also create a gene expression artifact for the spatial view
           let spatialArtifactId = null;
           if (data.spatialGeneExpression && modality === 'spatial') {
             spatialArtifactId = `plot_${Date.now()}_spatial`;
-            // Get UMAP coordinates from clusterPlot if available
             const umapCoordinates = clusterPlot?.source === 'analysis' ? clusterPlot.data?.coordinates : null;
             const spatialArtifact = {
               id: spatialArtifactId,
               type: 'gene_expression',
               geneName: data.spatialGeneExpression.geneName,
-              coordinates: umapCoordinates, // Include UMAP coordinates for UMAP view
+              coordinates: umapCoordinates,
               expression: data.spatialGeneExpression.expression,
               colorMap: appliedColorMap,
               createdAt: new Date().toISOString(),
             };
+            console.log('Creating spatial gene expression artifact:', {
+              id: spatialArtifactId,
+              geneName: spatialArtifact.geneName,
+              expressionLength: spatialArtifact.expression?.length,
+              expressionType: spatialArtifact.expression?.constructor?.name,
+            });
             setArtifacts(prev => [...prev, dotplotArtifact, spatialArtifact]);
             setActivePlot({
               source: 'artifact',
               artifactId,
-              spatialArtifactId, // Link to the spatial expression artifact
+              spatialArtifactId,
             });
+            console.log('Set activePlot with spatialArtifactId:', { artifactId, spatialArtifactId });
           } else {
+            console.log('Not creating spatial artifact:', { hasSpatialGeneExpression: !!data.spatialGeneExpression, modality });
             setArtifacts(prev => [...prev, dotplotArtifact]);
             setActivePlot({ source: 'artifact', artifactId });
           }
@@ -1798,13 +1753,12 @@ function App() {
             intent: 'success',
             timeout: 2000,
           });
-          } // end else (non-integration dotplot)
-          } // end else (RNA dotplot)
+          }
+          }
         } else if (data.type === 'markers') {
           setPendingGeneColorMap(null);
           setLastActiveArtifactId(null);
 
-          // Multiome ATAC markers → route to ATAC view
           if (data.multiomeTarget === 'atac') {
             setAtacActivePlot({ source: 'analysis', data });
           } else {
@@ -1822,7 +1776,7 @@ function App() {
               : `Found ${data.markers?.length || 0} ${isPeakMarkers ? 'marker peaks' : 'markers'}`;
 
           showToast({
-            message: `${isPeakMarkers ? 'Marker peaks' : 'Marker'} table ready for cluster ${data.cluster}. ${summary}`,
+            message: `${isPeakMarkers ? 'Marker peaks' : data.featureSource === 'gene_activity' ? 'Marker (gene activity)' : 'Marker'} table ready for cluster ${data.cluster}. ${summary}`,
             intent: 'success',
             timeout: 3000,
           });
@@ -1914,13 +1868,11 @@ function App() {
             timeout: 3000,
           });
         } else if (data.type === 'link_peaks') {
-          // LinkPeaks genome-wide run complete, report results and persist to disk
           if (!data.restored) {
             setIsAnalyzing(false);
             setWorkerStatusMessage('');
           }
           if (data.restored) {
-            // Silently inform the user links are available from the previous session
             if (chatBotRef.current?.addBotMessage) {
               chatBotRef.current.addBotMessage(
                 `**Peak–gene links loaded** ✓\n\n` +
@@ -1944,7 +1896,6 @@ function App() {
                 'success'
               );
             }
-            // Persist the full links array so re-loading the dataset skips the expensive analysis
             if (Array.isArray(data.links) && data.links.length > 0) {
               pendingSaveDataRef.current = {
                 ...(pendingSaveDataRef.current || {}),
@@ -1982,7 +1933,6 @@ function App() {
             chatBotRef.current.addBotMessage(data.message, data.results?.length > 0 ? 'success' : 'warning');
           }
         } else if (data.type === 'peak_gene_links') {
-          // Show peak-gene arc plot for a specific gene
           setIsAnalyzing(false);
           setWorkerStatusMessage('');
           if (!data.links || data.links.length === 0) {
@@ -2005,16 +1955,12 @@ function App() {
             };
             setArtifacts(prev => [...prev, linkArtifact]);
             setLastActiveArtifactId(artifactId);
-            // Show in ATAC View panel (right panel) for multiome.
-            // Use dataInfoRef (not dataInfo) to avoid stale closure, this handler is created once on mount.
             if (dataInfoRef.current?.modality === 'multiome') {
               setAtacActivePlot({ source: 'artifact', artifactId });
             } else {
               setActivePlot({ source: 'artifact', artifactId });
             }
 
-            // For multiome, upgrade to fragment-based coverage (Signac-style 25 bp bins).
-            // The peak-matrix coverage above is a fast fallback; replace it once fragments are ready.
             const willQueryLinkFragments =
               data.region &&
               data.cellBarcodes?.length > 0 &&
@@ -2095,33 +2041,26 @@ function App() {
             chatBotRef.current.addBotMessage(msg, 'success');
           }
         } else if (data.type === 'cluster_info') {
-          // Format cluster info into a human-readable paragraph
-          const clusterLabel = clusterLabelMap?.[String(data.cluster)] || `Cluster ${data.cluster}`;
+          const clusterLabel = clusterLabelMapRef.current?.[String(data.cluster)] || `Cluster ${data.cluster}`;
           const cellCount = data.cellCount;
           const totalCells = data.totalCells;
           const percentage = (data.fraction * 100).toFixed(1);
           const topMarkers = data.topMarkers || [];
 
-          // Format top marker genes as a comma-separated list
           const markerGenes = topMarkers.map(m => m.gene).join(', ');
 
-          // Build the human-readable message
           let message = `**${clusterLabel}** contains **${cellCount.toLocaleString()} cells**, which represents **${percentage}%** of the total dataset (${totalCells.toLocaleString()} cells).`;
 
           if (topMarkers.length > 0) {
             message += `\n\nThe top ${topMarkers.length} marker genes for this cluster are: **${markerGenes}**.`;
 
-            // Add a brief note about the top marker
             const topMarker = topMarkers[0];
             const topPct = (topMarker.pct1 * 100).toFixed(0);
             message += ` The most significant marker is **${topMarker.gene}**, expressed in ${topPct}% of cells in this cluster.`;
           }
 
-          // Add reference to the marker table
           message += `\n\n*Please see all markers for ${clusterLabel} above.*`;
 
-          // Display the marker table in Analysis View (reuse the 'markers' type display)
-          // This creates data in the same format as find_markers
           const markerTableData = {
             type: 'markers',
             cluster: data.cluster,
@@ -2138,14 +2077,12 @@ function App() {
           setLastActiveArtifactId(null);
           setActivePlot({ source: 'analysis', data: markerTableData });
 
-          // Also show a toast
           showToast({
             message: `Cluster info ready for ${clusterLabel}`,
             intent: 'success',
             timeout: 2000,
           });
 
-          // Send the formatted message to the chatbot
           if (chatBotRef.current?.addBotMessage) {
             chatBotRef.current.addBotMessage(message, 'info');
           }
@@ -2207,11 +2144,9 @@ function App() {
             chatBotRef.current.addBotMessage(msg, likely.length ? 'success' : 'warning');
           }
         } else if (data.type === 'parameters') {
-          // Format parameters into a readable message for the chatbot
           const params = data.parameters;
           const step = data.step;
 
-          // Create appropriate header based on whether showing all or specific step
           let message = '';
           if (step) {
             const stepNames = {
@@ -2268,7 +2203,6 @@ function App() {
 
           message += '\nYou can adjust any of these parameters and I will reanalyze the data!';
 
-          // Send message to chatbot
           if (chatBotRef.current) {
             chatBotRef.current.addBotMessage(message, 'success');
           }
@@ -2281,8 +2215,7 @@ function App() {
             timeout: 2000,
           });
         }
-        // Analysis finished. Re-enable chat input (keep disabled if multiome gene plot is still waiting for ATAC).
-        if (!pendingMultiomeGenePlotRef.current) {
+        if (!pendingMultiomeGenePlotRef.current && pendingFragmentQueriesRef.current === 0) {
           setIsAnalyzing(false);
           setWorkerStatusMessage('');
         }
@@ -2307,7 +2240,6 @@ function App() {
           intent: 'danger',
           timeout: isWasmOOM ? 15000 : 5000,
         });
-        // For WASM OOM, also send to chatbot for visibility
         if (isWasmOOM && chatBotRef.current?.addBotMessage) {
           chatBotRef.current.addBotMessage(error, 'error');
         }
@@ -2319,12 +2251,20 @@ function App() {
           multiomeGenePlotTimeoutRef.current = null;
         }
         pendingMultiomeGenePlotRef.current = false;
-        // Analysis failed. Re-enable chat input.
         setIsAnalyzing(false);
         setWorkerStatusMessage('');
       } else if (type === 'STATUS_UPDATE') {
         const statusMessage = message ?? data?.message ?? data;
+        console.log('Status:', statusMessage);
         setWorkerStatusMessage(typeof statusMessage === 'string' ? statusMessage : '');
+      } else if (type === 'NORMALIZATION_STATE') {
+        setIsNormalizing(!!event.data.running);
+      } else if (type === 'GENE_NAMES') {
+        const names = event.data.names;
+        if (Array.isArray(names) && names.length > 0) {
+          geneNamesReadyRef.current = true;
+          setGeneNames(names);
+        }
       } else if (type === 'PARAMETERS_UPDATED') {
         const summary = data?.summary || 'Analysis parameters updated.';
         showToast({
@@ -2343,9 +2283,7 @@ function App() {
         lineno: error.lineno,
         colno: error.colno,
       });
-      // Null the worker so subsequent data loads don't silently send to a dead worker.
       setWorker(null);
-      // Detect WASM OOM / abort errors and show a clearer message
       const msg = error.message || '';
       const isWasmOOM = /Aborted\(\)|out of memory|RuntimeError/i.test(msg);
       showToast({
@@ -2356,12 +2294,10 @@ function App() {
         intent: 'danger',
         timeout: isWasmOOM ? 10000 : 5000,
       });
-      // Ensure UI is not stuck in analyzing state after a fatal worker error
       setIsAnalyzing(false);
       setWorkerStatusMessage('');
     };
 
-    // Initialize the worker
     analysisWorker.postMessage({ type: 'INIT' });
     
     setWorker(analysisWorker);
@@ -2370,18 +2306,14 @@ function App() {
       analysisWorker.terminate();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Only run once on mount. Do NOT recreate worker when color maps change.
+  }, []);
 
-  // Returns the folder to check/save results in (null = skip for this modality).
-  // For integration we use the first dataset's path (same as dataPath) so check and save use the same folder.
   const getResultsFolder = (path, info) => {
     if (!path || !window.electron?.checkCellpilotResults) return null;
-    // Integration: we save to the first dataset's path (path passed here); use it for check too so Load Previous works
     if (info?.integrationDatasets?.length > 0) return path;
     if (info?.atacIntegrationDatasets?.length > 0) return path;
     if (info?.xeniumIntegrationDatasets?.length > 0) return path;
     if (info?.visiumHDIntegrationDatasets?.length > 0) return path;
-    // For H5 files, use the parent directory
     if (/\.(h5|hdf5)$/i.test(path)) {
       const sep = path.includes('\\') ? '\\' : '/';
       const dir = path.substring(0, path.lastIndexOf(sep));
@@ -2390,7 +2322,6 @@ function App() {
     return path;
   };
 
-  // Called when user picks "Load Previous" or "New Analysis" from the dialog
   const handlePreviousResultsChoice = async (usePrevious) => {
     if (!previousResultsDialog) return;
     const { path, info, savedResults } = previousResultsDialog;
@@ -2398,21 +2329,18 @@ function App() {
     await doHandleDataLoaded(path, info, usePrevious ? savedResults : null);
   };
 
-  // Main entry point called by FileLoader, checks for saved results first
   const handleDataLoaded = async (path, info) => {
     const resultsFolder = getResultsFolder(path, info);
     if (resultsFolder) {
       try {
         const checkResult = await window.electron.checkCellpilotResults(resultsFolder);
         if (checkResult.success && checkResult.results?.umapCoordinates?.length > 0) {
-          // Only offer Load Previous if saved modality matches (e.g. don't load single-sample results when loading integration)
           const savedModality = checkResult.results?.modality;
           const currentModality = info?.modality;
           if (savedModality && currentModality && savedModality !== currentModality) {
-            // Mismatch: e.g. file is from single-sample, we're loading integration, skip dialog
           } else {
             setPreviousResultsDialog({ path, info, savedResults: checkResult.results });
-            return; // Wait for the user's dialog choice
+            return;
           }
         }
       } catch (e) {
@@ -2422,12 +2350,11 @@ function App() {
     await doHandleDataLoaded(path, info, null);
   };
 
-  // Actual data loading logic (previousResults = saved JSON or null for fresh analysis)
   const doHandleDataLoaded = async (path, info, previousResults) => {
     setDataPath(path);
-    // Reset pending save data so old results are not overwritten
+    setGeneNames(null);
+    geneNamesReadyRef.current = false;
     pendingSaveDataRef.current = null;
-    // Mark analysis as loading by using non-numeric placeholders
     setDataInfo({
       ...info,
       cells: 'Loading...',
@@ -2449,8 +2376,7 @@ function App() {
     setPeakViewPlot(null);
     setClusterLabelMap({});
     setRegionLabelMap({});
-    lastSavedPayloadHashRef.current = null; // Allow next save after load
-    // Reset multiome-specific state
+    lastSavedPayloadHashRef.current = null;
     setAtacClusterPlot(null);
     setAtacActivePlot(null);
     setAtacClusterLabelMap({});
@@ -2467,11 +2393,10 @@ function App() {
 
     if (worker && window.electron) {
       try {
+        console.log('Reading data from:', path);
         let result;
         
-        // Handle different data modalities
         if (info.modality === 'integration' && info.integrationDatasets) {
-          // Integration: files already loaded in FileLoader; build payload and send
           const convertToUint8Array = (value, label) => {
             if (!value) throw new Error(`${label} data is missing`);
             if (value instanceof Uint8Array) return value;
@@ -2514,20 +2439,19 @@ function App() {
             payload.datasets.push(entry);
           }
           if (previousResults) payload.previousResults = previousResults;
+          console.log('Sending integration data to worker:', payload.datasets.length, 'datasets');
           setIsAnalyzing(true);
           setWorkerStatusMessage(previousResults ? 'Loading previous integration results...' : 'Loading integration...');
           worker.postMessage(payload, transferables);
           return;
         }
         if (info.modality === 'atac-integration' && info.atacIntegrationDatasets) {
-          // ATAC Integration: files already loaded in FileLoader; build payload and send
           const payload = { type: 'LOAD_DATA', modality: 'atac-integration', path, info: { ...info }, atacDatasets: [] };
           const transferables = [];
           for (const ds of info.atacIntegrationDatasets) {
             const f = ds.files || {};
             let matrixBuffer;
             if (f.matrix?.data) {
-              // Matrix data assembled in FileLoader (either small or large-but-pre-fetched)
               const raw = f.matrix.data;
               let u8;
               if (raw instanceof Uint8Array) u8 = raw;
@@ -2541,7 +2465,6 @@ function App() {
             } else {
               throw new Error(`ATAC sample "${ds.name}": matrix data missing (was the file loaded correctly?)`);
             }
-            // Include peak annotation if available (for gene-lookup in worker)
             let peakAnnotationBuffer = null;
             if (f.peakAnnotation?.data) {
               const raw = f.peakAnnotation.data;
@@ -2566,13 +2489,13 @@ function App() {
             });
           }
           if (previousResults) payload.previousResults = previousResults;
+          console.log('Sending ATAC integration data to worker:', payload.atacDatasets.length, 'samples');
           setIsAnalyzing(true);
           setWorkerStatusMessage(previousResults ? 'Loading previous ATAC integration results...' : 'Loading ATAC integration...');
           worker.postMessage(payload, transferables);
           return;
         }
         if (info.modality === 'xenium-integration' && info.xeniumIntegrationDatasets) {
-          // Xenium Integration: 2 Xenium datasets, MNN batch correction
           const convertToUint8Array = (value, label) => {
             if (!value) throw new Error(`${label} data is missing`);
             if (value instanceof Uint8Array) return value;
@@ -2597,12 +2520,10 @@ function App() {
             xeniumDatasets: [],
           };
           const transferables = [];
-          // Per-sample spatial data (cells, coordinates) saved for later rendering
           const perSampleSpatialInfo = [];
           for (const ds of info.xeniumIntegrationDatasets) {
             const f = ds.files || {};
             const entry = { name: ds.name, path: ds.path, files: {} };
-            // cell_feature_matrix: either HDF5 or MatrixMarket
             const cfm = f.cellFeatureMatrix;
             if (cfm?.h5) {
               const h5Data = convertToUint8Array(cfm.h5.data, `${ds.name} HDF5`);
@@ -2621,14 +2542,12 @@ function App() {
             } else {
               throw new Error(`Xenium sample "${ds.name}": cell feature matrix missing.`);
             }
-            // Pass cells data for spatial coordinates (parsed by worker)
             if (f.cells?.data) {
               const cellsData = convertToUint8Array(f.cells.data, `${ds.name} cells`);
               const cellsBuf = cellsData.slice().buffer;
               entry.files.cells = { name: f.cells.name, data: cellsBuf };
               transferables.push(cellsBuf);
             }
-            // Save spatial info for rendering
             perSampleSpatialInfo.push({
               name: ds.name,
               metadata: ds.metadata,
@@ -2636,16 +2555,15 @@ function App() {
             });
             payload.xeniumDatasets.push(entry);
           }
-          // Store per-sample spatial info on dataInfo for rendering later
           payload.perSampleSpatialInfo = perSampleSpatialInfo;
           if (previousResults) payload.previousResults = previousResults;
+          console.log('Sending Xenium integration data to worker:', payload.xeniumDatasets.length, 'samples');
           setIsAnalyzing(true);
           setWorkerStatusMessage(previousResults ? 'Loading previous Xenium integration results...' : 'Loading Xenium integration...');
           worker.postMessage(payload, transferables);
           return;
         }
         if (info.modality === 'visium-hd-integration' && info.visiumHDIntegrationDatasets) {
-          // Visium HD Integration: 2 Visium HD datasets, MNN batch correction
           const convertToUint8Array = (value, label) => {
             if (!value) throw new Error(`${label} data is missing`);
             if (value instanceof Uint8Array) return value;
@@ -2674,7 +2592,6 @@ function App() {
           for (const ds of info.visiumHDIntegrationDatasets) {
             const f = ds.files || {};
             const entry = { name: ds.name, path: ds.path, files: {} };
-            // cell_feature_matrix: either HDF5 or MatrixMarket
             const cfm = f.cellFeatureMatrix;
             if (cfm?.h5) {
               const h5Data = convertToUint8Array(cfm.h5.data, `${ds.name} HDF5`);
@@ -2693,14 +2610,12 @@ function App() {
             } else {
               throw new Error(`Visium HD sample "${ds.name}": cell feature matrix missing.`);
             }
-            // Pass cellSegmentation GeoJSON for spatial coordinates (segmented data)
             if (f.cellSegmentation?.data) {
               const segData = convertToUint8Array(f.cellSegmentation.data, `${ds.name} cellSegmentation`);
               const segBuf = segData.slice().buffer;
               entry.files.cellSegmentation = { name: f.cellSegmentation.name || 'cell_segmentations.geojson', data: segBuf };
               hdTransferables.push(segBuf);
             }
-            // Pass tissuePositions for spatial coordinates (binned data fallback)
             if (!f.cellSegmentation?.data && f.tissuePositions?.data) {
               const tpData = convertToUint8Array(f.tissuePositions.data, `${ds.name} tissuePositions`);
               const tpBuf = tpData.slice().buffer;
@@ -2716,13 +2631,13 @@ function App() {
           }
           hdPayload.perSampleSpatialInfo = hdPerSampleSpatialInfo;
           if (previousResults) hdPayload.previousResults = previousResults;
+          console.log('Sending Visium HD integration data to worker:', hdPayload.visiumHDDatasets.length, 'samples');
           setIsAnalyzing(true);
           setWorkerStatusMessage(previousResults ? 'Loading previous Visium HD integration results...' : 'Loading Visium HD integration...');
           worker.postMessage(hdPayload, hdTransferables);
           return;
         }
         if (info.modality === 'merfish-integration' && info.merfishIntegrationDatasets) {
-          // MERFISH Integration: 2 MERFISH datasets, MNN batch correction
           const convertToUint8Array = (value, label) => {
             if (!value) throw new Error(`${label} data is missing`);
             if (value instanceof Uint8Array) return value;
@@ -2751,7 +2666,6 @@ function App() {
           for (const ds of info.merfishIntegrationDatasets) {
             const f = ds.files || {};
             const entry = { name: ds.name, path: ds.path, files: {} };
-            // counts (cell_by_gene.csv): required
             if (f.counts?.data) {
               const countsData = convertToUint8Array(f.counts.data, `${ds.name} counts`);
               const countsBuf = countsData.slice().buffer;
@@ -2760,7 +2674,6 @@ function App() {
             } else {
               throw new Error(`MERFISH sample "${ds.name}": cell_by_gene.csv missing.`);
             }
-            // spatial (cell_metadata.csv): required
             if (f.spatial?.data) {
               const spatialData = convertToUint8Array(f.spatial.data, `${ds.name} spatial`);
               const spatialBuf = spatialData.slice().buffer;
@@ -2777,13 +2690,13 @@ function App() {
           }
           merfishPayload.perSampleSpatialInfo = merfishPerSampleSpatialInfo;
           if (previousResults) merfishPayload.previousResults = previousResults;
+          console.log('Sending MERFISH integration data to worker:', merfishPayload.merfishDatasets.length, 'samples');
           setIsAnalyzing(true);
           setWorkerStatusMessage(previousResults ? 'Loading previous MERFISH integration results...' : 'Loading MERFISH integration...');
           worker.postMessage(merfishPayload, merfishTransferables);
           return;
         }
         if (info.modality === 'spatial') {
-          // For Xenium data, files are already loaded in FileLoader
           result = {
             success: true,
             format: info.format,
@@ -2792,7 +2705,6 @@ function App() {
             metadata: info.metadata,
           };
         } else if (info.modality === 'multiome' && info.files) {
-          // scMultiome: files already loaded in FileLoader via readMultiomeFiles
           result = {
             success: true,
             format: '10X Multiome',
@@ -2802,7 +2714,6 @@ function App() {
             cellBarcodes: info.cellBarcodes,
           };
         } else if (info.modality === 'atac' && info.files) {
-          // scATAC-seq: files already loaded in FileLoader via read10xAtacFiles
           result = {
             success: true,
             format: '10X ATAC',
@@ -2811,7 +2722,6 @@ function App() {
             cellBarcodes: info.cellBarcodes,
           };
         } else {
-          // For single-cell data, read files using existing method
           result = await window.electron.read10xFiles(path, {
             format: info.format,
             h5FileName: info.h5FileName,
@@ -2822,6 +2732,7 @@ function App() {
           throw new Error(result.error);
         }
         
+        console.log('Files read successfully, preparing data transfer...', result.format);
 
         const convertToUint8Array = (value, label) => {
           if (!value) {
@@ -2867,10 +2778,9 @@ function App() {
         };
         const transferables = [];
 
-        // For MERFISH data, handle custom CSV format
         if (info.modality === 'spatial' && info.format === 'MERFISH') {
+          console.log('Processing MERFISH data...');
 
-          // Prepare MERFISH files for transfer to worker
           const countsData = convertToUint8Array(result.files.counts?.data, 'counts');
           const spatialData = convertToUint8Array(result.files.spatial?.data, 'spatial');
 
@@ -2884,7 +2794,6 @@ function App() {
           const countsBuffer = countsData.slice().buffer;
           const spatialBuffer = spatialData.slice().buffer;
 
-          // Prepare MERFISH-specific payload
           payload.files.merfishCounts = {
             name: result.files.counts.name,
             data: countsBuffer,
@@ -2896,7 +2805,6 @@ function App() {
 
           transferables.push(countsBuffer, spatialBuffer);
 
-          // Handle optional clustering file
           if (result.files.clusters?.data) {
             const clustersData = convertToUint8Array(result.files.clusters.data, 'clusters');
             const clustersBuffer = clustersData.slice().buffer;
@@ -2907,7 +2815,6 @@ function App() {
             transferables.push(clustersBuffer);
           }
 
-          // Handle optional UMAP file
           if (result.files.umap?.data) {
             const umapData = convertToUint8Array(result.files.umap.data, 'umap');
             const umapBuffer = umapData.slice().buffer;
@@ -2919,20 +2826,24 @@ function App() {
           }
 
           payload.info = { ...info, format: 'MERFISH' };
+          console.log('MERFISH files prepared for worker:', {
+            hasCounts: true,
+            hasSpatial: true,
+            hasClusters: !!result.files.clusters?.data,
+            hasUmap: !!result.files.umap?.data,
+          });
 
-        // For CosMX data, handle custom CSV format (similar to MERFISH)
         } else if (info.modality === 'spatial' && info.format === 'CosMX') {
+          console.log('Processing CosMX data...');
 
           const preparsedUrls = result.files.counts?.preparsedUrls;
 
           if (preparsedUrls) {
-            // Large expression file was stream-parsed; data is served at URLs (avoids huge IPC payload)
             payload.files.cosmxCounts = {
               name: result.files.counts.name,
               preparsedUrls,
             };
           } else {
-            // Small expression file: pass raw CSV data for worker to parse
             const countsData = convertToUint8Array(result.files.counts?.data, 'counts');
             if (countsData.length === 0) {
               throw new Error('CosMX expression matrix file (*_exprMat_file.csv) is empty');
@@ -2954,15 +2865,19 @@ function App() {
           transferables.push(spatialBuffer);
 
           payload.info = { ...info, format: 'CosMX' };
+          console.log('CosMX files prepared for worker:', {
+            hasCounts: true,
+            hasSpatial: true,
+            preparsedUrls: !!preparsedUrls,
+          });
 
-        // For spatial data (Xenium or Visium HD), we need to handle cell_feature_matrix
         } else if (info.modality === 'spatial' && result.files.cellFeatureMatrix) {
+          console.log(`Processing ${info.format} cell feature matrix...`);
           
           const cfm = result.files.cellFeatureMatrix;
           
-          // Check if it's HDF5 format (h5 file) or MatrixMarket format
           if (cfm.h5) {
-            // HDF5 format: use h5 file
+            console.log('Using HDF5 format for spatial cell feature matrix');
             const h5Data = convertToUint8Array(cfm.h5.data, 'HDF5');
             if (h5Data.length === 0) {
               throw new Error('HDF5 cell feature matrix file is empty');
@@ -2976,7 +2891,7 @@ function App() {
             payload.info = { ...info, format: '10X HDF5' };
             transferables.push(h5Buffer);
           } else {
-            // MatrixMarket format: use matrix/features/barcodes files
+            console.log('Using MatrixMarket format for spatial cell feature matrix');
             const matrixData = convertToUint8Array(cfm.matrix?.data, 'matrix');
             const featuresData = convertToUint8Array(cfm.features?.data, 'features');
             const barcodesData = convertToUint8Array(cfm.barcodes?.data, 'barcodes');
@@ -2989,7 +2904,6 @@ function App() {
             const featuresBuffer = featuresData.slice().buffer;
             const barcodesBuffer = barcodesData.slice().buffer;
 
-            // For worker simplicity, mimic MatrixMarket naming
             payload.files.matrix = {
               name: cfm.matrix.name,
               data: matrixBuffer,
@@ -3002,23 +2916,23 @@ function App() {
               name: cfm.barcodes.name,
               data: barcodesBuffer,
             };
-            // Force format field so worker recognizes MatrixMarket pathway
-            // Keep original format name for identification but use compatible format
             payload.info = { ...info, format: info.format === '10X Visium HD' ? '10X Xenium' : '10X Xenium' };
 
             transferables.push(matrixBuffer, featuresBuffer, barcodesBuffer);
           }
           
-          // Also pass spatial metadata (for both HDF5 and MatrixMarket formats)
+          console.log('Preparing spatialInfo for worker...');
 
-          // Handle different spatial data formats
           let cellsForWorker = null;
           let cellSegmentationForWorker = null;
 
-          // For Xenium: cells data from cells.csv
           if (result.files.cells?.data) {
+            console.log('result.files.cells:', 'present');
+            console.log('cells data type:', result.files.cells?.data?.constructor?.name);
+            console.log('cells data length:', result.files.cells?.data?.length || 0);
             try {
               const cellsData = convertToUint8Array(result.files.cells.data, 'cells');
+              console.log('Converted cells data to Uint8Array, length:', cellsData.length);
               cellsForWorker = {
                 name: result.files.cells.name,
                 data: cellsData,
@@ -3028,10 +2942,13 @@ function App() {
             }
           }
 
-          // For Visium HD: cell segmentation from GeoJSON
           if (result.files.cellSegmentation?.data) {
+            console.log('result.files.cellSegmentation:', 'present');
+            console.log('cellSegmentation data type:', result.files.cellSegmentation?.data?.constructor?.name);
+            console.log('cellSegmentation data length:', result.files.cellSegmentation?.data?.length || 0);
             try {
               const segData = convertToUint8Array(result.files.cellSegmentation.data, 'cellSegmentation');
+              console.log('Converted cellSegmentation data to Uint8Array, length:', segData.length);
               cellSegmentationForWorker = {
                 name: result.files.cellSegmentation.name,
                 data: segData,
@@ -3041,11 +2958,14 @@ function App() {
             }
           }
 
-          // For Visium HD binned outputs: tissue positions for spatial coordinates
           let tissuePositionsForWorker = null;
           if (result.files.tissuePositions?.data) {
+            console.log('result.files.tissuePositions:', 'present');
+            console.log('tissuePositions format:', result.files.tissuePositions?.format);
+            console.log('tissuePositions data length:', result.files.tissuePositions?.data?.length || 0);
             try {
               const posData = convertToUint8Array(result.files.tissuePositions.data, 'tissuePositions');
+              console.log('Converted tissuePositions data to Uint8Array, length:', posData.length);
               tissuePositionsForWorker = {
                 name: result.files.tissuePositions.name,
                 data: posData,
@@ -3056,11 +2976,14 @@ function App() {
             }
           }
 
-          // For Visium HD: barcode_mappings.parquet as alternative source of spatial coordinates
           let barcodeMappingsForWorker = null;
           if (result.files.barcodeMappings?.data) {
+            console.log('result.files.barcodeMappings:', 'present');
+            console.log('barcodeMappings format:', result.files.barcodeMappings?.format);
+            console.log('barcodeMappings data length:', result.files.barcodeMappings?.data?.length || 0);
             try {
               const mappingsData = convertToUint8Array(result.files.barcodeMappings.data, 'barcodeMappings');
+              console.log('Converted barcodeMappings data to Uint8Array, length:', mappingsData.length);
               barcodeMappingsForWorker = {
                 name: result.files.barcodeMappings.name,
                 data: mappingsData,
@@ -3078,12 +3001,23 @@ function App() {
             barcodeMappings: barcodeMappingsForWorker,
             analysis: result.files.analysis,
             metadata: result.metadata,
-            dataType: info.dataType, // 'segmented' or 'binned' for Visium HD
+            dataType: info.dataType,
           };
 
+          console.log('spatialInfo prepared:', {
+            hasCells: !!cellsForWorker,
+            cellsDataLength: cellsForWorker?.data?.length,
+            hasCellSegmentation: !!cellSegmentationForWorker,
+            cellSegmentationDataLength: cellSegmentationForWorker?.data?.length,
+            hasTissuePositions: !!tissuePositionsForWorker,
+            tissuePositionsDataLength: tissuePositionsForWorker?.data?.length,
+            hasBarcodeMappings: !!barcodeMappingsForWorker,
+            barcodeMappingsDataLength: barcodeMappingsForWorker?.data?.length,
+            hasAnalysis: !!result.files.analysis,
+            dataType: info.dataType,
+          });
           
         } else if (info.format === '10X Multiome' || result.format === '10X Multiome') {
-          // Multiome: H5 file + optional peak annotation + precomputed analysis
           const h5File = result.files?.h5;
           if (!h5File) {
             throw new Error('Multiome HDF5 file payload missing from result');
@@ -3099,7 +3033,6 @@ function App() {
           };
           transferables.push(h5Buffer);
 
-          // Peak annotation (optional)
           if (result.files?.peakAnnotation) {
             const peakAnnoData = convertToUint8Array(result.files.peakAnnotation.data, 'peakAnnotation');
             const peakAnnoBuffer = peakAnnoData.slice().buffer;
@@ -3110,9 +3043,11 @@ function App() {
             transferables.push(peakAnnoBuffer);
           }
 
-          // Pass precomputed analysis as text (not transferable, small strings)
           payload.precomputed = result.precomputed || {};
           payload.info = { ...info, format: '10X Multiome', modality: 'multiome' };
+          console.log('[App] Multiome payload prepared:',
+            'cellBarcodes:', info.cellBarcodes ? info.cellBarcodes.length : 'null',
+            'precomputed keys:', Object.keys(result.precomputed || {}));
         } else if (info.format === '10X ATAC' || result.format === '10X ATAC') {
           const matrixFile = result.files?.matrix;
           if (!matrixFile) {
@@ -3151,6 +3086,7 @@ function App() {
             transferables.push(payload.files.peakAnnotation.data);
           }
           payload.info = { ...info, format: '10X ATAC', modality: 'atac', cellBarcodes: payload.files.barcodes };
+          console.log('[App] ATAC (scATAC pipeline): matrix', useStreamedMatrix ? `${matrixFile._matrixSize} bytes (streamed)` : matrixFile.data?.byteLength ?? matrixFile.data?.length, 'bytes, barcodes:', payload.files.barcodes.length, 'peaks:', payload.files.peaks.length);
         } else if (info.format === '10X HDF5') {
           const h5File = result.files?.h5;
           if (!h5File) {
@@ -3158,8 +3094,6 @@ function App() {
           }
 
           if (h5File.h5Url) {
-            // Large file (≥2 GiB): worker streams data via HTTP Range requests:
-            // no binary IPC transfer needed.
             payload.files.h5 = {
               name: h5File.name || info.h5FileName || 'dataset.h5',
               h5Url: h5File.h5Url,
@@ -3207,20 +3141,19 @@ function App() {
           transferables.push(matrixBuffer, featuresBuffer, barcodesBuffer);
         }
 
-        // Attach previous results so the worker can restore them instead of running full analysis
         if (previousResults) {
           payload.previousResults = previousResults;
         }
+        console.log('Sending data to worker...');
         if (payload.info?.format === '10X ATAC' || payload.info?.modality === 'atac') {
           setIsAnalyzing(true);
           setWorkerStatusMessage(previousResults ? 'Loading previous scATAC results...' : 'Loading scATAC-seq...');
         }
         worker.postMessage(payload, transferables);
 
-        // Stream large ATAC matrix in chunks so renderer never holds full 1.4GB (avoids postMessage OOM)
         const matrixFile = payload.files?.matrix;
         if (matrixFile?._chunkKey != null && matrixFile?._matrixSize != null && window.electron) {
-          const CHUNK_SIZE = 80 * 1024 * 1024; // 80 MB per message
+          const CHUNK_SIZE = 80 * 1024 * 1024;
           const totalSize = matrixFile._matrixSize;
           const chunkKey = matrixFile._chunkKey;
           for (let offset = 0; offset < totalSize; offset += CHUNK_SIZE) {
@@ -3252,17 +3185,80 @@ function App() {
     }
   };
 
-  // Listen for data loaded from worker
-  // This is already being handled in the main worker listener (lines 233-460)
-  // Just noting that DATA_LOADED updates will come through that handler
+  const runFragmentQuery = (task) => {
+    pendingFragmentQueriesRef.current += 1;
+    setIsAnalyzing(true);
+    setWorkerStatusMessage('Loading peak coverage from fragments...');
+    const timeout = new Promise((resolve) => setTimeout(resolve, 120000));
+    Promise.race([Promise.resolve().then(task), timeout]).catch(() => {}).finally(() => {
+      pendingFragmentQueriesRef.current = Math.max(0, pendingFragmentQueriesRef.current - 1);
+      if (pendingFragmentQueriesRef.current === 0 && !pendingMultiomeGenePlotRef.current) {
+        setIsAnalyzing(false);
+        setWorkerStatusMessage('');
+      }
+    });
+  };
 
   const handleAnalysisRequest = (command) => {
-    // Handle rename actions separately: they don't require the worker
     if (command.action === 'rename_cluster') {
       return handleRenameCluster(command);
     }
     if (command.action === 'rename_region') {
       return handleRenameRegion(command);
+    }
+
+    if (command.action === 'highlight_cluster' || command.action === 'clear_cluster_highlight') {
+      const plot = clusterPlotRef.current;
+      if (!plot?.data?.clusters) {
+        return { error: 'There are no clusters to highlight yet. Load a dataset and let the analysis finish first.' };
+      }
+      const showClusterView = () => {
+        if (activePlot !== plot) {
+          setActivePlot(plot);
+          setLastActiveArtifactId(null);
+        }
+      };
+      const wnnLayout = isWnnLayoutShown();
+      if (command.action === 'clear_cluster_highlight') {
+        if (wnnLayout) setWnnCrossHighlight(null);
+        else setSelectedClusters(new Set());
+        showClusterView();
+        return { success: true, message: 'Cleared the highlight. All clusters are shown.' };
+      }
+      const labels = (wnnLayout ? wnnClusterLabelMap : clusterLabelMapRef.current) || {};
+      const present = new Set(plot.data.clusters.map(String));
+      const requested = Array.isArray(command.params?.clusters) && command.params.clusters.length > 0
+        ? command.params.clusters
+        : [command.params?.cluster];
+      const ids = [];
+      for (const c of requested) {
+        if (c === null || c === undefined || c === '') continue;
+        const s = String(c).trim();
+        if (present.has(s)) { ids.push(s); continue; }
+        const byLabel = Object.keys(labels).filter((k) => String(labels[k]).toLowerCase() === s.toLowerCase() && present.has(k));
+        if (byLabel.length === 0) {
+          return { error: `Cluster "${s}" was not found. Say a cluster number or a cluster name from the legend.` };
+        }
+        ids.push(...byLabel);
+      }
+      if (ids.length === 0) {
+        return { error: 'Which cluster do you want to highlight? For example: "highlight cluster 3".' };
+      }
+      const unique = [...new Set(ids)];
+      if (wnnLayout) {
+        setWnnCrossHighlight({
+          sourceClusters: plot.data.clusters,
+          highlightClusterId: unique[0],
+          highlightClusterIds: unique,
+          sourceModality: 'wnn-integrated',
+        });
+      } else {
+        setSelectedClusters(new Set(unique));
+      }
+      showClusterView();
+      const names = unique.map((id) => (labels[id] ? `${labels[id]} (cluster ${id})` : `cluster ${id}`));
+      const where = wnnLayout ? ' of the WNN integrated UMAP, with the same cells on the RNA and ATAC views' : '';
+      return { success: true, message: `Highlighting ${names.join(', ')}${where}. Say "clear the highlight" to show all clusters again.` };
     }
 
     if (command.action === 'show_annotation_table') {
@@ -3283,7 +3279,6 @@ function App() {
       return { error: 'Please load data first before plotting gene expression.' };
     }
 
-    // SpaGE gene imputation: read scRNA reference files then post to worker
     if (command.action === 'impute_gene') {
       if (!dataPath || !worker) {
         return { error: 'No spatial data loaded or analysis engine not ready' };
@@ -3293,7 +3288,6 @@ function App() {
         return { error: 'No scRNA-seq reference path provided' };
       }
       setIsAnalyzing(true);
-      // Read files asynchronously, then post to worker
       (async () => {
         try {
           const fileData = await window.electron.read10xFiles(scrnaPath);
@@ -3361,6 +3355,9 @@ function App() {
     }
 
     if (command.action === 'plot_gene_dotplot') {
+      console.log('====== APP: Handling dotplot command ======');
+      console.log('Command:', command);
+      console.log('Command params:', command.params);
 
       const requestedColor = command.params?.colorMap || defaultColorMap;
       setDefaultColorMap(requestedColor);
@@ -3369,6 +3366,7 @@ function App() {
       pendingMultiomeGenePlotRef.current = dataInfo?.modality === 'multiome';
       setIsAnalyzing(true);
 
+      console.log('====== APP: Posting message to worker ======');
       worker.postMessage({
         type: 'RUN_ANALYSIS',
         command: command,
@@ -3381,6 +3379,7 @@ function App() {
         ? genes.join(', ')
         : (command.params?.gene || 'selected genes');
 
+      console.log('====== APP: Returning success message ======');
       return {
         success: true,
         message: `Generating dot plot for ${geneLabel}`,
@@ -3403,7 +3402,6 @@ function App() {
         dataPath: dataPath,
       };
 
-      // Include clusterLabelMap for UMAP updates to preserve cluster merges
       if (command.action === 'update_umap_parameters') {
         message.clusterLabelMap = clusterLabelMap;
       }
@@ -3417,7 +3415,6 @@ function App() {
       };
     }
 
-    // Handle cluster info request
     if (command.action === 'cluster_info') {
       const clusterLabel = clusterLabelMap?.[String(command.params?.cluster)] || command.params?.cluster;
       setIsAnalyzing(true);
@@ -3448,7 +3445,6 @@ function App() {
       };
     }
 
-    // DEG between two samples within a cluster (integration)
     if (command.action === 'deg_between_samples') {
       const s1 = command.params?.sample1 ?? 'sample1';
       const s2 = command.params?.sample2 ?? 'sample2';
@@ -3465,7 +3461,6 @@ function App() {
       };
     }
 
-    // Cell fraction / proportion per sample (integration)
     if (command.action === 'plot_cell_fraction') {
       setIsAnalyzing(true);
       worker.postMessage({
@@ -3479,7 +3474,6 @@ function App() {
       };
     }
 
-    // Show regions: display UMAP/spatial colored by BANKSY regions (no worker call needed)
     if (command.action === 'show_regions') {
       if (!regionPlot) {
         return {
@@ -3501,7 +3495,6 @@ function App() {
       };
     }
 
-    // Region composition: cell type breakdown within a BANKSY spatial region
     if (command.action === 'region_composition') {
       if (!regionPlot) {
         return {
@@ -3596,14 +3589,11 @@ function App() {
       };
     }
 
-    // WNN integration: combine RNA and ATAC into a co-embedding UMAP
     if (command.action === 'wnn_integrate') {
       if (dataInfo?.modality !== 'multiome') {
         return { error: 'WNN integration requires multiome (RNA + ATAC) data.' };
       }
       setIsAnalyzing(true);
-      // Don't clear WNN panels immediately, keep them visible during recomputation.
-      // wnn-individual and wnn messages will update them as they arrive.
       worker.postMessage({
         type: 'RUN_ANALYSIS',
         command: command,
@@ -3612,10 +3602,8 @@ function App() {
       return { success: true, message: 'Running WNN integration (RNA + ATAC co-embedding)...' };
     }
 
-    // Resolve named cluster label → numeric ID(s) for TF motif analysis
     if (command.action === 'tf_motif_analysis') {
       const clusterParam = command.params?.cluster;
-      // If ChatBot already resolved multiple IDs for a merged label, use them all
       const preResolvedClusters = command.params?.clusters;
       if (Array.isArray(preResolvedClusters) && preResolvedClusters.length > 1) {
         const displayName = clusterLabelMap?.[String(preResolvedClusters[0])] || `Clusters [${preResolvedClusters.join(', ')}]`;
@@ -3627,7 +3615,6 @@ function App() {
         });
         return { success: true, message: `Running TF motif enrichment for ${displayName}...` };
       }
-      // Single cluster, resolve label to numeric ID
       const resolved = (() => {
         if (typeof clusterParam === 'number' && !Number.isNaN(clusterParam)) return clusterParam;
         const str = String(clusterParam).trim();
@@ -3651,7 +3638,6 @@ function App() {
       return { success: true, message: `Running TF motif enrichment for ${displayName}...` };
     }
 
-    // Send analysis request to worker
     setIsAnalyzing(true);
     worker.postMessage({
       type: 'RUN_ANALYSIS',
@@ -3662,12 +3648,21 @@ function App() {
     return { success: true, message: 'Analysis started...' };
   };
 
+  const isWnnLayoutShown = () => wnnActive && wnnRnaPlot && wnnAtacPlot && dataInfo?.modality === 'multiome';
+  const setWnnHighlightFromChat = (viewModality, clusterId) => {
+    const sourceClusters = viewModality === 'wnn-rna' ? wnnRnaPlot?.data?.clusters : wnnAtacPlot?.data?.clusters;
+    if (!Array.isArray(sourceClusters)) return false;
+    if (!sourceClusters.some(c => String(c) === String(clusterId))) return false;
+    setWnnCrossHighlight({ sourceClusters, highlightClusterId: String(clusterId), sourceModality: viewModality });
+    return true;
+  };
+
   const handleHighlightRnaClusterOnAtac = (clusterParam) => {
     if (clusterParam === null || clusterParam === undefined || clusterParam === '') {
       setRnaClusterHighlightOnAtac(null);
+      if (isWnnLayoutShown()) setWnnCrossHighlight(null);
       return true;
     }
-    // Resolve label to cluster ID (e.g. "PT" -> 1) using RNA clusterLabelMap
     const resolved = (() => {
       if (typeof clusterParam === 'number' && !Number.isNaN(clusterParam)) return clusterParam;
       const str = String(clusterParam).trim();
@@ -3679,17 +3674,18 @@ function App() {
       return entry ? parseInt(entry[0], 10) : null;
     })();
     if (resolved === null) return false;
+    if (isWnnLayoutShown()) return setWnnHighlightFromChat('wnn-rna', resolved);
     setRnaClusterHighlightOnAtac(resolved);
-    setAtacClusterHighlightOnRna(null); // only one cross-highlight at a time; RNA→ATAC takes precedence
+    setAtacClusterHighlightOnRna(null);
     return true;
   };
 
   const handleHighlightAtacClusterOnRna = (clusterParam) => {
     if (clusterParam === null || clusterParam === undefined || clusterParam === '') {
       setAtacClusterHighlightOnRna(null);
+      if (isWnnLayoutShown()) setWnnCrossHighlight(null);
       return true;
     }
-    // Resolve label to cluster ID using ATAC clusterLabelMap
     const resolved = (() => {
       if (typeof clusterParam === 'number' && !Number.isNaN(clusterParam)) return clusterParam;
       const str = String(clusterParam).trim();
@@ -3701,8 +3697,9 @@ function App() {
       return entry ? parseInt(entry[0], 10) : null;
     })();
     if (resolved === null) return false;
+    if (isWnnLayoutShown()) return setWnnHighlightFromChat('wnn-atac', resolved);
     setAtacClusterHighlightOnRna(resolved);
-    setRnaClusterHighlightOnAtac(null); // only one cross-highlight at a time; ATAC→RNA takes precedence
+    setRnaClusterHighlightOnAtac(null);
     return true;
   };
 
@@ -3718,13 +3715,11 @@ function App() {
       return false;
     }
 
-    // First try to find the last active artifact (either gene_expression or gene_dotplot)
     let targetIndex = artifacts.findIndex(
       (artifact) => artifact.id === lastActiveArtifactId && 
                     (artifact.type === 'gene_expression' || artifact.type === 'gene_dotplot')
     );
 
-    // If no match, find the most recent colorable artifact (gene_expression or gene_dotplot)
     if (targetIndex === -1) {
       for (let i = artifacts.length - 1; i >= 0; i--) {
         if (artifacts[i].type === 'gene_expression' || artifacts[i].type === 'gene_dotplot') {
@@ -3752,15 +3747,12 @@ function App() {
     const updatedArtifacts = [...artifacts];
     updatedArtifacts[targetIndex] = updatedArtifact;
 
-    // If this is a dotplot with a linked spatial artifact, update that too
     let spatialArtifactId = null;
     if (targetArtifact.type === 'gene_dotplot') {
-      // Find the spatial gene expression artifact created at the same time
-      // It should have been created right after the dotplot
       const spatialArtifactIndex = artifacts.findIndex(
         (artifact, idx) =>
           artifact.type === 'gene_expression' &&
-          idx === targetIndex + 1 && // Created right after the dotplot
+          idx === targetIndex + 1 &&
           artifact.geneName === targetArtifact.geneNames?.[0]
       );
 
@@ -3772,10 +3764,10 @@ function App() {
           updatedAt: new Date().toISOString(),
         };
         updatedArtifacts[spatialArtifactIndex] = updatedSpatialArtifact;
+        console.log('Updated linked spatial artifact colorMap:', spatialArtifactId);
       }
     }
 
-    // Multiome: when recoloring a gene expression plot, update both RNA and ATAC artifacts for the same gene
     if (dataInfo?.modality === 'multiome' && targetArtifact.type === 'gene_expression' && targetArtifact.geneName) {
       const pairedIndex = artifacts.findIndex(
         (artifact) =>
@@ -3792,7 +3784,6 @@ function App() {
       }
     }
 
-    // Multiome: when recoloring a dot plot, update both RNA and ATAC dot plot artifacts for the same genes
     if (dataInfo?.modality === 'multiome' && targetArtifact.type === 'gene_dotplot' && Array.isArray(targetArtifact.geneNames) && targetArtifact.geneNames.length > 0) {
       const targetGeneKey = targetArtifact.geneNames.join(',');
       const pairedIndex = artifacts.findIndex(
@@ -3815,14 +3806,12 @@ function App() {
     setArtifacts(updatedArtifacts);
     setLastActiveArtifactId(updatedArtifact.id);
 
-    // Preserve the spatialArtifactId link when updating activePlot
     const newActivePlot = { source: 'artifact', artifactId: updatedArtifact.id };
     if (spatialArtifactId) {
       newActivePlot.spatialArtifactId = spatialArtifactId;
     }
     setActivePlot(newActivePlot);
     
-    // Generate appropriate message based on plot type
     let plotDescription = '';
     if (targetArtifact.type === 'gene_expression') {
       plotDescription = targetArtifact.geneName || 'gene expression plot';
@@ -3890,7 +3879,6 @@ function App() {
       return { error: 'Please specify both the cluster to rename and the new name.' };
     }
 
-    // Normalize the old label to string for consistent lookup
     const oldKey = String(oldLabel).trim();
     const newName = String(newLabel).trim();
 
@@ -3898,25 +3886,25 @@ function App() {
       return { error: 'New cluster name cannot be empty.' };
     }
 
-    // Determine which label map and color overrides to use based on multiome target
     const isAtac = multiomeTarget === 'atac';
     const isWnn = multiomeTarget === 'wnn';
-    const activeLabelMap = isAtac ? atacClusterLabelMap : isWnn ? wnnClusterLabelMap : clusterLabelMap;
+    const chainMapApplies = wnnActive ? isWnn : (!isAtac && !isWnn);
+    const activeLabelMap = {
+      ...(isAtac ? atacClusterLabelMap : isWnn ? wnnClusterLabelMap : clusterLabelMap),
+      ...(chainMapApplies ? (command._clusterLabelMapForMerge || {}) : {}),
+    };
     const setActiveLabelMap = isAtac ? setAtacClusterLabelMap : isWnn ? setWnnClusterLabelMap : setClusterLabelMap;
     const activeColorOverrides = isAtac ? atacClusterColorOverrides : isWnn ? wnnClusterColorOverrides : clusterColorOverrides;
     const setActiveColorOverrides = isAtac ? setAtacClusterColorOverrides : isWnn ? setWnnClusterColorOverrides : setClusterColorOverrides;
     const modalityLabel = isAtac ? 'ATAC' : isWnn ? 'WNN' : 'RNA';
 
-    // Check if the new name already exists in the cluster label map
-    // If so, this is a merge operation
     const existingClustersWithSameName = Object.entries(activeLabelMap)
       .filter(([key, value]) => value === newName && key !== oldKey)
       .map(([key]) => key);
 
     if (existingClustersWithSameName.length > 0) {
-      // This is a merge! The user is renaming a cluster to match an existing cluster name
+      console.log(`Detected merge (${modalityLabel}): cluster ${oldKey} -> ${newName} (already used by ${existingClustersWithSameName})`);
 
-      // Find the target cluster ID (the first one with this name)
       const targetClusterId = parseInt(existingClustersWithSameName[0]);
       const sourceClusterId = parseInt(oldKey);
 
@@ -3924,7 +3912,6 @@ function App() {
         return { error: 'Cluster merging requires numeric cluster IDs.' };
       }
 
-      // Trigger cluster merge in the worker
       worker.postMessage({
         type: 'RUN_ANALYSIS',
         command: {
@@ -3938,19 +3925,13 @@ function App() {
         dataPath: dataPath,
       });
 
-      // Update the cluster label map. KEEP both cluster entries with the same merged name
-      // This allows us to find all cells from both original clusters when looking up the label
       setActiveLabelMap(prev => {
         const updated = { ...prev };
-        // IMPORTANT: Keep the source cluster entry with the merged name (don't delete it!)
-        // This allows "find markers for PT" to find cells from BOTH original clusters
         updated[oldKey] = newName;
-        // Ensure the target cluster also has the merged name
         updated[String(targetClusterId)] = newName;
         return updated;
       });
 
-      // Make merged clusters use the same color (the target cluster's color)
       const targetColor = activeColorOverrides[String(targetClusterId)];
       if (targetColor) {
         setActiveColorOverrides(prev => ({
@@ -3968,7 +3949,6 @@ function App() {
       return { success: true, message: `${modalityLabel}: Merging cluster ${oldKey} with cluster ${targetClusterId} under name "${newName}". The clusters will share the same color and be treated as one in all analyses.` };
     }
 
-    // Normal rename (no merge)
     setActiveLabelMap(prev => ({
       ...prev,
       [oldKey]: newName,
@@ -4074,10 +4054,8 @@ function App() {
                   showToast({ message: 'Screenshot only available in Electron', intent: 'warning' });
                   return;
                 }
-                // Dismiss tooltip and any toasts before capture
                 e.currentTarget.blur();
                 toasterRef.current?.clear();
-                // Wait for tooltip/toast to disappear
                 await new Promise(r => setTimeout(r, 300));
                 const result = await window.electron.captureScreenshot();
                 if (result.success) {
@@ -4102,7 +4080,6 @@ function App() {
                   try {
                     const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
                     recordedChunksRef.current = [];
-                    // Prefer MP4/H.264 (opens natively on macOS), fall back to WebM
                     const mp4Mime = 'video/mp4;codecs=avc1';
                     const mimeType = MediaRecorder.isTypeSupported(mp4Mime) ? mp4Mime : 'video/webm;codecs=vp9';
                     const fileExt = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
@@ -4124,14 +4101,12 @@ function App() {
                         }
                       }
                     };
-                    // Also stop recording if the user ends the stream via OS controls
                     stream.getVideoTracks()[0].onended = () => mediaRecorderRef.current?.stop();
                     recorder.start();
                     mediaRecorderRef.current = recorder;
                     setIsRecording(true);
                     showToast({ message: 'Recording started', intent: 'primary', timeout: 2000 });
                   } catch (err) {
-                    // Ignore user-cancelled or permission-denied, main process already showed a dialog
                     if (err.name !== 'AbortError' && err.name !== 'NotAllowedError' && !err.message?.includes('no video stream')) {
                       showToast({ message: `Recording error: ${err.message}`, intent: 'danger' });
                     }
@@ -4196,13 +4171,6 @@ function App() {
           <div className="visualization-row" ref={visualRowRef}>
             {(dataInfo?.modality === 'integration' || dataInfo?.modality === 'atac-integration' || dataInfo?.modality === 'xenium-integration' || dataInfo?.modality === 'visium-hd-integration' || dataInfo?.modality === 'merfish-integration') && (dataInfo.datasetNames?.length === 2 || dataInfo.datasetNames?.length === 3) ? (
               (() => {
-                // For integrated scRNA-seq or scATAC-seq (2–3 samples), show one UMAP per sample.
-                // Gene expression uses a shared color scale across all per-sample views:
-                // 1. Find the most recent RNA gene_expression artifact.
-                // 2. Compute its global min/max expression.
-                // 3. Pass per-sample geneExpression objects with:
-                // expression subset for that sample's cells,
-                // shared globalMinExp/globalMaxExp so UmapDeckView uses a common legend.
                 const latestGeneExpr = (() => {
                   if (!Array.isArray(artifacts) || artifacts.length === 0) return null;
                   const isAtacInteg = dataInfo?.modality === 'atac-integration';
@@ -4229,7 +4197,6 @@ function App() {
                   }
                 }
 
-                // atac-integration: normalize so every view has the same set of clusters (union + empty tracks for missing)
                 const normalizedViewCoverageByCluster = (() => {
                   const vc = latestGeneExpr?.viewCoverageByCluster;
                   if (!vc || typeof vc !== 'object' || Array.isArray(vc)) return vc ?? {};
@@ -4265,19 +4232,12 @@ function App() {
                   return out;
                 })();
 
-                // atac-integration: shared y-axis max across all sample coverage plots (0 to same max for comparison)
-                // Problem: tiny clusters have inflated Signac-normalized signals because the formula
-                // raw_sum / (meanDepth * nCells) blows up when nCells is very small, setting yMax too high
-                // and making all other (abundant) clusters appear flat.
-                // Fix: compute per-cluster peak maximum, exclude clusters below a cell-count threshold,
-                // then use the max of the qualifying clusters. Fall back to all clusters if none qualify.
                 const viewCoverageGlobalYMax = (() => {
                   const vc = normalizedViewCoverageByCluster && Object.keys(normalizedViewCoverageByCluster).length > 0 ? normalizedViewCoverageByCluster : latestGeneExpr?.viewCoverageByCluster;
                   if (!vc || typeof vc !== 'object' || Array.isArray(vc)) return null;
                   const MIN_CELLS_FOR_YMAX = 10;
-                  // Collect the peak-maximum signal for each (sample × cluster) entry
-                  let qualifiedMax = 0;   // max among clusters with enough cells
-                  let fallbackMax = 0;    // max among all clusters (used only if no cluster qualifies)
+                  let qualifiedMax = 0;
+                  let fallbackMax = 0;
                   let anyQualified = false;
                   for (const viewName of Object.keys(vc)) {
                     const cov = vc[viewName];
@@ -4300,7 +4260,6 @@ function App() {
                   return ymax > 0 ? parseFloat(ymax.toPrecision(2)) : null;
                 })();
 
-                // When active plot is integration violin or dotplot, show per-view violin/dotplot in each card
                 const integrationViolinOrDotplotArtifact = (() => {
                   if (activePlot?.source !== 'artifact') return null;
                   const art = artifacts.find((a) => a.id === activePlot.artifactId);
@@ -4308,7 +4267,6 @@ function App() {
                   return art;
                 })();
 
-                // When DEG (or markers) result is showing, upper panel shows only the Analysis View (DEG table + volcano), not sample UMAPs.
                 const showAnalysisResultOnly = activePlot?.source === 'analysis' &&
                   (activePlot?.data?.type === 'deg_between_samples' || activePlot?.data?.type === 'markers' || activePlot?.data?.type === 'cell_fraction' || activePlot?.data?.type === 'region_composition' || activePlot?.data?.type === 'spatial_cell_interaction' || activePlot?.data?.type === 'cluster_annotation');
 
@@ -4336,11 +4294,8 @@ function App() {
                   );
                 }
 
-                // Xenium integration: per-sample spatial views + integrated UMAP
                 if (dataInfo?.modality === 'xenium-integration') {
-                  // Whether gene expression should be shown (user plotted a gene and hasn't switched back to cluster-only)
                   const xeniumShowGeneExpr = latestGeneExpr && !integrationViolinOrDotplotArtifact && activePlot != null && !integrationShowClustersOnly;
-                  // Full-dataset gene expression for the integrated UMAP
                   const xeniumIntegratedGeneExpression = xeniumShowGeneExpr ? {
                     source: 'analysis',
                     data: {
@@ -4359,7 +4314,6 @@ function App() {
                         const indices = clusterPlot?.data?.integrationViews?.[viewName]?.indices;
                         const nClusters = clusterPlot?.data?.nClusters ?? 0;
                         const sampleSpatial = dataInfo.perSampleSpatial?.[viewName];
-                        // Build per-sample spatial dataInfo for SpatialPlotView
                         const sampleDataInfo = sampleSpatial ? {
                           ...dataInfo,
                           modality: 'spatial',
@@ -4372,7 +4326,6 @@ function App() {
                           histologyPrealigned: false,
                           metadata: sampleSpatial.metadata,
                         } : null;
-                        // Per-sample cluster plot for spatial view: map cluster IDs to spatial coords
                         const sampleClusterPlot = sampleDataInfo && clusterPlot?.data && Array.isArray(indices) ? {
                           source: 'analysis',
                           data: {
@@ -4384,7 +4337,6 @@ function App() {
                             clusterColorDomain: nClusters > 0 ? Array.from({ length: nClusters }, (_, i) => i) : undefined,
                           },
                         } : null;
-                        // Per-sample gene expression activePlot: subset full expression by sample indices
                         const sampleGeneExprActivePlot = xeniumShowGeneExpr && sampleDataInfo && Array.isArray(indices) ? {
                           source: 'analysis',
                           data: {
@@ -4395,7 +4347,6 @@ function App() {
                           },
                         } : null;
 
-                        // When a violin/dotplot is active, show PlotView per sample instead of SpatialPlotView
                         const xeniumSampleActivePlot = integrationViolinOrDotplotArtifact
                           ? { source: 'artifact', artifactId: integrationViolinOrDotplotArtifact.id, viewName }
                           : null;
@@ -4450,7 +4401,6 @@ function App() {
                           </div>
                         );
                       })}
-                      {/* Integrated UMAP / violin / dotplot card */}
                       <div
                         className="visualization-card interaction-card"
                         style={{ flex: 1, minWidth: 0 }}
@@ -4494,7 +4444,6 @@ function App() {
                   );
                 }
 
-                // MERFISH integration: per-sample spatial views + integrated UMAP
                 if (dataInfo?.modality === 'merfish-integration') {
                   const merfishShowGeneExpr = latestGeneExpr && !integrationViolinOrDotplotArtifact && activePlot != null && !integrationShowClustersOnly;
                   const merfishIntegratedGeneExpression = merfishShowGeneExpr ? {
@@ -4600,7 +4549,6 @@ function App() {
                           </div>
                         );
                       })}
-                      {/* Integrated UMAP / violin / dotplot card */}
                       <div
                         className="visualization-card interaction-card"
                         style={{ flex: 1, minWidth: 0 }}
@@ -4644,7 +4592,6 @@ function App() {
                   );
                 }
 
-                // Visium HD integration: per-sample spatial views + integrated UMAP
                 if (dataInfo?.modality === 'visium-hd-integration') {
                   const hdShowGeneExpr = latestGeneExpr && !integrationViolinOrDotplotArtifact && activePlot != null && !integrationShowClustersOnly;
                   const hdIntegratedGeneExpression = hdShowGeneExpr ? {
@@ -4750,7 +4697,6 @@ function App() {
                           </div>
                         );
                       })}
-                      {/* Integrated UMAP / violin / dotplot card */}
                       <div
                         className="visualization-card interaction-card"
                         style={{ flex: 1, minWidth: 0 }}
@@ -4829,15 +4775,11 @@ function App() {
                             colorMap,
                             globalMinExp,
                             globalMaxExp,
-                            // Share the percentile-based color range across all per-sample views
-                            // so expressing cells use the same scale in Sham and Day14 panels.
                             expressionRange: latestGeneExpr.expressionRange ?? null,
                           },
                         };
                       })();
 
-                      // atac-integration: check if the active gene artifact has showPeakViewAsPrimary
-                      // ("coverage plot [gene]" → show only peak coverage, no gene activity UMAP)
                       const isPeakViewOnly = (() => {
                         if (dataInfo?.modality !== 'atac-integration') return false;
                         if (!activePlot || activePlot.source !== 'artifact') return false;
@@ -4847,10 +4789,8 @@ function App() {
 
                       const activePlotForView = integrationViolinOrDotplotArtifact
                         ? { source: 'artifact', artifactId: integrationViolinOrDotplotArtifact.id, viewName }
-                        : isPeakViewOnly ? subsetPlot   // show cluster UMAP only (no gene overlay)
+                        : isPeakViewOnly ? subsetPlot
                         : subsetPlot;
-                      // When activePlot is null we're showing UMAP-by-cluster only (e.g. after "plot umap"); don't overlay last gene
-                      // When isPeakViewOnly we also skip gene overlay (coverage-only mode like single-sample Peak View)
                       const geneExpressionForView = (activePlot == null || integrationViolinOrDotplotArtifact || isPeakViewOnly) ? null : viewGeneExpression;
 
                       return (
@@ -4867,7 +4807,6 @@ function App() {
                           </div>
                           <div className="visualization-card-body">
                             {isPeakViewOnly ? (
-                              // Peak-view-only mode: show only the coverage plot (same as single-sample scATAC Peak View)
                               (() => {
                                 const viewCoverage = normalizedViewCoverageByCluster?.[viewName] ?? latestGeneExpr?.viewCoverageByCluster?.[viewName];
                                 const region = latestGeneExpr?.region;
@@ -4956,7 +4895,6 @@ function App() {
                               }}
                             />
                             {(() => {
-                              // atac-integration: show per-sample coverage plot when a gene is active (not when user said "plot umap" only)
                               if (dataInfo?.modality !== 'atac-integration') return null;
                               if (integrationShowClustersOnly) return null;
                               const viewCoverageForPlot = normalizedViewCoverageByCluster?.[viewName] ?? latestGeneExpr?.viewCoverageByCluster?.[viewName];
@@ -4991,10 +4929,8 @@ function App() {
               })()
             ) : (
             <>
-            {/* WNN 3-panel layout: RNA individual | ATAC individual | WNN integrated */}
             {wnnActive && wnnRnaPlot && wnnAtacPlot && dataInfo?.modality === 'multiome' ? (
               <>
-                {/* Panel 1: RNA individual clustering */}
                 <div className="visualization-card interaction-card" style={{ flex: '1 1 0%', minWidth: 0 }}>
                   <div className="visualization-card-header">
                     <Icon icon="timeline-line-chart" size={18} />
@@ -5011,7 +4947,6 @@ function App() {
                   <div className="visualization-card-body">
                     <PlotView
                       activePlot={(() => {
-                        // TF motif / dotplot artifacts are RNA-based: show in RNA panel
                         if (activePlot?.source === 'artifact') {
                           const art = artifacts.find(a => a.id === activePlot.artifactId);
                           if (art?.type === 'tf_motif_enrichment' || art?.type === 'gene_dotplot') return activePlot;
@@ -5019,7 +4954,6 @@ function App() {
                         return wnnRnaPlot;
                       })()}
                       geneExpression={(() => {
-                        // Show RNA gene expression overlay when a gene has been plotted
                         if (activePlot?.source === 'artifact') {
                           const art = artifacts.find(a => a.id === activePlot.artifactId);
                           if (art?.type === 'gene_expression' && !art.isAtac) return activePlot;
@@ -5043,13 +4977,13 @@ function App() {
                   </div>
                 </div>
                 <div className="resize-handle vertical-resize-handle visualization-resize-handle" style={{ cursor: 'default' }} />
-                {/* Panel 2: ATAC individual clustering */}
                 <div className="visualization-card interaction-card" style={{ flex: '1 1 0%', minWidth: 0 }}>
                   <div className="visualization-card-header">
                     <Icon icon="chart" size={18} />
                     <span>{(() => {
                       if (atacActivePlot?.source === 'artifact') {
                         const art = artifacts.find(a => a.id === atacActivePlot.artifactId);
+                        if (art?.type === 'gene_expression' && art.isAtac && art.showPeakViewAsPrimary) return `Peak View, ${art.geneName}`;
                         if (art?.type === 'gene_expression' && art.isAtac) return `ATAC View, ${art.geneName} activity`;
                         if (art?.type === 'peak_gene_links') return `Links, ${art.gene}`;
                       }
@@ -5059,15 +4993,14 @@ function App() {
                   <div className="visualization-card-body">
                     <PlotView
                       activePlot={(() => {
-                        // Peak-gene links: show in ATAC panel
                         if (atacActivePlot?.source === 'artifact') {
                           const art = artifacts.find(a => a.id === atacActivePlot.artifactId);
                           if (art?.type === 'peak_gene_links') return atacActivePlot;
+                          if (art?.type === 'gene_expression' && art.showPeakViewAsPrimary) return atacActivePlot;
                         }
                         return wnnAtacPlot;
                       })()}
                       geneExpression={(() => {
-                        // Show ATAC gene activity overlay when a gene has been plotted
                         if (atacActivePlot?.source === 'artifact') {
                           const art = artifacts.find(a => a.id === atacActivePlot.artifactId);
                           if (art?.type === 'gene_expression' && art.isAtac) return atacActivePlot;
@@ -5091,7 +5024,6 @@ function App() {
                   </div>
                 </div>
                 <div className="resize-handle vertical-resize-handle visualization-resize-handle" style={{ cursor: 'default' }} />
-                {/* Panel 3: WNN integrated co-embedding */}
                 <div className="visualization-card interaction-card" style={{ flex: '1 1 0%', minWidth: 0 }}>
                   <div className="visualization-card-header">
                     <Icon icon="merge-links" size={18} />
@@ -5107,7 +5039,6 @@ function App() {
                     <PlotView
                       activePlot={clusterPlot}
                       geneExpression={(() => {
-                        // Show RNA gene expression overlay on WNN co-embedding (same expression values, different coordinates)
                         if (activePlot?.source === 'artifact') {
                           const art = artifacts.find(a => a.id === activePlot.artifactId);
                           if (art?.type === 'gene_expression' && !art.isAtac) return activePlot;
@@ -5140,7 +5071,6 @@ function App() {
               <div className="visualization-card-header">
                 <Icon icon="timeline-line-chart" size={18} />
                 <span>{(() => {
-                  // Multiome + coverage plot: left panel shows ATAC clusters (same as Peak view) so users can match clusters
                   if (dataInfo?.modality === 'multiome' && atacActivePlot?.source === 'artifact') {
                     const atacArt = artifacts.find((a) => a.id === atacActivePlot.artifactId);
                     if (atacArt?.showPeakViewAsPrimary) return 'ATAC clusters';
@@ -5151,33 +5081,26 @@ function App() {
               <div className="visualization-card-body">
                 <PlotView
                   activePlot={(() => {
-                    // Multiome + "highlight RNA cluster on ATAC": from side (RNA view) always shows cluster UMAP
                     if (dataInfo?.modality === 'multiome' && rnaClusterHighlightOnAtac != null) {
                       return clusterPlot;
                     }
-                    // Multiome + coverage plot: show ATAC UMAP (clusters) in left panel so it matches Peak view clusters
                     if (dataInfo?.modality === 'multiome' && atacActivePlot?.source === 'artifact') {
                       const atacArt = artifacts.find((a) => a.id === atacActivePlot.artifactId);
                       if (atacArt?.showPeakViewAsPrimary) return atacClusterPlot;
                     }
-                    // Multiome: pass dotplot or TF motif artifact directly (replaces UMAP)
                     if (dataInfo?.modality === 'multiome' && activePlot?.source === 'artifact') {
                       const art = artifacts.find((a) => a.id === activePlot.artifactId);
                       if (art?.type === 'gene_dotplot' || art?.type === 'tf_motif_enrichment') return activePlot;
                     }
-                    // Multiome: pass violin plot directly (replaces UMAP)
                     if (dataInfo?.modality === 'multiome' && activePlot?.source === 'analysis' && activePlot?.data?.type === 'gene_violin') {
                       return activePlot;
                     }
-                    // Multiome: pass marker table directly (replaces UMAP)
                     if (dataInfo?.modality === 'multiome' && activePlot?.source === 'analysis' && activePlot?.data?.type === 'markers') {
                       return activePlot;
                     }
-                    // scATAC: prefer activePlot when it's UMAP (from "plot clusters") so UMAP View updates
                     if (dataInfo?.modality === 'atac' && activePlot?.data?.type === 'umap') {
                       return activePlot;
                     }
-                    // scATAC: dotplot/violin replace the UMAP View (left panel)
                     if (dataInfo?.modality === 'atac' && activePlot?.source === 'artifact') {
                       const art = artifacts.find((a) => a.id === activePlot.artifactId);
                       if (art?.type === 'gene_dotplot') return activePlot;
@@ -5188,52 +5111,55 @@ function App() {
                     return dataInfo?.modality === 'spatial' ? (activePlot || clusterPlot) : clusterPlot;
                   })()}
                   geneExpression={(() => {
-                    // Multiome + "highlight RNA cluster on ATAC": from side shows cluster UMAP only (no gene overlay)
                     if (dataInfo?.modality === 'multiome' && rnaClusterHighlightOnAtac != null) {
                       return null;
                     }
-                    // Multiome + coverage plot: no gene overlay on left panel (we show ATAC clusters only)
                     if (dataInfo?.modality === 'multiome' && atacActivePlot?.source === 'artifact') {
                       const atacArt = artifacts.find((a) => a.id === atacActivePlot.artifactId);
                       if (atacArt?.showPeakViewAsPrimary) return null;
                     }
-                    // Multiome RNA: pass gene expression overlay to RNA UMAP view
                     if (dataInfo?.modality === 'multiome' && activePlot?.source === 'artifact') {
                       const art = artifacts.find((a) => a.id === activePlot.artifactId);
                       if (art?.type === 'gene_expression' && !art.isAtac) return activePlot;
                     }
-                    // ATAC: pass gene expression so UMAP view shows gene activity overlay
                     if (dataInfo?.modality === 'atac' && activePlot?.source === 'artifact') {
                       const art = artifacts.find((a) => a.id === activePlot.artifactId);
                       if (art?.type === 'gene_expression') return activePlot;
                     }
-                    // Spatial: pass gene expression to UMAP view when activePlot is gene_expression
                     if (dataInfo?.modality !== 'spatial' || !activePlot) {
                       return null;
                     }
 
-                    // For violin/dotplot: check if activePlot has a spatialArtifactId
                     if (activePlot.spatialArtifactId) {
                       const result = { source: 'artifact', artifactId: activePlot.spatialArtifactId };
+                      console.log('App.jsx geneExpression filter: Found spatialArtifactId', { spatialArtifactId: activePlot.spatialArtifactId, result });
                       const artifact = artifacts.find(a => a.id === activePlot.spatialArtifactId);
+                      console.log('App.jsx geneExpression filter: Spatial artifact lookup', {
+                        artifactId: activePlot.spatialArtifactId,
+                        found: !!artifact,
+                        hasCoordinates: !!artifact?.coordinates,
+                        hasExpression: !!artifact?.expression,
+                        coordinatesLength: artifact?.coordinates?.length
+                      });
                       return result;
                     }
 
-                    // Check if activePlot is a gene_expression artifact
                     if (activePlot.source === 'artifact') {
                       const artifact = artifacts.find(a => a.id === activePlot.artifactId);
                       if (artifact && artifact.type === 'gene_expression') {
+                        console.log('App.jsx geneExpression filter: Found gene_expression artifact', { artifactId: activePlot.artifactId });
                         return activePlot;
                       }
                     } else if (activePlot.source === 'analysis' && activePlot.data?.type === 'gene_expression') {
+                      console.log('App.jsx geneExpression filter: Found analysis gene_expression', { dataType: activePlot.data?.type });
                       return activePlot;
                     }
+                    console.log('App.jsx geneExpression filter: No match, returning null', { activePlot });
                     return null;
                   })()}
                   artifacts={artifacts}
                   dataInfo={dataInfo}
                   selectedClusters={(() => {
-                    // Multiome + coverage plot: use ATAC cluster selection so left panel matches Peak view
                     if (dataInfo?.modality === 'multiome' && atacActivePlot?.source === 'artifact') {
                       const atacArt = artifacts.find((a) => a.id === atacActivePlot.artifactId);
                       if (atacArt?.showPeakViewAsPrimary) return atacSelectedClusters;
@@ -5259,7 +5185,6 @@ function App() {
                       const atacArt = artifacts.find((a) => a.id === atacActivePlot.artifactId);
                       if (atacArt?.showPeakViewAsPrimary) return atacClusterLabelMap;
                     }
-                    // When showing BANKSY regions in the UMAP view, use regionLabelMap
                     const ap = dataInfo?.modality === 'spatial' ? (activePlot || clusterPlot) : clusterPlot;
                     if (ap?.data?.source === 'banksy' && Object.keys(regionLabelMap).length > 0) {
                       return regionLabelMap;
@@ -5356,41 +5281,33 @@ function App() {
                 ) : dataInfo?.modality === 'multiome' ? (
                   <PlotView
                     activePlot={(() => {
-                      // Multiome + "highlight ATAC cluster on RNA": from side (ATAC view) always shows cluster UMAP
                       if (dataInfo?.modality === 'multiome' && atacClusterHighlightOnRna != null) {
                         return atacClusterPlot;
                       }
-                      // "Coverage plot [gene]": show Peak View (CoveragePlot) as main content
                       if (atacActivePlot?.source === 'artifact') {
                         const art = artifacts.find((a) => a.id === atacActivePlot.artifactId);
                         if (art?.type === 'gene_expression' && art?.showPeakViewAsPrimary) {
                           return atacActivePlot;
                         }
-                        // Peak-gene links: pass through directly (replaces ATAC UMAP)
                         if (art?.type === 'peak_gene_links') {
                           return atacActivePlot;
                         }
-                        // Dotplot: pass through directly (replaces ATAC UMAP)
                         if (art?.type === 'gene_dotplot') {
                           return atacActivePlot;
                         }
                       }
-                      // Violin: pass through directly (replaces ATAC UMAP)
                       if (atacActivePlot?.source === 'analysis' && atacActivePlot?.data?.type === 'gene_violin') {
                         return atacActivePlot;
                       }
-                      // Markers: pass through directly (replaces ATAC UMAP)
                       if (atacActivePlot?.source === 'analysis' && atacActivePlot?.data?.type === 'markers') {
                         return atacActivePlot;
                       }
                       return atacClusterPlot;
                     })()}
                     geneExpression={(() => {
-                      // Multiome + "highlight ATAC cluster on RNA": from side shows cluster UMAP only (no gene overlay)
                       if (dataInfo?.modality === 'multiome' && atacClusterHighlightOnRna != null) {
                         return null;
                       }
-                      // Multiome ATAC: pass ATAC gene activity overlay on UMAP (when main content is cluster UMAP)
                       if (atacActivePlot?.source === 'artifact') {
                         const art = artifacts.find((a) => a.id === atacActivePlot.artifactId);
                         if (art?.type === 'gene_expression') return atacActivePlot;
@@ -5432,7 +5349,7 @@ function App() {
                 ) : dataInfo?.modality === 'atac' ? (
                   <PlotView
                     activePlot={(() => {
-                      // Peak View: use peakViewPlot (gene/coverage) so it stays when user says "plot clusters"
+                      if (activePlot?.source === 'analysis' && activePlot?.data?.type === 'markers') return activePlot;
                       if (peakViewPlot) return peakViewPlot;
                       if (!activePlot || activePlot.source !== 'artifact') return null;
                       const art = artifacts.find((a) => a.id === activePlot.artifactId);
@@ -5514,9 +5431,9 @@ function App() {
           >
             <ChatBot
               ref={chatBotRef}
-              // Only allow chat commands once worker has finished initial pipeline
               dataLoaded={Number.isFinite(dataInfo?.cells) && Number.isFinite(dataInfo?.genes)}
               dataInfo={dataInfo}
+              geneNames={geneNames}
               selectedModel={selectedModel}
               clusterLabelMap={clusterLabelMap}
               atacClusterLabelMap={atacClusterLabelMap}
@@ -5526,8 +5443,8 @@ function App() {
               rnaClusters={clusterPlot?.source === 'analysis' ? clusterPlot.data?.clusters : null}
               atacClusters={atacClusterPlot?.source === 'analysis' ? atacClusterPlot.data?.clusters : null}
               wnnClusters={wnnActive && clusterPlot?.source === 'analysis' ? clusterPlot.data?.clusters : null}
-              isAnalyzing={isAnalyzing}
-              analysisStatusMessage={workerStatusMessage}
+              isAnalyzing={isAnalyzing || isNormalizing}
+              analysisStatusMessage={workerStatusMessage || (isNormalizing ? 'Normalizing the data... the chat will be ready shortly' : '')}
               onAnalysisRequest={handleAnalysisRequest}
               onSetColorMap={handleColorMapChange}
               onSetClusterColor={handleSetClusterColorFromChat}
@@ -5559,6 +5476,7 @@ function App() {
                 selectedModel={selectedModel}
                 onModelChange={setSelectedModel}
                 onModelLoaded={(modelId) => {
+                  console.log('Model loaded:', modelId);
                   toasterRef.current?.show({
                     message: `Intent model loaded: ${modelId}`,
                     intent: 'success',
@@ -5568,6 +5486,7 @@ function App() {
                 selectedChatModel={selectedChatModel}
                 onChatModelChange={setSelectedChatModel}
                 onChatModelLoaded={(modelId) => {
+                  console.log('Chat model loaded:', modelId);
                   toasterRef.current?.show({
                     message: `Chat model loaded: ${modelId}. CellPilot can now answer general questions!`,
                     intent: 'success',

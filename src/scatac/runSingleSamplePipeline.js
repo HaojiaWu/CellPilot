@@ -1,8 +1,3 @@
-/**
- * Seeded PRNG (Mulberry32) for reproducible scATAC pipeline (same dataset → same UMAP and clustering).
- * @param {number} seed: integer seed
- * @returns {() => number}: function returning [0, 1)
- */
 function seededRandom(seed) {
   return function () {
     let t = (seed += 0x6d2b79f5);
@@ -12,24 +7,8 @@ function seededRandom(seed) {
   };
 }
 
-/** Fixed seed so the same dataset always yields the same UMAP and clustering. */
 const SCATAC_RANDOM_SEED = 42;
 
-/**
- * Run the single-sample scATAC pipeline from an in-memory count matrix (SparseMatrixCSC).
- * Pipeline: FindTopFeatures -> TF-IDF -> subset to top features -> LSI (SVD) -> UMAP -> Louvain.
- * Uses a fixed random seed so loading the same dataset produces identical UMAP and clusters.
- *
- * @param {import('./sparse.js').SparseMatrixCSC} countMatrix: peaks x cells
- * @param {Object} [options]
- * @param {number} [options.scaleFactor=1e4]
- * @param {number} [options.minDist=0.3]: UMAP min_dist
- * @param {number} [options.numNeighbors=30]: UMAP n_neighbors
- * @param {number} [options.resolution=0.8]: Louvain resolution
- * @param {string} [options.topFeatureCutoff='q5']: FindTopFeatures cutoff
- * @param {(msg: string) => void} [options.statusCallback]: optional status callback (e.g. for worker STATUS_UPDATE)
- * @returns {Promise<{ umapEmbedding: number[][], clusters: number[], cellEmbeddings: Float64Array, singularValues: Float64Array, sdev: Float64Array, topPeakIndices: number[], nCells: number, nComponents: number }>}
- */
 export async function runSingleSamplePipeline(countMatrix, options = {}) {
   const {
     scaleFactor = 1e4,
@@ -42,7 +21,6 @@ export async function runSingleSamplePipeline(countMatrix, options = {}) {
 
   const post = (msg) => { if (statusCallback) statusCallback(msg); };
 
-  /** Single seeded RNG for SVD, UMAP, and clustering so results are reproducible. */
   const random = seededRandom(SCATAC_RANDOM_SEED);
 
   const { runTFIDF, findTopFeatures } = await import('./tfidf.js');
@@ -64,7 +42,6 @@ export async function runSingleSamplePipeline(countMatrix, options = {}) {
   post('Running LSI (SVD)...');
   const svdResult = await randomizedSVD(tfidfSubset, nSVDComponents, nOversamples, nIter, true, post, random);
 
-  // UMAP on LSI components 2–50 (skip first, depth-correlated)
   const umapDims = svdResult.nComponents - 1;
   const umapInput = [];
   for (let i = 0; i < svdResult.nCells; i++) {
@@ -99,7 +76,6 @@ export async function runSingleSamplePipeline(countMatrix, options = {}) {
 
   const umapEmbedding = umap.fit(umapInput);
 
-  // Clustering on LSI 2–50: KNN -> SNN -> Louvain
   const clusterEmbeddings = new Float64Array(svdResult.nCells * umapDims);
   for (let i = 0; i < svdResult.nCells; i++) {
     for (let d = 0; d < umapDims; d++) {

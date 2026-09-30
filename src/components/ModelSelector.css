@@ -71,7 +71,6 @@
   flex-shrink: 0;
 }
 
-/* Custom styling for Download button */
 .model-download-btn.bp4-button.bp4-intent-primary {
   background: linear-gradient(135deg, #1a5f4a 0%, #156b52 30%, #0f4f3d 70%, #0d4434 100%);
   color: white;
@@ -99,7 +98,6 @@
   box-shadow: none;
 }
 
-/* Success state for ready button */
 .model-download-btn.bp4-button.bp4-intent-success {
   background: linear-gradient(135deg, #059669 0%, #047857 100%);
   color: white;
@@ -114,7 +112,6 @@
   opacity: 0.9;
 }
 
-/* Progress bar styling */
 .model-progress {
   padding: 0 4px;
 }
@@ -128,7 +125,6 @@
   background: linear-gradient(90deg, #1a5f4a 0%, #2d8a6b 100%);
 }
 
-/* Status message styling */
 .model-status {
   display: flex;
   align-items: center;

@@ -1,8 +1,3 @@
-/**
- * WASM-based SVD for ATAC LSI (optional).
- * Uses LAPACK dgesdd when available (e.g. emlapack); otherwise the worker falls back to randomized SVD.
- * Returns left singular vectors U (nCells x nWanted) for matrix A (nCells x nTopSvd), layout: tfidfValues[p + c*nTop].
- */
 let emlapackModule = null;
 
 async function getEmlapack() {
@@ -15,20 +10,10 @@ async function getEmlapack() {
       return M;
     }
   } catch (_) {
-    /* emlapack not available or not ESM */
   }
   return null;
 }
 
-/**
- * Run SVD via WASM (LAPACK dgesdd, jobz='S').
- * @param {Float64Array} tfidfValues: matrix A (cells x peaks), A[c][p] = tfidfValues[p + c*nTop]
- * @param {number} nCells: M
- * @param {number} nTopSvd: N (number of columns used)
- * @param {number} nTop: stride for rows (tfidfValues has nTop columns per cell)
- * @param {number} nWanted: number of left singular vectors to return
- * @returns {Promise<Float64Array|null>} U columns (nCells * nWanted), column-major, or null if WASM not available
- */
 export async function svdLeft(tfidfValues, nCells, nTopSvd, nTop, nWanted) {
   const M = await getEmlapack();
   if (!M) return null;

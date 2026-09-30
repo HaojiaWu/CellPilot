@@ -12,9 +12,7 @@ let mainWindow;
 let tileServer = null;
 let cosmxTempServer = null;
 
-// ============== Session Tracking ==============
-// Set TRACKING_SERVER_URL in your environment or replace this with your own tracking endpoint.
-const TRACKING_SERVER_URL = process.env.TRACKING_SERVER_URL || '';
+const TRACKING_SERVER_URL = 'https://metrics.humphreyslab.com/api/track-session';
 
 let sessionData = {
   sessionId: null,
@@ -52,16 +50,20 @@ function getMachineId() {
 function startSessionTracking() {
   sessionData.sessionId = generateSessionId();
   sessionData.startTime = new Date().toISOString();
+  console.log(`[Tracking] Session started: ${sessionData.sessionId} at ${sessionData.startTime}`);
 }
 
 async function endSessionTracking() {
   if (!sessionData.startTime) {
+    console.log('[Tracking] No session to end');
     return;
   }
 
   sessionData.endTime = new Date().toISOString();
   sessionData.durationMs = new Date(sessionData.endTime) - new Date(sessionData.startTime);
 
+  console.log(`[Tracking] Session ended: ${sessionData.sessionId}`);
+  console.log(`[Tracking] Duration: ${Math.round(sessionData.durationMs / 1000)} seconds`);
 
   await sendSessionToServer(sessionData);
 
@@ -88,6 +90,7 @@ function sendSessionToServer(data) {
         appVersion: app.getVersion(),
       };
 
+      console.log('[Tracking] Sending session data to server:', JSON.stringify(payload, null, 2));
 
       const request = net.request({
         method: 'POST',
@@ -102,6 +105,7 @@ function sendSessionToServer(data) {
       }, 5000);
 
       request.on('response', (response) => {
+        console.log('[Tracking] Response status:', response.statusCode);
 
         let responseData = '';
         response.on('data', (chunk) => {
@@ -110,7 +114,9 @@ function sendSessionToServer(data) {
 
         response.on('end', () => {
           clearTimeout(timeout);
+          console.log('[Tracking] Response data:', responseData);
           if (response.statusCode >= 200 && response.statusCode < 300) {
+            console.log('[Tracking] Session data sent successfully');
           } else {
             console.error('[Tracking] Failed to send session data: HTTP', response.statusCode);
           }
@@ -133,20 +139,13 @@ function sendSessionToServer(data) {
     }
   });
 }
-// ============== End Session Tracking ==============
 
-// Set up Express server configuration for serving DZI tiles
 const TILE_PORT = 18765;
-let TILE_ROOT; // Will be set when app is ready
-const TILE_PROTOCOL = 'tile'; // Custom protocol for serving tiles
+let TILE_ROOT;
+const TILE_PROTOCOL = 'tile';
 
-// CosMX preparsed files served over HTTP so we never send huge buffers over IPC
 const COSMX_TEMP_PORT = 18766;
 
-// App bundle HTTP server, serves build/ over localhost so Web Workers load from
-// the same origin (http://127.0.0.1:APP_SERVER_PORT).  Chromium's Worker script
-// fetch bypasses Electron's ASAR protocol handler, so file:// workers from inside
-// app.asar fail silently.  HTTP is the only reliable workaround.
 const APP_SERVER_PORT = 18764;
 let appFileServer = null;
 
@@ -155,10 +154,10 @@ function startAppFileServer(callback) {
     if (callback) callback();
     return;
   }
-  const appPath = app.getAppPath(); // ends with "app.asar" in production
+  const appPath = app.getAppPath();
   const buildDir = appPath.endsWith('.asar')
-    ? path.join(appPath + '.unpacked', 'build') // real FS path (unpacked from ASAR)
-    : path.join(appPath, 'build');              // dev: normal build dir
+    ? path.join(appPath + '.unpacked', 'build')
+    : path.join(appPath, 'build');
 
   const serverApp = express();
   serverApp.use((req, res, next) => {
@@ -169,7 +168,6 @@ function startAppFileServer(callback) {
     next();
   });
   serverApp.use(express.static(buildDir, { maxAge: 0 }));
-  // SPA fallback
   serverApp.get('*', (req, res) => {
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
@@ -177,23 +175,21 @@ function startAppFileServer(callback) {
   });
 
   appFileServer = serverApp.listen(APP_SERVER_PORT, '127.0.0.1', () => {
+    console.log(`App file server at http://127.0.0.1:${APP_SERVER_PORT}/ (serving ${buildDir})`);
     if (callback) callback();
   });
   appFileServer.on('error', (err) => {
     console.error('App file server error:', err.message);
-    if (callback) callback(); // proceed even on error
+    if (callback) callback();
   });
 }
 function getCosmxTempRoot() {
   return path.join(app.getPath('userData'), 'cosmx-temp');
 }
 
-// Large HDF5 file HTTP server, serves local H5 files with Range-request support so
-// the analysis web worker can use FS.createLazyFile() for on-demand chunk fetching.
-// Files are never copied into memory; only the requested byte-ranges are read from disk.
 const H5_SERVER_PORT = 18767;
 let h5FileServer = null;
-const h5Registry = new Map(); // token → absolute file path
+const h5Registry = new Map();
 
 function startH5FileServer() {
   if (h5FileServer) return;
@@ -231,6 +227,7 @@ function startH5FileServer() {
     }
   });
   h5FileServer = serverApp.listen(H5_SERVER_PORT, '127.0.0.1', () => {
+    console.log('H5 file server at http://127.0.0.1:' + H5_SERVER_PORT + '/h5/');
   });
 }
 function startCosmxTempServer() {
@@ -245,18 +242,15 @@ function startCosmxTempServer() {
   });
   serverApp.use('/cosmx-temp', express.static(root, { maxAge: 0 }));
   cosmxTempServer = serverApp.listen(COSMX_TEMP_PORT, () => {
+    console.log('CosMX temp server at http://localhost:' + COSMX_TEMP_PORT + '/cosmx-temp');
   });
 }
 
-// Increase V8 heap limits so large datasets (e.g., Xenium) can load without TypedArray allocation failures.
-// Applies to all renderer processes, including dedicated WebWorkers.
 app.commandLine.appendSwitch('js-flags', '--max_old_space_size=8192');
 
-// Set Sharp pixel limit environment variable BEFORE any Sharp operations
-// This allows processing of very large histology images
-// Set to 10 billion pixels (effectively unlimited for most use cases)
 if (!process.env.SHARP_LIMIT_INPUT_PIXELS) {
   process.env.SHARP_LIMIT_INPUT_PIXELS = '10000000000';
+  console.log('Set SHARP_LIMIT_INPUT_PIXELS to 10 billion pixels');
 }
 
 function createWindow() {
@@ -268,45 +262,35 @@ function createWindow() {
       contextIsolation: true,
       enableRemoteModule: false,
       preload: path.join(__dirname, 'preload.js'),
-      webSecurity: false, // Disable for local files (allows file:// URLs)
+      webSecurity: false,
       allowRunningInsecureContent: false,
-      // Enable SharedArrayBuffer for WebAssembly multi-threading
       additionalArguments: [
         '--enable-features=SharedArrayBuffer',
-        '--disable-web-security', // Allow file:// URLs to load images
+        '--disable-web-security',
       ],
     },
     title: 'CellPilot | HumphreysLab',
     backgroundColor: '#f5f5f5',
   });
 
-  // Load from the local HTTP server so Web Workers are same-origin and
-  // load without ASAR protocol issues.  Dev mode uses ELECTRON_START_URL.
   const startUrl =
     process.env.ELECTRON_START_URL ||
     `http://127.0.0.1:${APP_SERVER_PORT}/`;
 
-  // Set COEP/COOP headers for SharedArrayBuffer support
-  // BUT: Only set them on the main document, NOT on tile server responses
-  // This allows SharedArrayBuffer to work while avoiding tile loading issues
   mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = details.responseHeaders || {};
     const url = details.url || '';
     
-    // Check if this is a tile server request; if so, don't modify headers
-    // Express server sets the proper CORS headers including Cross-Origin-Resource-Policy
     const isTileRequest = url.includes(`:${TILE_PORT}`) ||
                           url.includes(`:${APP_SERVER_PORT}`) ||
                           url.includes('localhost:18765') ||
                           url.startsWith(`${TILE_PROTOCOL}://`);
     
     if (isTileRequest) {
-      // For tile requests, return headers as-is (Express sets CORS headers)
       callback({ responseHeaders });
       return;
     }
     
-    // For main document and other resources, set COEP/COOP for SharedArrayBuffer
     const newHeaders = {};
     Object.keys(responseHeaders).forEach(key => {
       newHeaders[key] = Array.isArray(responseHeaders[key]) 
@@ -314,8 +298,6 @@ function createWindow() {
         : [responseHeaders[key]];
     });
     
-    // Set COEP/COOP for SharedArrayBuffer support
-    // Use 'credentialless' which is less strict than 'require-corp' but still supports SharedArrayBuffer
     newHeaders['cross-origin-opener-policy'] = ['same-origin'];
     newHeaders['cross-origin-embedder-policy'] = ['credentialless'];
     
@@ -324,10 +306,7 @@ function createWindow() {
 
   mainWindow.loadURL(startUrl);
 
-  // Handle getDisplayMedia() calls from the renderer for screen recording.
-  // On macOS, screen recording permission must be granted in System Preferences.
   mainWindow.webContents.session.setDisplayMediaRequestHandler(async (request, callback) => {
-    // Check macOS screen recording permission before attempting capture
     if (process.platform === 'darwin') {
       const status = systemPreferences.getMediaAccessStatus('screen');
       if (status !== 'granted') {
@@ -354,7 +333,6 @@ function createWindow() {
       callback({ video: appSource });
     } catch (err) {
       console.error('Screen capture error:', err.message);
-      // Permission was likely revoked, guide the user to re-enable it
       const { response } = await dialog.showMessageBox(mainWindow, {
         type: 'warning',
         title: 'Screen Recording Permission Required',
@@ -371,7 +349,6 @@ function createWindow() {
     }
   });
 
-  // Open external links (e.g. Tutorial, GitHub, X) in the system browser instead of in-app
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     const u = url || '';
     if (u.startsWith('https://') || u.startsWith('http://')) {
@@ -380,7 +357,6 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  // Open DevTools automatically for debugging
   if (process.env.ELECTRON_START_URL) {
     mainWindow.webContents.openDevTools();
   }
@@ -498,10 +474,8 @@ app.on('ready', () => {
   createMenu();
   startSessionTracking();
   if (process.env.ELECTRON_START_URL) {
-    // Dev mode: CRA serves the app itself; no local HTTP server needed
     createWindow();
   } else {
-    // Production: start the app HTTP server first, then load the window
     startAppFileServer(() => {
       createWindow();
     });
@@ -540,6 +514,7 @@ app.on('before-quit', async (event) => {
     isQuitting = true;
     event.preventDefault();
 
+    console.log('[Tracking] App is quitting, sending session data...');
     await flushSessionTracking();
 
     closeLocalServices();
@@ -565,58 +540,53 @@ app.on('activate', () => {
   }
 });
 
-// Register custom protocol for serving tiles (avoids COEP issues)
-// Protocol handlers in Electron treat files as same-origin, avoiding COEP restrictions
 function registerTileProtocol() {
   try {
     protocol.registerFileProtocol(TILE_PROTOCOL, (request, callback) => {
-      // Compute TILE_ROOT dynamically (in case it's not set yet)
       const tileRoot = TILE_ROOT || path.join(app.getPath('userData'), 'dzi-tiles');
       const url = request.url.replace(`${TILE_PROTOCOL}://`, '');
       const filePath = path.join(tileRoot, url);
       
-      // Security check: ensure file is within TILE_ROOT
       const normalizedPath = path.normalize(filePath);
       const normalizedRoot = path.normalize(tileRoot);
       if (!normalizedPath.startsWith(normalizedRoot)) {
         console.error('Security check failed: path outside TILE_ROOT', filePath);
-        callback({ error: -6 }); // FILE_NOT_FOUND
+        callback({ error: -6 });
         return;
       }
       
-      // Check if file exists
       if (fs.existsSync(filePath)) {
         callback({ path: filePath });
       } else {
         console.error('Tile file not found:', filePath);
-        callback({ error: -6 }); // FILE_NOT_FOUND
+        callback({ error: -6 });
       }
     });
+    console.log(`Registered tile protocol: ${TILE_PROTOCOL}://`);
   } catch (error) {
     console.error('Error registering tile protocol:', error);
+    console.log('Falling back to HTTP tile server');
   }
 }
 
-// Initialize tile root when app is ready
 app.whenReady().then(() => {
   TILE_ROOT = path.join(app.getPath('userData'), 'dzi-tiles');
+  console.log('Tile root directory:', TILE_ROOT);
   
-  // Register custom protocol (makes tiles same-origin, avoiding COEP)
   registerTileProtocol();
   
-  // Also start HTTP server as fallback
   startTileServer();
   
-  // Register refresh shortcut: Cmd+Shift+R (Mac) or Ctrl+Shift+R (Windows/Linux)
-  // Do this after app is fully ready to avoid Windows issues
   const refreshShortcut = process.platform === 'darwin' ? 'Command+Shift+R' : 'Ctrl+Shift+R';
   
   try {
     globalShortcut.register(refreshShortcut, () => {
       if (mainWindow && mainWindow.webContents) {
+        console.log(`Refresh shortcut (${refreshShortcut}) pressed - reloading window`);
         mainWindow.webContents.reload();
       }
     });
+    console.log(`Registered refresh shortcut: ${refreshShortcut}`);
   } catch (error) {
     console.warn('Failed to register global shortcut:', error.message);
   }
@@ -624,65 +594,54 @@ app.whenReady().then(() => {
 
 function startTileServer() {
   if (tileServer) {
+    console.log('Tile server already running');
     return;
   }
 
   const serverApp = express();
   
-  // Ensure tile directory exists
   if (!fs.existsSync(TILE_ROOT)) {
     fs.mkdirSync(TILE_ROOT, { recursive: true });
   }
   
-  // Enable CORS for local file access with COEP support
-  // When COEP (Cross-Origin-Embedder-Policy) is set to 'require-corp' in the Electron app,
-  // cross-origin resources must have Cross-Origin-Resource-Policy header set to 'cross-origin'
   serverApp.use((req, res, next) => {
-    // Set CORS headers
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
-    // CRITICAL: Set Cross-Origin-Resource-Policy to allow embedding with COEP require-corp
     res.header('Cross-Origin-Resource-Policy', 'cross-origin');
     next();
   });
   
-  // Serve static files from tile directory
   serverApp.use('/tiles', express.static(TILE_ROOT, {
     setHeaders: (res, path) => {
-      // Ensure all tile images have proper CORS headers for COEP
       res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', path.endsWith('.dzi') || path.endsWith('.xml') 
         ? 'application/xml' 
         : 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache tiles for 1 year
+      res.setHeader('Cache-Control', 'public, max-age=31536000');
     }
   }));
   
-  // Health check endpoint
   serverApp.get('/tiles/health', (req, res) => {
     res.json({ status: 'ok', tileRoot: TILE_ROOT });
   });
   
   tileServer = serverApp.listen(TILE_PORT, () => {
+    console.log(`DZI tile server running at http://localhost:${TILE_PORT}/tiles`);
+    console.log(`Serving files from: ${TILE_ROOT}`);
   });
 }
 
-// Handle uncaught exceptions to prevent crashes
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
   console.error('Stack:', error.stack);
-  // Don't exit; log the error instead
 });
 
-// Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Don't exit; log the error instead
 });
 
-// IPC handlers for file/folder selection
 const selectTenxFolder = async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory'],
@@ -773,11 +732,9 @@ ipcMain.handle('select-file', async (event, options) => {
   return null;
 });
 
-// Read file from filesystem (for 10x data)
 ipcMain.handle('read-file', async (event, filePath) => {
   try {
     const data = fs.readFileSync(filePath);
-    // Return as Uint8Array buffer
     return { success: true, data: Array.from(data) };
   } catch (error) {
     return { success: false, error: error.message };
@@ -794,11 +751,10 @@ const readH5File = (filePath, suppliedName) => {
   const TWO_GIB = 2 * 1024 * 1024 * 1024;
 
   if (stats.size >= TWO_GIB) {
-    // Large file: register with the H5 HTTP server so the analysis worker can
-    // use FS.createLazyFile() and stream only the chunks it needs.
     const token = crypto.randomBytes(16).toString('hex');
     h5Registry.set(token, filePath);
     startH5FileServer();
+    console.log('Large HDF5 registered for lazy streaming:', fileName, '-', stats.size, 'bytes');
     return {
       success: true,
       format: '10X HDF5',
@@ -815,6 +771,7 @@ const readH5File = (filePath, suppliedName) => {
   }
 
   const data = fs.readFileSync(filePath);
+  console.log('Read 10x HDF5 file:', fileName, '-', data.length, 'bytes');
 
   return {
     success: true,
@@ -847,7 +804,6 @@ const findCandidate = (lookup, candidates) => {
   return null;
 };
 
-/** Resolve path to summary.csv: root first, then outs/, atacseq/, outs/atacseq/ (10X ATAC/Multiome). */
 const getSummaryCsvPath = (targetPath, lookup) => {
   if (lookup.has('summary.csv')) {
     return path.join(targetPath, lookup.get('summary.csv'));
@@ -859,7 +815,6 @@ const getSummaryCsvPath = (targetPath, lookup) => {
   return null;
 };
 
-/** Parse genome/reference from summary.csv text (key-value lines or header + data row). Returns normalized hg38/hg19/mm10/mm39 or raw string. */
 const parseGenomeFromSummaryText = (summaryText) => {
   const lines = summaryText.split(/\r?\n/).filter((line) => line.trim());
   const parseCsvLine = (line) => line.split(',').map((p) => p.trim().replace(/^"|"$/g, ''));
@@ -891,7 +846,6 @@ const parseGenomeFromSummaryText = (summaryText) => {
   return null;
 };
 
-// Read multiple files for 10x data
 ipcMain.handle('read-10x-files', async (event, targetPath, options = {}) => {
   try {
     if (!targetPath) {
@@ -947,6 +901,11 @@ ipcMain.handle('read-10x-files', async (event, targetPath, options = {}) => {
     const featuresData = fs.readFileSync(featuresPath);
     const barcodesData = fs.readFileSync(barcodesPath);
 
+    console.log('Read 10x MatrixMarket files - sizes:', {
+      matrix: matrixData.length,
+      features: featuresData.length,
+      barcodes: barcodesData.length,
+    });
 
     return {
       success: true,
@@ -972,10 +931,9 @@ ipcMain.handle('read-10x-files', async (event, targetPath, options = {}) => {
   }
 });
 
-// Large ATAC matrix: transfer in chunks over IPC to avoid SIGTRAP/crash (Electron IPC size limits)
-const ATAC_MATRIX_CHUNK_THRESHOLD_BYTES = 150 * 1024 * 1024; // 150 MB
-const ATAC_MATRIX_CHUNK_SIZE = 80 * 1024 * 1024; // 80 MB per IPC message
-const atacMatrixChunkCache = new Map(); // key -> Uint8Array (cleared when new load or release)
+const ATAC_MATRIX_CHUNK_THRESHOLD_BYTES = 150 * 1024 * 1024;
+const ATAC_MATRIX_CHUNK_SIZE = 80 * 1024 * 1024;
+const atacMatrixChunkCache = new Map();
 
 ipcMain.handle('get-atac-matrix-chunk', (event, chunkKey, offset, length) => {
   const buf = atacMatrixChunkCache.get(chunkKey);
@@ -989,14 +947,12 @@ ipcMain.handle('release-atac-matrix-buffer', (event, chunkKey) => {
   atacMatrixChunkCache.delete(chunkKey);
 });
 
-// Read 10x Cell Ranger ATAC output: matrix.mtx + barcodes.tsv + peaks (same as scATAC folder, no H5/bakana)
 ipcMain.handle('read-10x-atac-files', async (event, targetPath) => {
   try {
     if (!targetPath) {
       throw new Error('No path provided to read-10x-atac-files');
     }
 
-    // Clear any previous chunked matrix so we don't hold two large buffers when user switches dataset
     atacMatrixChunkCache.clear();
 
     const stats = fs.statSync(targetPath);
@@ -1006,7 +962,6 @@ ipcMain.handle('read-10x-atac-files', async (event, targetPath) => {
 
     const { entries, lookup } = resolveDirectoryEntries(targetPath);
 
-    // Prefer MTX (same as scATAC pipeline): filtered_peak_bc_matrix/matrix.mtx or outs/filtered_peak_bc_matrix/matrix.mtx
     const matrixDirCandidates = [
       path.join(targetPath, 'filtered_peak_bc_matrix'),
       path.join(targetPath, 'outs', 'filtered_peak_bc_matrix'),
@@ -1047,6 +1002,7 @@ ipcMain.handle('read-10x-atac-files', async (event, targetPath) => {
     const useChunkedTransfer = matrixData.length > ATAC_MATRIX_CHUNK_THRESHOLD_BYTES;
     if (useChunkedTransfer) {
       atacMatrixChunkCache.set(targetPath, matrixData);
+      console.log('[ATAC] Matrix large (' + (matrixData.length / 1024 / 1024).toFixed(1) + ' MB), using chunked IPC');
     }
 
     const barcodesPath = path.join(dataDir, 'barcodes.tsv');
@@ -1095,11 +1051,13 @@ ipcMain.handle('read-10x-atac-files', async (event, targetPath) => {
       try {
         const summaryText = fs.readFileSync(summaryPath, 'utf8');
         genome = parseGenomeFromSummaryText(summaryText);
+        if (genome) console.log('[ATAC] Genome from summary:', summaryPath, '->', genome);
       } catch (e) {
         console.warn('Could not parse summary.csv for genome:', e.message);
       }
     }
 
+    console.log('[ATAC] Read MTX (same as scATAC):', matrixData.length, 'bytes, barcodes:', cellBarcodes.length, 'peaks:', peaks.length);
     const files = {
       matrix: {
         name: matrixName || 'matrix.mtx',
@@ -1131,7 +1089,6 @@ ipcMain.handle('read-10x-atac-files', async (event, targetPath) => {
   }
 });
 
-// Read 10x Multiome (ARC) output: filtered_feature_bc_matrix.h5 + atac_peak_annotation.tsv + precomputed analysis
 ipcMain.handle('read-multiome-files', async (event, targetPath) => {
   try {
     if (!targetPath) {
@@ -1145,7 +1102,6 @@ ipcMain.handle('read-multiome-files', async (event, targetPath) => {
 
     const { entries, lookup } = resolveDirectoryEntries(targetPath);
 
-    // 1. Find the combined filtered_feature_bc_matrix.h5
     const h5Candidates = ['filtered_feature_bc_matrix.h5', 'filtered_feature_bc_matrix.hdf5'];
     let h5File = null;
     for (const candidate of h5Candidates) {
@@ -1161,7 +1117,6 @@ ipcMain.handle('read-multiome-files', async (event, targetPath) => {
     const h5Path = path.join(targetPath, h5File);
     const h5Result = readH5File(h5Path, h5File);
 
-    // 2. Find atac_peak_annotation.tsv
     const peakAnnoCandidates = ['atac_peak_annotation.tsv', 'peak_annotation.tsv'];
     let peakAnnoFile = null;
     for (const candidate of peakAnnoCandidates) {
@@ -1173,45 +1128,46 @@ ipcMain.handle('read-multiome-files', async (event, targetPath) => {
     let peakAnnoData = null;
     if (peakAnnoFile) {
       peakAnnoData = fs.readFileSync(path.join(targetPath, peakAnnoFile));
+      console.log('[Multiome] Read peak annotation:', peakAnnoFile, peakAnnoData.length, 'bytes');
     } else {
       console.warn('[Multiome] No peak annotation file found (atac_peak_annotation.tsv)');
     }
 
-    // 3. Read precomputed analysis from analysis/ folder
     const precomputed = {};
     const analysisDir = path.join(targetPath, 'analysis');
     if (fs.existsSync(analysisDir) && fs.statSync(analysisDir).isDirectory()) {
-      // RNA UMAP
       const rnaUmapPath = path.join(analysisDir, 'dimensionality_reduction', 'gex', 'umap_projection.csv');
       if (fs.existsSync(rnaUmapPath)) {
         precomputed.rnaUmap = fs.readFileSync(rnaUmapPath, 'utf8');
+        console.log('[Multiome] Read RNA UMAP projection');
       }
-      // ATAC UMAP
       const atacUmapPath = path.join(analysisDir, 'dimensionality_reduction', 'atac', 'umap_projection.csv');
       if (fs.existsSync(atacUmapPath)) {
         precomputed.atacUmap = fs.readFileSync(atacUmapPath, 'utf8');
+        console.log('[Multiome] Read ATAC UMAP projection');
       }
-      // RNA clusters (graphclust), try both old and new Cell Ranger ARC naming
       const rnaClustersPath = path.join(analysisDir, 'clustering', 'gex', 'graphclust', 'clusters.csv');
       const rnaClustersPathNew = path.join(analysisDir, 'clustering', 'gex', 'gene_expression_graphclust', 'clusters.csv');
       if (fs.existsSync(rnaClustersPath)) {
         precomputed.rnaClusters = fs.readFileSync(rnaClustersPath, 'utf8');
+        console.log('[Multiome] Read RNA clusters (graphclust)');
       } else if (fs.existsSync(rnaClustersPathNew)) {
         precomputed.rnaClusters = fs.readFileSync(rnaClustersPathNew, 'utf8');
+        console.log('[Multiome] Read RNA clusters (gene_expression_graphclust)');
       }
-      // ATAC clusters (graphclust), try both old and new Cell Ranger ARC naming
       const atacClustersPath = path.join(analysisDir, 'clustering', 'atac', 'graphclust', 'clusters.csv');
       const atacClustersPathNew = path.join(analysisDir, 'clustering', 'atac', 'peaks_graphclust', 'clusters.csv');
       if (fs.existsSync(atacClustersPath)) {
         precomputed.atacClusters = fs.readFileSync(atacClustersPath, 'utf8');
+        console.log('[Multiome] Read ATAC clusters (graphclust)');
       } else if (fs.existsSync(atacClustersPathNew)) {
         precomputed.atacClusters = fs.readFileSync(atacClustersPathNew, 'utf8');
+        console.log('[Multiome] Read ATAC clusters (peaks_graphclust)');
       }
     } else {
       console.warn('[Multiome] analysis/ folder not found');
     }
 
-    // 4. Read cell barcodes
     let cellBarcodes = null;
     const barcodesDir = path.join(targetPath, 'filtered_feature_bc_matrix');
     const barcodesGzPath = path.join(barcodesDir, 'barcodes.tsv.gz');
@@ -1222,6 +1178,7 @@ ipcMain.handle('read-multiome-files', async (event, targetPath) => {
         const compressed = fs.readFileSync(barcodesGzPath);
         const decompressed = zlib.gunzipSync(compressed).toString('utf8');
         cellBarcodes = decompressed.trim().split('\n').map(b => b.trim()).filter(Boolean);
+        console.log('[Multiome] Read cell barcodes from barcodes.tsv.gz:', cellBarcodes.length);
       } catch (e) {
         console.warn('[Multiome] Could not read barcodes.tsv.gz:', e.message);
       }
@@ -1229,23 +1186,27 @@ ipcMain.handle('read-multiome-files', async (event, targetPath) => {
       try {
         const barcodesText = fs.readFileSync(barcodesTsvPath, 'utf8');
         cellBarcodes = barcodesText.trim().split('\n').map(b => b.trim()).filter(Boolean);
+        console.log('[Multiome] Read cell barcodes from barcodes.tsv:', cellBarcodes.length);
       } catch (e) {
         console.warn('[Multiome] Could not read barcodes.tsv:', e.message);
       }
     }
 
-    // 5. Detect genome from summary.csv (root or outs/, atacseq/, outs/atacseq/)
     let genome = null;
     const summaryPath = getSummaryCsvPath(targetPath, lookup);
     if (summaryPath) {
       try {
         const summaryText = fs.readFileSync(summaryPath, 'utf8');
         genome = parseGenomeFromSummaryText(summaryText);
+        if (genome) console.log('[Multiome] Genome from summary:', summaryPath, '->', genome);
       } catch (e) {
         console.warn('[Multiome] Could not parse summary.csv for genome:', e.message);
       }
     }
 
+    console.log('[Multiome] Final return - cellBarcodes:', cellBarcodes ? cellBarcodes.length : 'null',
+      'genome:', genome || 'unknown',
+      'precomputed keys:', Object.keys(precomputed));
 
     return {
       success: true,
@@ -1300,8 +1261,7 @@ const inspectXeniumRegion = (regionPath) => {
   const files = {};
   const metadata = { skipped: {}, sizes: {} };
 
-  // Helper to read a file only if below a safe size threshold
-  const MAX_READ_SIZE = 512 * 1024 * 1024; // 512 MB safety cap per file
+  const MAX_READ_SIZE = 512 * 1024 * 1024;
   const readIfSmall = (absPath, logicalName, optional = false) => {
     if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
       if (!optional) {
@@ -1318,7 +1278,6 @@ const inspectXeniumRegion = (regionPath) => {
     return readBinaryFile(absPath);
   };
 
-  // Read and transparently gunzip small CSV files (e.g., cells.csv.gz), returning plain CSV bytes
   const readMaybeCsvGz = (absPath, logicalName, optional = false) => {
     const data = readIfSmall(absPath, logicalName, optional);
     if (!data) return null;
@@ -1343,10 +1302,8 @@ const inspectXeniumRegion = (regionPath) => {
     data: readIfSmall(experimentFile.absolutePath, 'experiment.xenium')
   };
 
-  // Prefer textual CSV for cells metadata (coordinates), try csv before parquet.
   const cellsFile =
     getExistingFile(regionPath, ['cells.csv.gz', 'cells.csv', 'cells.parquet', 'cells.zarr.zip'], 'cells file');
-  // Only attempt gunzip/plain read for CSV; if parquet selected (fallback), we won't parse spatial coords yet.
   const isCsvLike = /\.csv(\.gz)?$/i.test(cellsFile.name);
   const cellsData = isCsvLike ? readMaybeCsvGz(cellsFile.absolutePath, 'cells') : null;
   if (!isCsvLike) {
@@ -1358,13 +1315,8 @@ const inspectXeniumRegion = (regionPath) => {
   };
   metadata.cellsFormat = path.extname(cellsFile.name).replace('.', '') || 'unknown';
 
-  // Intentionally do not check or load transcript files at this stage.
-  // Only counts (cell_feature_matrix) and cells.csv(.gz) for spatial coords are needed at this stage.
-
   const cellFeatureMatrixDir = ensureDirectory(path.join(regionPath, 'cell_feature_matrix'), 'cell_feature_matrix');
   
-  // Check for h5 file first (preferred for Xenium data)
-  // List files in the directory to find h5 files
   let h5File = null;
   try {
     const dirEntries = fs.readdirSync(cellFeatureMatrixDir);
@@ -1373,7 +1325,6 @@ const inspectXeniumRegion = (regionPath) => {
       return lower.endsWith('.h5') || lower.endsWith('.hdf5');
     });
     if (h5Candidates.length > 0) {
-      // Prefer cell_feature_matrix.h5, then any .h5 file
       const preferred = h5Candidates.find(e => e.toLowerCase() === 'cell_feature_matrix.h5');
       const h5Name = preferred || h5Candidates[0];
       const h5Path = path.join(cellFeatureMatrixDir, h5Name);
@@ -1382,11 +1333,9 @@ const inspectXeniumRegion = (regionPath) => {
       }
     }
   } catch (e) {
-    // Ignore errors, fall back to MatrixMarket
   }
   
   if (h5File) {
-    // Use HDF5 format if h5 file exists
     const h5Data = readIfSmall(h5File.absolutePath, 'cell_feature_matrix.h5');
     if (h5Data) {
       files.cellFeatureMatrix = {
@@ -1399,7 +1348,6 @@ const inspectXeniumRegion = (regionPath) => {
     }
   }
   
-  // If no h5 file, or h5 file couldn't be read, fall back to MatrixMarket format
   if (!files.cellFeatureMatrix || !files.cellFeatureMatrix.h5) {
     const matrixFile = getExistingFile(
       cellFeatureMatrixDir,
@@ -1516,9 +1464,6 @@ const inspectXeniumRegion = (regionPath) => {
     }
   }
 
-  // Intentionally do not check for large morphology images (e.g., morphology.ome.tif) or overview images now.
-  // These are not used in the current pipeline and probing their presence caused confusing UI warnings.
-
   return { files, metadata };
 };
 
@@ -1578,12 +1523,6 @@ ipcMain.handle('read-xenium-files', async (event, targetPath) => {
   }
 });
 
-// ================= Visium HD Support =================
-
-/**
- * Resolve Visium HD data path: looks for segmented_outputs or binned_outputs
- * Priority: segmented_outputs > binned_outputs
- */
 const resolveVisiumHDRegionPath = (targetPath) => {
   const stats = fs.statSync(targetPath);
   if (!stats.isDirectory()) {
@@ -1599,12 +1538,14 @@ const resolveVisiumHDRegionPath = (targetPath) => {
     if (!binDirs.length) return null;
     const preferredBin = binDirs.find(d => d.includes('008um')) || binDirs[0];
     const binPath = path.join(binnedPath, preferredBin);
+    console.log('Found Visium HD binned_outputs at:', binPath);
     return { regionPath: binPath, dataType: 'binned', binSize: preferredBin };
   };
 
   const inspectOutsLikeFolder = (outsLikePath) => {
     const segmentedPath = path.join(outsLikePath, 'segmented_outputs');
     if (fs.existsSync(segmentedPath) && fs.statSync(segmentedPath).isDirectory()) {
+      console.log('Found Visium HD segmented_outputs at:', segmentedPath);
       return { regionPath: segmentedPath, dataType: 'segmented' };
     }
 
@@ -1612,7 +1553,6 @@ const resolveVisiumHDRegionPath = (targetPath) => {
     return chooseBinnedRegion(binnedPath);
   };
 
-  // Accept either the outs folder itself or the parent sample folder containing outs.
   const directMatch = inspectOutsLikeFolder(targetPath);
   if (directMatch) return directMatch;
 
@@ -1639,14 +1579,11 @@ const resolveVisiumHDRegionPath = (targetPath) => {
   );
 };
 
-/**
- * Inspect Visium HD segmented outputs region
- */
 const inspectVisiumHDSegmented = (regionPath) => {
   const files = {};
   const metadata = { skipped: {}, sizes: {} };
 
-  const MAX_READ_SIZE = 512 * 1024 * 1024; // 512 MB safety cap per file
+  const MAX_READ_SIZE = 512 * 1024 * 1024;
 
   const readIfSmall = (absPath, logicalName, optional = false) => {
     if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
@@ -1682,7 +1619,6 @@ const inspectVisiumHDSegmented = (regionPath) => {
     return data;
   };
 
-  // Read cell_segmentations.geojson (required for segmented data)
   const cellSegPath = path.join(regionPath, 'cell_segmentations.geojson');
   if (fs.existsSync(cellSegPath)) {
     const data = readIfSmall(cellSegPath, 'cell_segmentations.geojson');
@@ -1696,8 +1632,6 @@ const inspectVisiumHDSegmented = (regionPath) => {
     throw new Error('cell_segmentations.geojson not found in segmented_outputs');
   }
 
-  // For Visium HD, prefer MatrixMarket format over H5 because we can parse barcodes directly
-  // This ensures proper cell ID matching with the spatial data
   const matrixDir = path.join(regionPath, 'filtered_feature_cell_matrix');
   if (fs.existsSync(matrixDir) && fs.statSync(matrixDir).isDirectory()) {
     try {
@@ -1720,8 +1654,9 @@ const inspectVisiumHDSegmented = (regionPath) => {
         },
       };
       metadata.cellFeatureMatrixFormat = 'MatrixMarket';
+      console.log('Using MatrixMarket format for Visium HD cell feature matrix');
     } catch (mtxError) {
-      // Fall back to H5 if MatrixMarket files not found
+      console.log('MatrixMarket files not found, trying H5 format');
       const h5Path = path.join(regionPath, 'filtered_feature_cell_matrix.h5');
       if (fs.existsSync(h5Path)) {
         const data = readIfSmall(h5Path, 'filtered_feature_cell_matrix.h5');
@@ -1737,7 +1672,6 @@ const inspectVisiumHDSegmented = (regionPath) => {
       }
     }
   } else {
-    // No MatrixMarket directory, try H5 file directly
     const h5Path = path.join(regionPath, 'filtered_feature_cell_matrix.h5');
     if (fs.existsSync(h5Path)) {
       const data = readIfSmall(h5Path, 'filtered_feature_cell_matrix.h5');
@@ -1753,13 +1687,11 @@ const inspectVisiumHDSegmented = (regionPath) => {
     }
   }
 
-  // Read analysis folder
   const analysisDir = path.join(regionPath, 'analysis');
   files.analysis = {};
   metadata.analysis = {};
 
   if (fs.existsSync(analysisDir) && fs.statSync(analysisDir).isDirectory()) {
-    // Read UMAP coordinates
     const umapDir = path.join(analysisDir, 'umap', 'gene_expression_2_components');
     if (fs.existsSync(umapDir) && fs.statSync(umapDir).isDirectory()) {
       const projectionPath = path.join(umapDir, 'projection.csv');
@@ -1774,7 +1706,6 @@ const inspectVisiumHDSegmented = (regionPath) => {
       }
     }
 
-    // Read clustering results
     const clusterDir = path.join(analysisDir, 'clustering', 'gene_expression_graphclust');
     if (fs.existsSync(clusterDir) && fs.statSync(clusterDir).isDirectory()) {
       const clusterFile = getExistingFile(clusterDir, ['clusters.csv', 'clusters.csv.gz'], 'clusters', true);
@@ -1794,15 +1725,11 @@ const inspectVisiumHDSegmented = (regionPath) => {
   return { files, metadata };
 };
 
-/**
- * Inspect Visium HD binned outputs region (older format without cell segmentation)
- * Data is in outs/binned_outputs/square_008um/
- */
 const inspectVisiumHDBinned = (regionPath, binSize) => {
   const files = {};
   const metadata = { skipped: {}, sizes: {}, binSize };
 
-  const MAX_READ_SIZE = 512 * 1024 * 1024; // 512 MB safety cap per file
+  const MAX_READ_SIZE = 512 * 1024 * 1024;
 
   const readIfSmall = (absPath, logicalName, optional = false) => {
     if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
@@ -1838,7 +1765,6 @@ const inspectVisiumHDBinned = (regionPath, binSize) => {
     return data;
   };
 
-  // For binned data, read filtered_feature_bc_matrix (note: "bc" not "cell")
   const matrixDir = path.join(regionPath, 'filtered_feature_bc_matrix');
   if (fs.existsSync(matrixDir) && fs.statSync(matrixDir).isDirectory()) {
     try {
@@ -1861,8 +1787,9 @@ const inspectVisiumHDBinned = (regionPath, binSize) => {
         },
       };
       metadata.cellFeatureMatrixFormat = 'MatrixMarket';
+      console.log('Using MatrixMarket format for Visium HD binned data');
     } catch (mtxError) {
-      // Fall back to H5 if MatrixMarket files not found
+      console.log('MatrixMarket files not found, trying H5 format');
       const h5Path = path.join(regionPath, 'filtered_feature_bc_matrix.h5');
       if (fs.existsSync(h5Path)) {
         const data = readIfSmall(h5Path, 'filtered_feature_bc_matrix.h5');
@@ -1878,7 +1805,6 @@ const inspectVisiumHDBinned = (regionPath, binSize) => {
       }
     }
   } else {
-    // No MatrixMarket directory, try H5 file directly
     const h5Path = path.join(regionPath, 'filtered_feature_bc_matrix.h5');
     if (fs.existsSync(h5Path)) {
       const data = readIfSmall(h5Path, 'filtered_feature_bc_matrix.h5');
@@ -1898,10 +1824,8 @@ const inspectVisiumHDBinned = (regionPath, binSize) => {
     throw new Error('Could not find feature matrix in binned_outputs. Expected filtered_feature_bc_matrix/ directory or .h5 file.');
   }
 
-  // Read spatial coordinates from spatial/ folder
   const spatialDir = path.join(regionPath, 'spatial');
   if (fs.existsSync(spatialDir) && fs.statSync(spatialDir).isDirectory()) {
-    // Try CSV first (we can parse it), then parquet as fallback
     const parquetPath = path.join(spatialDir, 'tissue_positions.parquet');
     const csvPath = path.join(spatialDir, 'tissue_positions.csv');
     const csvGzPath = path.join(spatialDir, 'tissue_positions.csv.gz');
@@ -1914,6 +1838,7 @@ const inspectVisiumHDBinned = (regionPath, binSize) => {
           data,
           format: 'csv',
         };
+        console.log('Loaded tissue positions from CSV');
       }
     } else if (fs.existsSync(csvGzPath)) {
       const data = readMaybeCsvGz(csvGzPath, 'tissue_positions.csv.gz', true);
@@ -1923,6 +1848,7 @@ const inspectVisiumHDBinned = (regionPath, binSize) => {
           data,
           format: 'csv',
         };
+        console.log('Loaded tissue positions from gzipped CSV');
       }
     } else if (fs.existsSync(parquetPath)) {
       const data = readIfSmall(parquetPath, 'tissue_positions.parquet', true);
@@ -1932,17 +1858,16 @@ const inspectVisiumHDBinned = (regionPath, binSize) => {
           data,
           format: 'parquet',
         };
+        console.log('Loaded tissue positions from parquet');
       }
     }
   }
 
-  // If no tissue positions found, look for barcode_mappings.parquet in parent directories
-  // This file is typically at outs/barcode_mappings.parquet for Visium HD
   if (!files.tissuePositions) {
-    // Go up from binned_outputs/square_XXXum to outs level
     const outsDir = path.dirname(path.dirname(regionPath));
     const barcodeMappingsPath = path.join(outsDir, 'barcode_mappings.parquet');
 
+    console.log('Looking for barcode_mappings.parquet at:', barcodeMappingsPath);
 
     if (fs.existsSync(barcodeMappingsPath)) {
       const data = readIfSmall(barcodeMappingsPath, 'barcode_mappings.parquet', true);
@@ -1952,17 +1877,16 @@ const inspectVisiumHDBinned = (regionPath, binSize) => {
           data,
           format: 'parquet',
         };
+        console.log('Loaded barcode_mappings.parquet for spatial coordinates');
       }
     }
   }
 
-  // Read analysis folder (same structure as segmented)
   const analysisDir = path.join(regionPath, 'analysis');
   files.analysis = {};
   metadata.analysis = {};
 
   if (fs.existsSync(analysisDir) && fs.statSync(analysisDir).isDirectory()) {
-    // Read UMAP coordinates
     const umapDir = path.join(analysisDir, 'umap', 'gene_expression_2_components');
     if (fs.existsSync(umapDir) && fs.statSync(umapDir).isDirectory()) {
       const projectionPath = path.join(umapDir, 'projection.csv');
@@ -1977,7 +1901,6 @@ const inspectVisiumHDBinned = (regionPath, binSize) => {
       }
     }
 
-    // Read clustering results
     const clusterDir = path.join(analysisDir, 'clustering', 'gene_expression_graphclust');
     if (fs.existsSync(clusterDir) && fs.statSync(clusterDir).isDirectory()) {
       const clusterFile = getExistingFile(clusterDir, ['clusters.csv', 'clusters.csv.gz'], 'clusters', true);
@@ -2025,7 +1948,6 @@ ipcMain.handle('read-visium-hd-files', async (event, targetPath) => {
       metadata,
     };
 
-    // Include bin size for binned data
     if (dataType === 'binned' && binSize) {
       response.binSize = binSize;
     }
@@ -2037,21 +1959,11 @@ ipcMain.handle('read-visium-hd-files', async (event, targetPath) => {
   }
 });
 
-// ================= MERFISH Support =================
-
-/**
- * Read MERFISH data files from a directory
- * Expected files:
- * cell_by_gene.csv: Gene expression counts matrix (cells x genes)
- * cell_metadata.csv: Spatial coordinates (EntityID, center_x, center_y, etc.)
- * cell_categories.csv: Clustering results (EntityID, leiden)
- * cell_numeric_categories.csv: UMAP coordinates (EntityID, umap_X, umap_Y)
- */
 const inspectMERFISHRegion = (regionPath) => {
   const files = {};
   const metadata = { skipped: {}, sizes: {} };
 
-  const MAX_READ_SIZE = 512 * 1024 * 1024; // 512 MB safety cap per file
+  const MAX_READ_SIZE = 512 * 1024 * 1024;
 
   const readIfSmall = (absPath, logicalName, optional = false) => {
     if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
@@ -2069,7 +1981,6 @@ const inspectMERFISHRegion = (regionPath) => {
     return readBinaryFile(absPath);
   };
 
-  // Read counts file (cell_by_gene.csv): required
   const countsFile = getExistingFile(regionPath, ['cell_by_gene.csv'], 'cell_by_gene.csv');
   const countsData = readIfSmall(countsFile.absolutePath, 'cell_by_gene.csv');
   if (countsData) {
@@ -2077,9 +1988,9 @@ const inspectMERFISHRegion = (regionPath) => {
       name: countsFile.name,
       data: countsData,
     };
+    console.log('Loaded MERFISH counts file:', countsFile.name);
   }
 
-  // Read spatial metadata file (cell_metadata.csv): required for coordinates
   const spatialFile = getExistingFile(regionPath, ['cell_metadata.csv'], 'cell_metadata.csv');
   const spatialData = readIfSmall(spatialFile.absolutePath, 'cell_metadata.csv');
   if (spatialData) {
@@ -2087,9 +1998,9 @@ const inspectMERFISHRegion = (regionPath) => {
       name: spatialFile.name,
       data: spatialData,
     };
+    console.log('Loaded MERFISH spatial file:', spatialFile.name);
   }
 
-  // Read clustering file (cell_categories.csv): optional
   const clusterFile = getExistingFile(regionPath, ['cell_categories.csv'], 'cell_categories.csv', true);
   if (clusterFile) {
     const clusterData = readIfSmall(clusterFile.absolutePath, 'cell_categories.csv', true);
@@ -2098,10 +2009,10 @@ const inspectMERFISHRegion = (regionPath) => {
         name: clusterFile.name,
         data: clusterData,
       };
+      console.log('Loaded MERFISH clustering file:', clusterFile.name);
     }
   }
 
-  // Read UMAP file (cell_numeric_categories.csv): optional
   const umapFile = getExistingFile(regionPath, ['cell_numeric_categories.csv'], 'cell_numeric_categories.csv', true);
   if (umapFile) {
     const umapData = readIfSmall(umapFile.absolutePath, 'cell_numeric_categories.csv', true);
@@ -2110,6 +2021,7 @@ const inspectMERFISHRegion = (regionPath) => {
         name: umapFile.name,
         data: umapData,
       };
+      console.log('Loaded MERFISH UMAP file:', umapFile.name);
     }
   }
 
@@ -2129,7 +2041,6 @@ ipcMain.handle('read-merfish-files', async (event, targetPath) => {
 
     const { files, metadata } = inspectMERFISHRegion(targetPath);
 
-    // Verify required files are present
     if (!files.counts) {
       throw new Error('cell_by_gene.csv not found in MERFISH directory');
     }
@@ -2150,12 +2061,8 @@ ipcMain.handle('read-merfish-files', async (event, targetPath) => {
   }
 });
 
-// ================= CosMX Support =================
+const COSMX_MAX_READ_SIZE = 512 * 1024 * 1024;
 
-/** Max size (bytes) for loading a CosMX file in-memory; larger files are stream-parsed. */
-const COSMX_MAX_READ_SIZE = 512 * 1024 * 1024; // 512 MB
-
-/** Compute a deterministic cache key for a CosMX dataset based on source file identity. */
 function computeCosmxCacheKey(countsPath, metaPath) {
   const countsStat = fs.statSync(countsPath);
   const metaStat = fs.statSync(metaPath);
@@ -2171,7 +2078,6 @@ function computeCosmxCacheKey(countsPath, metaPath) {
   return 'cosmx-cache-' + hash;
 }
 
-/** Validate that a CosMX cache directory is still valid (source files haven't changed). */
 function validateCosmxCache(cacheDir, countsPath, metaPath) {
   const manifestPath = path.join(cacheDir, 'cache-manifest.json');
   if (!fs.existsSync(manifestPath)) return false;
@@ -2194,10 +2100,6 @@ function validateCosmxCache(cacheDir, countsPath, metaPath) {
   }
 }
 
-/**
- * Stream-parse CosMX expression CSV (*_exprMat_file.csv) without loading the whole file.
- * If targetDir is provided, output files are written there; otherwise a random directory is used.
- */
 function streamParseCosMXExprMat(csvPath, targetDir) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -2214,14 +2116,11 @@ function streamParseCosMXExprMat(csvPath, targetDir) {
     let geneIndices = [];
     let cellIdx = 0;
     let lineNum = 0;
-    let nnz = 0; // count non-zeros instead of storing them
-    const PROGRESS_INTERVAL = 500000; // log every 500k data rows
+    let nnz = 0;
+    const PROGRESS_INTERVAL = 500000;
 
     const trimQuotes = (s) => (s && typeof s === 'string' ? s.trim().replace(/^["']|["']$/g, '') : s);
 
-    // Write sparse entries directly to a temp file instead of accumulating in memory.
-    // Since cells are processed sequentially and genes in fixed order, output is already
-    // in column-major order, no sort needed.
     const tempDataPath = path.join(os.tmpdir(), 'cellpilot-cosmx-data-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.txt');
     const dataWriter = fs.createWriteStream(tempDataPath, { encoding: 'utf8' });
     let dataWriterError = null;
@@ -2275,12 +2174,10 @@ function streamParseCosMXExprMat(csvPath, targetDir) {
         const fov = values[countsFovIdx];
         const cellId = values[countsCellIdIdx];
         if (fov === undefined || cellId === undefined) {
-          return; // skip malformed or short lines
+          return;
         }
         cellIds.push(`${fov}_${cellId}`);
 
-        // Write sparse entries directly to disk instead of pushing to an in-memory array.
-        // Format: "row col val\n" (1-indexed, matching MatrixMarket coordinate format).
         const parts = [];
         for (let gIdx = 0; gIdx < geneIndices.length; gIdx++) {
           const origColIdx = geneIndices[gIdx];
@@ -2291,8 +2188,6 @@ function streamParseCosMXExprMat(csvPath, targetDir) {
           }
         }
         if (parts.length > 0) {
-          // Batch-write all entries for this cell in a single write call for efficiency.
-          // Handle back-pressure: pause readline if write buffer is full.
           const canContinue = dataWriter.write(parts.join(''));
           if (!canContinue) {
             rl.pause();
@@ -2302,6 +2197,7 @@ function streamParseCosMXExprMat(csvPath, targetDir) {
 
         cellIdx++;
         if (cellIdx > 0 && cellIdx % PROGRESS_INTERVAL === 0) {
+          console.log('CosMX stream-parse progress: ' + cellIdx + ' cells, ' + nnz + ' non-zeros');
         }
       } catch (err) {
         rl.close();
@@ -2319,7 +2215,6 @@ function streamParseCosMXExprMat(csvPath, targetDir) {
         return;
       }
 
-      // Finish writing sparse data, then assemble the final gzipped MTX file
       dataWriter.end(() => {
         if (settled) return;
         if (dataWriterError) {
@@ -2329,16 +2224,15 @@ function streamParseCosMXExprMat(csvPath, targetDir) {
         }
 
         try {
+          console.log(`CosMX stream-parse complete: ${nCells} cells, ${nGenes} genes, ${nnz} non-zeros. Assembling MTX...`);
 
           const featuresContent = geneNames.map((g) => `${g}\t${g}\tGene Expression`).join('\n');
           const barcodesContent = cellIds.join('\n');
 
-          // Set up output directory (use targetDir if provided for caching, otherwise random)
           startCosmxTempServer();
           const cosmxDir = targetDir || path.join(getCosmxTempRoot(), 'cosmx-' + Date.now() + '-' + Math.random().toString(36).slice(2));
           fs.mkdirSync(cosmxDir, { recursive: true });
 
-          // Stream-assemble and gzip the MTX file: header + size line + data from temp file
           const mtxGzPath = path.join(cosmxDir, 'matrix.mtx.gz');
           const gzipStream = zlib.createGzip();
           const mtxOut = fs.createWriteStream(mtxGzPath);
@@ -2350,13 +2244,11 @@ function streamParseCosMXExprMat(csvPath, targetDir) {
 
           gzipStream.pipe(mtxOut);
 
-          // Write MatrixMarket header
           const mmHeader = '%%MatrixMarket matrix coordinate integer general\n';
           const mmSizeLine = `${nGenes} ${nCells} ${nnz}\n`;
           gzipStream.write(mmHeader);
           gzipStream.write(mmSizeLine);
 
-          // Stream the sparse data from the temp file through the gzip pipeline
           const dataReadStream = fs.createReadStream(tempDataPath, { encoding: 'utf8' });
           dataReadStream.on('error', (err) => {
             try { fs.unlinkSync(tempDataPath); } catch (_) {}
@@ -2375,7 +2267,6 @@ function streamParseCosMXExprMat(csvPath, targetDir) {
           });
 
           mtxOut.on('finish', () => {
-            // Clean up temp data file
             try { fs.unlinkSync(tempDataPath); } catch (_) {}
             if (settled) return;
 
@@ -2413,16 +2304,6 @@ function streamParseCosMXExprMat(csvPath, targetDir) {
   });
 }
 
-/**
- * Read NanoString CosMX data files from a directory
- * Expected files:
- * *_exprMat_file.csv: Gene expression counts matrix (cells x genes)
- *   Columns: fov, cell_ID, <gene1>, <gene2>, ..., NegPrb3, NegPrb5, ...
- * *_metadata_file.csv: Spatial coordinates and cell metadata
- *   Columns: fov, cell_ID, Area, ..., CenterX_global_px, CenterY_global_px, ...
- * For expression files larger than COSMX_MAX_READ_SIZE, the CSV is stream-parsed in the main process
- * and the parsed MatrixMarket + features + barcodes are passed as preparsed blobs.
- */
 async function inspectCosMXRegion(regionPath) {
   const files = {};
   const metadata = { skipped: {}, sizes: {} };
@@ -2441,14 +2322,12 @@ async function inspectCosMXRegion(regionPath) {
       return null;
     }
     const raw = readBinaryFile(absPath);
-    // Decompress gzip on the fly so the worker always receives plain CSV bytes
     if (absPath.toLowerCase().endsWith('.gz')) {
       return new Uint8Array(zlib.gunzipSync(Buffer.from(raw)));
     }
     return raw;
   };
 
-  // Find the exprMat_file.csv(.gz) and metadata_file.csv(.gz) by suffix
   const dirEntries = fs.readdirSync(regionPath);
 
   const exprMatFile =
@@ -2468,11 +2347,11 @@ async function inspectCosMXRegion(regionPath) {
   const countsPath = path.join(regionPath, exprMatFile);
   const metaPath = path.join(regionPath, metadataFile);
 
-  // --- Cache check: reuse previously parsed data if source files haven't changed ---
   const cacheKey = computeCosmxCacheKey(countsPath, metaPath);
   const cacheDir = path.join(getCosmxTempRoot(), cacheKey);
 
   if (fs.existsSync(cacheDir) && validateCosmxCache(cacheDir, countsPath, metaPath)) {
+    console.log('CosMX cache HIT for', regionPath, '(key:', cacheKey, ')');
     startCosmxTempServer();
 
     const base = 'http://localhost:' + COSMX_TEMP_PORT + '/cosmx-temp/' + cacheKey;
@@ -2491,15 +2370,14 @@ async function inspectCosMXRegion(regionPath) {
       },
     };
 
-    // Read cached spatial metadata binary
     const cachedSpatialPath = path.join(cacheDir, 'spatial_metadata.bin');
     files.spatial = { name: metadataFile, data: readBinaryFile(cachedSpatialPath) };
 
     return { files, metadata };
   }
 
+  console.log('CosMX cache MISS for', regionPath, '(key:', cacheKey, ')');
 
-  // --- Cache miss: parse from source ---
   const countsSize = fs.statSync(countsPath).size;
   metadata.sizes[exprMatFile] = countsSize;
 
@@ -2507,18 +2385,22 @@ async function inspectCosMXRegion(regionPath) {
     const countsData = readIfSmall(countsPath, exprMatFile);
     if (countsData) {
       files.counts = { name: exprMatFile, data: countsData };
+      console.log('Loaded CosMX expression matrix file:', exprMatFile);
     }
   } else {
+    console.log('CosMX expression file is large (' + (countsSize / 1024 / 1024 / 1024).toFixed(2) + ' GB), stream-parsing' + (countsPath.endsWith('.gz') ? ' (gzipped)' : '') + '...');
     const preparsed = await streamParseCosMXExprMat(countsPath, cacheDir);
     files.counts = {
       name: exprMatFile,
       preparsedUrls: preparsed.preparsedUrls,
     };
+    console.log('CosMX expression matrix stream-parsed; preparsed files served at URLs.');
   }
 
   const metaData = readIfSmall(metaPath, metadataFile);
   if (metaData) {
     files.spatial = { name: metadataFile, data: metaData };
+    console.log('Loaded CosMX metadata file:', metadataFile);
   } else if (!files.spatial && fs.existsSync(metaPath) && fs.statSync(metaPath).isFile()) {
     const metaSize = fs.statSync(metaPath).size;
     metadata.sizes[metadataFile] = metaSize;
@@ -2527,13 +2409,10 @@ async function inspectCosMXRegion(regionPath) {
     }
   }
 
-  // --- Write cache for future loads ---
   if (files.counts && files.counts.preparsedUrls && files.spatial && files.spatial.data) {
     try {
       if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-      // Cache spatial metadata binary
       fs.writeFileSync(path.join(cacheDir, 'spatial_metadata.bin'), files.spatial.data);
-      // Write validation manifest
       const countsStat = fs.statSync(countsPath);
       const metaStat = fs.statSync(metaPath);
       const manifest = {
@@ -2548,6 +2427,7 @@ async function inspectCosMXRegion(regionPath) {
         files: ['matrix.mtx.gz', 'features.tsv.gz', 'barcodes.tsv.gz', 'cellIds.json', 'spatial_metadata.bin'],
       };
       fs.writeFileSync(path.join(cacheDir, 'cache-manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+      console.log('CosMX cache written to', cacheDir);
     } catch (cacheErr) {
       console.warn('Failed to write CosMX cache (non-fatal):', cacheErr.message);
     }
@@ -2556,8 +2436,7 @@ async function inspectCosMXRegion(regionPath) {
   return { files, metadata };
 }
 
-// CosMX load can take a long time for huge CSVs; timeout so we always send a reply.
-const COSMX_LOAD_TIMEOUT_MS = 120 * 60 * 1000; // 2 hours
+const COSMX_LOAD_TIMEOUT_MS = 120 * 60 * 1000;
 
 function withTimeout(promise, ms, message) {
   return new Promise((resolve, reject) => {
@@ -2633,7 +2512,6 @@ ipcMain.handle('read-cosmx-files', async (event, targetPath) => {
   }
 });
 
-// List directory contents
 ipcMain.handle('list-directory', async (event, dirPath) => {
   try {
     const files = fs.readdirSync(dirPath);
@@ -2643,7 +2521,6 @@ ipcMain.handle('list-directory', async (event, dirPath) => {
   }
 });
 
-// Check if path exists
 ipcMain.handle('path-exists', async (event, checkPath) => {
   try {
     return fs.existsSync(checkPath);
@@ -2652,12 +2529,10 @@ ipcMain.handle('path-exists', async (event, checkPath) => {
   }
 });
 
-// Get app path for storing models
 ipcMain.handle('get-app-path', async () => {
   return app.getPath('userData');
 });
 
-// Get current session info (optional, for displaying in UI)
 ipcMain.handle('get-session-info', async () => {
   const now = new Date();
   const startTime = new Date(sessionData.startTime);
@@ -2671,11 +2546,11 @@ ipcMain.handle('get-session-info', async () => {
   };
 });
 
-// Save CellPilot analysis results (UMAP coords + clusters) to the input folder
 ipcMain.handle('save-cellpilot-results', async (event, folderPath, results) => {
   try {
     const filePath = path.join(folderPath, 'cellpilot_results.json');
     fs.writeFileSync(filePath, JSON.stringify(results, null, 2), 'utf8');
+    console.log('CellPilot results saved to:', filePath);
     return { success: true };
   } catch (error) {
     console.error('Failed to save CellPilot results:', error);
@@ -2683,11 +2558,11 @@ ipcMain.handle('save-cellpilot-results', async (event, folderPath, results) => {
   }
 });
 
-// Synchronous save used by beforeunload handler so data is never lost on app close
 ipcMain.on('save-cellpilot-results-sync', (event, folderPath, results) => {
   try {
     const filePath = path.join(folderPath, 'cellpilot_results.json');
     fs.writeFileSync(filePath, JSON.stringify(results, null, 2), 'utf8');
+    console.log('CellPilot results saved (sync) to:', filePath);
     event.returnValue = true;
   } catch (error) {
     console.error('Failed to save CellPilot results (sync):', error);
@@ -2695,7 +2570,6 @@ ipcMain.on('save-cellpilot-results-sync', (event, folderPath, results) => {
   }
 });
 
-// Check if CellPilot results exist in a folder and return them
 ipcMain.handle('check-cellpilot-results', async (event, folderPath) => {
   try {
     const filePath = path.join(folderPath, 'cellpilot_results.json');
@@ -2711,23 +2585,25 @@ ipcMain.handle('check-cellpilot-results', async (event, folderPath) => {
   }
 });
 
-// Convert TIFF to DZI and return URL
 ipcMain.handle('convert-tiff-to-dzi', async (event, imagePath, transformMatrix = null) => {
   try {
+    console.log('=== Starting TIFF to DZI Conversion ===');
+    console.log('Input image path:', imagePath);
     
-    // Ensure TILE_ROOT is initialized
     if (!TILE_ROOT) {
       TILE_ROOT = path.join(app.getPath('userData'), 'dzi-tiles');
-      // Start tile server if not already running
+      console.log('Initializing TILE_ROOT:', TILE_ROOT);
       if (!tileServer) {
         startTileServer();
       }
     }
     
+    console.log('Tile root directory:', TILE_ROOT);
+    console.log('Tile server port:', TILE_PORT);
     if (transformMatrix) {
+      console.log('Transformation matrix provided:', transformMatrix);
     }
     
-    // Verify input file exists
     if (!fs.existsSync(imagePath)) {
       throw new Error(`Input file does not exist: ${imagePath}`);
     }
@@ -2736,11 +2612,17 @@ ipcMain.handle('convert-tiff-to-dzi', async (event, imagePath, transformMatrix =
 
     const baseName = path.parse(imagePath).name;
 
-    // Use HTTP URL for tiles: OpenSeadragon works better with HTTP
-    // Express server sets Cross-Origin-Resource-Policy: cross-origin header
-    // which allows tiles to work with COEP credentialless on the main document
     const dziUrl = `http://localhost:${TILE_PORT}/tiles/${baseName}.dzi`;
 
+    console.log('=== Conversion Complete ===');
+    console.log('DZI URL:', dziUrl);
+    console.log('DZI path:', dziPath);
+    console.log('Image dimensions:', { width, height });
+    if (offset) console.log('Transformation offsets (tx,ty):', offset);
+    if (scale) console.log('Transformation scale (s):', scale);
+    if (typeof angle !== 'undefined') console.log('Transformation rotation (deg):', angle);
+    if (matrix) console.log('Transformation matrix:', matrix);
+    console.log('Tiles directory:', tilesDir);
 
     return {
       success: true,
@@ -2751,7 +2633,7 @@ ipcMain.handle('convert-tiff-to-dzi', async (event, imagePath, transformMatrix =
       offset,
       scale,
       angle,
-      transformMatrix: matrix,  // Pass the full transformation matrix to frontend
+      transformMatrix: matrix,
     };
   } catch (error) {
     console.error('=== Error Converting TIFF to DZI ===');
@@ -2761,8 +2643,6 @@ ipcMain.handle('convert-tiff-to-dzi', async (event, imagePath, transformMatrix =
   }
 });
 
-// Load image file (TIFF or other image formats)
-// For large TIFF files, this will convert to DZI format and return HTTP URL
 ipcMain.handle('load-image-file', async (event, filePath) => {
   try {
     if (!filePath || !fs.existsSync(filePath)) {
@@ -2774,12 +2654,10 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
     const stats = fs.statSync(filePath);
     const fileSizeMB = stats.size / 1024 / 1024;
     
-    // Check if sharp is available
     let sharpAvailable = false;
     let sharpError = null;
     try {
       require.resolve('sharp');
-      // Try to actually require it to make sure it works
       try {
         require('sharp');
         sharpAvailable = true;
@@ -2791,10 +2669,11 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
     } catch (resolveError) {
       sharpAvailable = false;
       sharpError = 'Sharp module not found';
+      console.log('Sharp not installed or not found in path');
+      console.log('Node module path:', require.resolve.paths('sharp') || 'N/A');
     }
     
-    // For very large images, we must use sharp and file:// URLs instead of base64
-    const LARGE_IMAGE_THRESHOLD = 100 * 1024 * 1024; // 100MB
+    const LARGE_IMAGE_THRESHOLD = 100 * 1024 * 1024;
     const useFileUrl = stats.size > LARGE_IMAGE_THRESHOLD;
     
     if (useFileUrl && !sharpAvailable) {
@@ -2828,7 +2707,6 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
     let dataUrl = null;
     let fileUrl = null;
     
-    // Determine MIME type
     if (ext === '.tiff' || ext === '.tif') {
       mimeType = 'image/tiff';
     } else if (ext === '.jpg' || ext === '.jpeg') {
@@ -2841,23 +2719,17 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
       try {
         const sharp = require('sharp');
         
-        // Log the environment variable value to verify it's set correctly
+        console.log(`SHARP_LIMIT_INPUT_PIXELS: ${process.env.SHARP_LIMIT_INPUT_PIXELS || 'not set'}`);
         
-        // Environment variable should already be set at process startup
-        // For very large TIFF files, use tiling to create a DeepZoom pyramid
-        // This processes the image in tiles and should avoid pixel limit issues
         if (useFileUrl && (ext === '.tiff' || ext === '.tif')) {
-          // For large TIFF files, create tiled pyramid
           const tempDir = path.dirname(filePath);
           const tempFileName = `${path.basename(filePath, ext)}_converted.jpg`;
           const tempPath = path.join(tempDir, tempFileName);
           const dzOutputDir = tempPath.replace(/\.(jpg|jpeg)$/i, '_dz');
           
-          // Check if converted file or DZI already exists
           let useExisting = false;
           let useDZI = false;
           
-          // Check for existing DZI
           if (fs.existsSync(dzOutputDir)) {
             const dziXmlPath = path.join(dzOutputDir, 'dzc_output.xml');
             if (fs.existsSync(dziXmlPath)) {
@@ -2866,7 +2738,7 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
               if (dziStats.mtime > originalStats.mtime) {
                 useExisting = true;
                 useDZI = true;
-                // Read dimensions from DZI XML
+                console.log('Using existing DeepZoom pyramid');
                 try {
                   const dziXml = fs.readFileSync(dziXmlPath, 'utf8');
                   const widthMatch = dziXml.match(/Width="(\d+)"/);
@@ -2874,6 +2746,7 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
                   if (widthMatch && heightMatch) {
                     imageWidth = parseInt(widthMatch[1], 10);
                     imageHeight = parseInt(heightMatch[1], 10);
+                    console.log(`Image dimensions from DZI: ${imageWidth}x${imageHeight}`);
                   }
                 } catch (e) {
                   console.warn('Could not read DZI XML:', e.message);
@@ -2882,18 +2755,18 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
             }
           }
           
-          // Check for existing converted JPEG
           if (!useExisting && fs.existsSync(tempPath)) {
             const tempStats = fs.statSync(tempPath);
             const originalStats = fs.statSync(filePath);
             if (tempStats.mtime > originalStats.mtime) {
               useExisting = true;
-              // Get metadata from converted file
+              console.log('Using existing converted JPEG file');
               try {
                 const convertedImage = sharp(tempPath);
                 const convertedMetadata = await convertedImage.metadata();
                 imageWidth = convertedMetadata.width || 0;
                 imageHeight = convertedMetadata.height || 0;
+                console.log(`Image dimensions from converted file: ${imageWidth}x${imageHeight}`);
               } catch (e) {
                 console.warn('Could not read metadata from converted file:', e.message);
               }
@@ -2901,38 +2774,34 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
           }
           
           if (!useExisting) {
+            console.log(`Processing very large TIFF (${fileSizeMB.toFixed(1)}MB)...`);
+            console.log('Creating tiled image pyramid (DeepZoom format)...');
+            console.log('This may take several minutes for very large images.');
             
             try {
-              // Create output directory for DeepZoom tiles
               if (!fs.existsSync(dzOutputDir)) {
                 fs.mkdirSync(dzOutputDir, { recursive: true });
               }
               
-              // Use Sharp's tile() method to create DeepZoom pyramid
-              // Tile() processes images in chunks and should work even for very large images
-              // Note: We don't read metadata first; tile() handles it internally
+              console.log('Starting DeepZoom pyramid creation...');
               const startTime = Date.now();
               
-              // Create tile image with very high pixel limit
-              // Use both environment variable (set at startup) and per-instance option
               const tileImage = sharp(filePath);
               
-              // Create DeepZoom pyramid: processes image tile by tile
-              // This should work even for very large images because it processes in chunks
               await tileImage
                 .tile({
-                  size: 512, // Tile size in pixels
-                  overlap: 0, // No overlap between tiles
-                  layout: 'dz', // DeepZoom layout
-                  container: 'fs', // Filesystem container
+                  size: 512,
+                  overlap: 0,
+                  layout: 'dz',
+                  container: 'fs',
                   format: 'jpeg',
                   quality: 90
                 })
                 .toFile(dzOutputDir);
               
               const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
+              console.log(`DeepZoom pyramid created successfully in ${elapsed} minutes`);
               
-              // Read dimensions from DZI XML file
               const dziXmlPath = path.join(dzOutputDir, 'dzc_output.xml');
               if (fs.existsSync(dziXmlPath)) {
                 try {
@@ -2942,6 +2811,7 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
                   if (widthMatch && heightMatch) {
                     imageWidth = parseInt(widthMatch[1], 10);
                     imageHeight = parseInt(heightMatch[1], 10);
+                    console.log(`Image dimensions: ${imageWidth}x${imageHeight}`);
                   }
                 } catch (e) {
                   console.warn('Could not read DZI XML:', e.message);
@@ -2957,15 +2827,15 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
               console.error('DeepZoom pyramid creation error:', tileError);
               console.error('Error details:', tileError.message);
               
-              // If tiling fails due to pixel limit, try direct conversion as fallback
               if (tileError.message && tileError.message.includes('pixel limit')) {
+                console.log('Tiling failed due to pixel limit, trying direct conversion...');
                 
                 try {
-                  // Try direct conversion with maximum pixel limit
                   const conversionImage = sharp(filePath, {
-                    limitInputPixels: 10000000000 // 10 billion pixels
+                    limitInputPixels: 10000000000
                   });
                   
+                  console.log('Converting TIFF to JPEG directly...');
                   const startTime = Date.now();
                   await conversionImage
                     .jpeg({ 
@@ -2976,13 +2846,14 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
                     .toFile(tempPath);
                   
                   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
+                  console.log(`Conversion complete in ${elapsed} minutes`);
                   
-                  // Get metadata from converted file
                   try {
                     const convertedImage = sharp(tempPath);
                     const convertedMetadata = await convertedImage.metadata();
                     imageWidth = convertedMetadata.width || 0;
                     imageHeight = convertedMetadata.height || 0;
+                    console.log(`Converted image dimensions: ${imageWidth}x${imageHeight}`);
                   } catch (e) {
                     console.warn('Could not read metadata from converted file:', e.message);
                   }
@@ -2992,12 +2863,9 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
                   mimeType = 'image/jpeg';
                   
                 } catch (conversionError) {
-                  // Both tiling and direct conversion failed
                   console.error('Both tiling and direct conversion failed:', conversionError);
                   
                   if (conversionError.message && conversionError.message.includes('pixel limit')) {
-                    // The image is too large for Sharp to process
-                    // Provide helpful error message with instructions
                     const errorMessage = `Image is too large (${fileSizeMB.toFixed(1)}MB). The image exceeds Sharp's pixel limit.\n\n` +
                       `The environment variable SHARP_LIMIT_INPUT_PIXELS is set to 10 billion pixels, but the image still exceeds this limit.\n\n` +
                       `For very large histology images, please pre-process the image using one of these methods:\n\n` +
@@ -3020,7 +2888,6 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
                   };
                 }
               } else {
-                // Other error during tiling
                 return {
                   success: false,
                   error: `Failed to create DeepZoom pyramid: ${tileError.message}`
@@ -3029,7 +2896,6 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
             }
           }
           
-          // Set file URL if not already set
           if (!fileUrl) {
             if (useDZI) {
               const normalizedPath = dzOutputDir.replace(/\\/g, '/');
@@ -3042,12 +2908,11 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
             }
           }
           
+          console.log(`Using ${useDZI ? 'DeepZoom pyramid' : 'converted JPEG'} for large image: ${fileSizeMB.toFixed(1)}MB`);
         } else if (useFileUrl) {
-          // For other large formats (non-TIFF), use file:// URL directly
           const normalizedPath = filePath.replace(/\\/g, '/');
           fileUrl = `file:///${normalizedPath}`;
           
-          // Try to get metadata for non-TIFF large files
           try {
             const image = sharp(filePath, { limitInputPixels: 10000000000 });
             const metadata = await image.metadata();
@@ -3057,7 +2922,6 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
             console.warn('Could not read metadata for large non-TIFF file:', e.message);
           }
         } else {
-          // For smaller images, try to get metadata and convert to base64
           try {
             const image = sharp(filePath, { limitInputPixels: 10000000000 });
             const metadata = await image.metadata();
@@ -3086,7 +2950,6 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
         console.error('Error using sharp:', sharpError);
         console.error('Error stack:', sharpError.stack);
         
-        // Check if it's a pixel limit error
         if (sharpError.message && sharpError.message.includes('pixel limit')) {
           return {
             success: false,
@@ -3094,11 +2957,11 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
           };
         }
         
-        // Fall through to file-based approach if sharp fails
         if (useFileUrl) {
           if (ext !== '.tiff' && ext !== '.tif') {
             const normalizedPath = filePath.replace(/\\/g, '/');
             fileUrl = `file:///${normalizedPath}`;
+            console.log('Falling back to direct file URL without conversion');
           } else {
             return {
               success: false,
@@ -3113,7 +2976,6 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
         }
       }
     } else {
-      // Sharp not available: only handle small non-TIFF files
       if (ext === '.tiff' || ext === '.tif') {
         return {
           success: false,
@@ -3122,12 +2984,9 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
       }
       
       if (useFileUrl) {
-        // For large files without sharp, use file URL directly
-        // Normalize path for file:// URL
         const normalizedPath = filePath.replace(/\\/g, '/');
         fileUrl = `file:///${normalizedPath}`;
       } else {
-        // Read small files directly
         try {
           const data = fs.readFileSync(filePath);
           const base64Data = data.toString('base64');
@@ -3142,10 +3001,8 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
       }
     }
     
-    // If we don't have dimensions yet and have a file URL, try to get them
     if ((!imageWidth || !imageHeight) && fileUrl) {
-      // For file URLs, dimensions will be loaded in the renderer
-      // We'll return 0 and let the renderer handle it
+      console.log('Image dimensions will be loaded in renderer process');
     }
     
     return {
@@ -3170,7 +3027,6 @@ ipcMain.handle('load-image-file', async (event, filePath) => {
   }
 });
 
-// Load transformation matrix from CSV
 ipcMain.handle('load-transformation-matrix', async (event, filePath) => {
   try {
     if (!filePath || !fs.existsSync(filePath)) {
@@ -3180,8 +3036,6 @@ ipcMain.handle('load-transformation-matrix', async (event, filePath) => {
     const data = fs.readFileSync(filePath, 'utf8');
     const lines = data.trim().split('\n');
     
-    // Parse 3x3 matrix from CSV
-    // Expected format: 3 rows, 3 columns (comma or space separated)
     const matrix = [];
     for (const line of lines) {
       const values = line.split(/[,\s]+/).filter(v => v.trim() !== '').map(parseFloat);
@@ -3204,7 +3058,6 @@ ipcMain.handle('load-transformation-matrix', async (event, filePath) => {
   }
 });
 
-// Select histology image file
 ipcMain.handle('select-histology-image', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
@@ -3222,7 +3075,6 @@ ipcMain.handle('select-histology-image', async () => {
   return null;
 });
 
-// Select transformation matrix file (CSV)
 ipcMain.handle('select-transformation-matrix', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile'],
@@ -3239,22 +3091,9 @@ ipcMain.handle('select-transformation-matrix', async () => {
   return null;
 });
 
-// ============================================================================
-// ATAC-seq Fragment Query Handler
-// ============================================================================
-// Query fragments.tsv.gz for a specific genomic region. Supports both:
-// 1. tabix (if installed): fast random access via index
-// 2. Streaming fallback: reads through the bgzip file
-// ============================================================================
-
-/**
- * Pure JavaScript tabix query using @gmod/tabix.
- * Reads the .tbi index to do random-access into the bgzf file, no CLI tools needed.
- */
 async function queryFragmentsWithJsTabix(fragmentsPath, tbiPath, region, cellBarcodes) {
   const { TabixIndexedFile } = require('@gmod/tabix');
 
-  // Custom file handle compatible with @gmod/tabix and Node.js
   class NodeFileHandle {
     constructor(filePath) {
       this.filePath = filePath;
@@ -3302,6 +3141,7 @@ async function queryFragmentsWithJsTabix(fragmentsPath, tbiPath, region, cellBar
     });
   });
 
+  console.log(`@gmod/tabix: found ${fragments.length} fragments in ${chrom}:${region.start}-${region.end}`);
   return fragments;
 }
 
@@ -3309,7 +3149,6 @@ async function queryFragmentsWithTabix(fragmentsPath, region, cellBarcodes) {
   const { spawn } = require('child_process');
 
   return new Promise((resolve, reject) => {
-    // Ensure chromosome has "chr" prefix (10x fragments.tsv.gz uses this format)
     const rawChrom = String(region.chrom);
     const chrom = rawChrom.toLowerCase().startsWith('chr') ? rawChrom : `chr${rawChrom}`;
     const regionStr = `${chrom}:${region.start}-${region.end}`;
@@ -3327,7 +3166,7 @@ async function queryFragmentsWithTabix(fragmentsPath, region, cellBarcodes) {
     tabix.stdout.on('data', (data) => {
       buffer += data.toString();
       const lines = buffer.split('\n');
-      buffer = lines.pop(); // Keep incomplete line
+      buffer = lines.pop();
 
       for (const line of lines) {
         if (!line.trim()) continue;
@@ -3338,7 +3177,6 @@ async function queryFragmentsWithTabix(fragmentsPath, region, cellBarcodes) {
         const count = parts[4] ? parseInt(parts[4], 10) : 1;
         totalLines++;
 
-        // Filter by cell barcode if provided
         if (barcodeSet && !barcodeSet.has(barcode)) {
           filteredOut++;
           if (!firstUnmatchedBarcode) firstUnmatchedBarcode = barcode;
@@ -3360,7 +3198,6 @@ async function queryFragmentsWithTabix(fragmentsPath, region, cellBarcodes) {
     });
 
     tabix.on('close', (code) => {
-      // Process any remaining buffer
       if (buffer.trim()) {
         const parts = buffer.split('\t');
         if (parts.length >= 4) {
@@ -3381,9 +3218,12 @@ async function queryFragmentsWithTabix(fragmentsPath, region, cellBarcodes) {
       }
 
       if (code === 0) {
+        console.log(`tabix: ${totalLines} total lines, ${filteredOut} filtered out by barcode, ${fragments.length} kept`);
         if (filteredOut > 0 && fragments.length === 0 && firstUnmatchedBarcode) {
+          console.log(`tabix: first unmatched barcode from file: "${firstUnmatchedBarcode}"`);
           if (barcodeSet && barcodeSet.size > 0) {
             const firstSetBarcode = barcodeSet.values().next().value;
+            console.log(`tabix: first barcode in set: "${firstSetBarcode}"`);
           }
         }
         resolve(fragments);
@@ -3398,9 +3238,6 @@ async function queryFragmentsWithTabix(fragmentsPath, region, cellBarcodes) {
   });
 }
 
-/**
- * Check if tabix is available in PATH
- */
 async function isTabixAvailable() {
   const { spawn } = require('child_process');
   return new Promise((resolve) => {
@@ -3410,18 +3247,12 @@ async function isTabixAvailable() {
   });
 }
 
-/**
- * Streaming fallback for querying fragments without tabix.
- * Streams through the bgzip file and filters to the region.
- * Slower but works without tabix installed.
- */
 async function queryFragmentsStreaming(fragmentsPath, region, cellBarcodes) {
   return new Promise((resolve, reject) => {
     const fragments = [];
     const barcodeSet = cellBarcodes instanceof Set ? cellBarcodes :
                        (Array.isArray(cellBarcodes) ? new Set(cellBarcodes) : null);
 
-    // Normalize chromosome to lowercase, with and without "chr" prefix for matching
     const rawChrom = String(region.chrom).toLowerCase();
     const targetChrom = rawChrom.startsWith('chr') ? rawChrom : `chr${rawChrom}`;
     const targetChromNoPrefix = rawChrom.startsWith('chr') ? rawChrom.slice(3) : rawChrom;
@@ -3431,9 +3262,8 @@ async function queryFragmentsStreaming(fragmentsPath, region, cellBarcodes) {
     let foundChrom = false;
     let passedChrom = false;
     let lineCount = 0;
-    const maxLines = 500000000; // Safety limit (500M lines, multiome fragment files can be very large)
+    const maxLines = 500000000;
 
-    // Create gunzip stream for bgzip file (compatible with gzip)
     const fileStream = fs.createReadStream(fragmentsPath);
     const gunzip = zlib.createGunzip();
     const rl = readline.createInterface({
@@ -3459,27 +3289,22 @@ async function queryFragmentsStreaming(fragmentsPath, region, cellBarcodes) {
       const start = parseInt(startStr, 10);
       const end = parseInt(endStr, 10);
 
-      // Track chromosome progress (match with or without "chr" prefix)
       const chromMatches = chromLower === targetChrom || chromNoPrefix === targetChromNoPrefix;
       if (chromMatches) {
         foundChrom = true;
 
-        // Check if fragment overlaps region
         if (end >= regionStart && start <= regionEnd) {
-          // Filter by cell barcode if provided
           if (!barcodeSet || barcodeSet.has(barcode)) {
             const count = parts[4] ? parseInt(parts[4], 10) : 1;
             fragments.push({ chrom, start, end, barcode, count });
           }
         }
 
-        // Stop early if we've passed the region
         if (start > regionEnd) {
           passedChrom = true;
           rl.close();
         }
       } else if (foundChrom) {
-        // We've moved past the target chromosome
         passedChrom = true;
         rl.close();
       }
@@ -3494,7 +3319,6 @@ async function queryFragmentsStreaming(fragmentsPath, region, cellBarcodes) {
     });
 
     gunzip.on('error', (err) => {
-      // Handle truncated gzip (common with bgzip when we close early)
       if (err.code === 'Z_BUF_ERROR' || passedChrom) {
         resolve(fragments);
       } else {
@@ -3504,29 +3328,11 @@ async function queryFragmentsStreaming(fragmentsPath, region, cellBarcodes) {
   });
 }
 
-/**
- * Compute per-cluster binned coverage from fragments using Tn5 cut sites.
- *
- * Signac's CoveragePlot counts Tn5 insertion sites (the start and end of each
- * fragment) rather than the full fragment body.  Counting the body spreads
- * signal across the entire fragment length (often 150–500 bp), washing out
- * cluster-specific accessibility differences and producing noisy, "peaks
- * everywhere" tracks.  By counting only the two cut sites per fragment we
- * recover the sharp, cluster-specific peaks that match the gene-activity UMAP.
- *
- * @param {Array} fragments: Array of { chrom, start, end, barcode, count }
- * @param {Map} barcodeToCluster: Map from barcode to cluster ID
- * @param {number} regionStart: Start of genomic region
- * @param {number} regionEnd: End of genomic region
- * @param {number} binSize: Size of each bin in bp (default: 100)
- * @returns {Object}: { clusters: [...], coverageByCluster: [...] }
- */
 function computeBinnedCoverageFromFragments(fragments, barcodeToCluster, regionStart, regionEnd, binSize = 100, clusterMeanDepths = null) {
   const numBins = Math.ceil((regionEnd - regionStart) / binSize);
 
-  // Initialize coverage arrays per cluster
-  const clusterCoverage = new Map(); // clusterId -> Float32Array
-  const clusterCellCounts = new Map(); // clusterId -> Set of barcodes
+  const clusterCoverage = new Map();
+  const clusterCellCounts = new Map();
 
   for (const frag of fragments) {
     const clusterId = barcodeToCluster.get(frag.barcode);
@@ -3540,9 +3346,6 @@ function computeBinnedCoverageFromFragments(fragments, barcodeToCluster, regionS
     clusterCellCounts.get(clusterId).add(frag.barcode);
     const coverage = clusterCoverage.get(clusterId);
 
-    // Signac-style: count Tn5 cut sites (fragment start + end) instead of
-    // full fragment body overlap.  Each fragment produces exactly two
-    // insertion events, one at each end of the sequenced fragment.
     const cutSiteStart = frag.start;
     const cutSiteEnd = frag.end;
 
@@ -3560,22 +3363,6 @@ function computeBinnedCoverageFromFragments(fragments, barcodeToCluster, regionS
     }
   }
 
-  // Signac-style normalization using GLOBAL library size (not region-specific)
-  //
-  // CRITICAL: Signac uses the TOTAL number of cells per group (CellsPerGroup)
-  // and the GLOBAL mean depth (AverageCounts / nCount_ATAC) for each group:
-  // NOT the number of cells that happen to have fragments in this region.
-  //
-  // Using only region-present cells inflates signal for non-accessible clusters
-  // (few outlier cells → small denominator → artificially high norm values)
-  // and suppresses signal for accessible clusters (most cells present →
-  // denominator ≈ total → correct but relatively lower values).
-  //
-  // group_scale_factor = mean_depth_per_cell * TOTAL_n_cells_in_group
-  // norm_value = raw_sum / group_scale_factor * median(group_scale_factors)
-
-  // Count TOTAL cells per cluster from the full barcode→cluster mapping
-  // (this includes ALL cells, not just those with fragments in the region)
   const totalCellsPerCluster = new Map();
   for (const [, clusterId] of barcodeToCluster) {
     if (clusterId === undefined || clusterId === null) continue;
@@ -3585,18 +3372,14 @@ function computeBinnedCoverageFromFragments(fragments, barcodeToCluster, regionS
   const groupScaleFactors = new Map();
   const hasGlobalDepths = clusterMeanDepths && typeof clusterMeanDepths === 'object';
 
-  // Compute group scale factors for ALL clusters (not just those with fragments
-  // in the region) so the median is computed over the full set of clusters.
   const allClusterIds = new Set([...clusterCoverage.keys(), ...totalCellsPerCluster.keys()]);
   for (const clusterId of allClusterIds) {
     const totalCells = totalCellsPerCluster.get(clusterId) || 0;
     if (totalCells === 0) continue;
     if (hasGlobalDepths) {
-      // Use global per-cell depth from the peak matrix (like Signac's nCount_ATAC)
       const meanDepth = clusterMeanDepths[String(clusterId)] || clusterMeanDepths[clusterId] || 1;
       groupScaleFactors.set(clusterId, meanDepth * totalCells);
     } else {
-      // Fallback: use total cell count only
       groupScaleFactors.set(clusterId, totalCells);
     }
   }
@@ -3607,29 +3390,21 @@ function computeBinnedCoverageFromFragments(fragments, barcodeToCluster, regionS
     : (gsVals[gsVals.length / 2 - 1] + gsVals[gsVals.length / 2]) / 2;
   if (medianScale <= 0) medianScale = 1;
 
-  // Normalize, apply Signac-style rolling window sum, and convert to signal format.
-  //
-  // Signac works at 1bp resolution and applies roll_sum(n=100, align="center")
-  // to produce smooth coverage curves.  With our binned data (default 25bp bins),
-  // a rolling window of ceil(100/binSize) bins gives equivalent 100bp smoothing.
-  const smoothWindow = Math.max(1, Math.ceil(100 / binSize)); // ~4 bins for 25bp
+  const smoothWindow = Math.max(1, Math.ceil(100 / binSize));
   const halfWin = Math.floor(smoothWindow / 2);
 
   const coverageByCluster = [];
   for (const [clusterId, coverage] of clusterCoverage.entries()) {
-    // Use total cells for reporting; skip clusters with no cells
     const totalCells = totalCellsPerCluster.get(clusterId) || clusterCellCounts.get(clusterId).size;
     if (totalCells === 0) continue;
 
     const gsf = groupScaleFactors.get(clusterId) || 1;
 
-    // First pass: normalize raw counts
     const normValues = new Float32Array(numBins);
     for (let b = 0; b < numBins; b++) {
       normValues[b] = (coverage[b] / gsf) * medianScale;
     }
 
-    // Second pass: centered rolling sum (matches Signac's roll_sum)
     const smoothed = new Float32Array(numBins);
     for (let b = 0; b < numBins; b++) {
       const lo = Math.max(0, b - halfWin);
@@ -3654,7 +3429,6 @@ function computeBinnedCoverageFromFragments(fragments, barcodeToCluster, regionS
     });
   }
 
-  // Sort by cell count (largest first)
   coverageByCluster.sort((a, b) => b.cellCount - a.cellCount);
 
   return {
@@ -3667,7 +3441,6 @@ ipcMain.handle('query-atac-fragments', async (event, options) => {
   try {
     let { fragmentsPath, region, cellBarcodes, barcodeToCluster, clusterMeanDepths, binSize = 100 } = options;
 
-    // Resolve path: try given path, then alternate filename (atac_fragments.tsv.gz <-> fragments.tsv.gz), then outs/
     const FRAGMENTS_BASE = 'fragments.tsv.gz';
     const ATAC_FRAGMENTS_BASE = 'atac_fragments.tsv.gz';
     if (fragmentsPath && !fs.existsSync(fragmentsPath)) {
@@ -3682,6 +3455,7 @@ ipcMain.handle('query-atac-fragments', async (event, options) => {
       for (const candidate of candidates) {
         if (fs.existsSync(candidate)) {
           fragmentsPath = candidate;
+          console.log('Using fragments at:', fragmentsPath);
           break;
         }
       }
@@ -3694,14 +3468,18 @@ ipcMain.handle('query-atac-fragments', async (event, options) => {
       throw new Error('Invalid region specified');
     }
 
+    console.log(`Querying fragments for ${region.chrom}:${region.start}-${region.end}`);
+    console.log(`Fragment file: ${fragmentsPath}`);
+    console.log(`Cell barcodes count: ${Array.isArray(cellBarcodes) ? cellBarcodes.length : 'N/A'}`);
     if (Array.isArray(cellBarcodes) && cellBarcodes.length > 0) {
+      console.log(`First 3 barcodes: ${cellBarcodes.slice(0, 3).join(', ')}`);
     }
 
     let fragments;
 
-    // Try pure-JS tabix (uses @gmod/tabix to read .tbi index, no CLI tools needed)
     const tbiPath = fragmentsPath + '.tbi';
     if (fs.existsSync(tbiPath)) {
+      console.log('Using @gmod/tabix (pure JS) for indexed fragment query');
       try {
         fragments = await queryFragmentsWithJsTabix(fragmentsPath, tbiPath, region, cellBarcodes);
       } catch (err) {
@@ -3710,10 +3488,10 @@ ipcMain.handle('query-atac-fragments', async (event, options) => {
       }
     }
 
-    // Fallback: CLI tabix
     if (!fragments) {
       const tabixAvailable = await isTabixAvailable();
       if (tabixAvailable) {
+        console.log('Using CLI tabix for fragment query');
         try {
           fragments = await queryFragmentsWithTabix(fragmentsPath, region, cellBarcodes);
         } catch (err) {
@@ -3723,13 +3501,13 @@ ipcMain.handle('query-atac-fragments', async (event, options) => {
       }
     }
 
-    // Final fallback: streaming (slow for large files)
     if (!fragments) {
+      console.log('Using streaming query (may be slow for large fragment files)');
       fragments = await queryFragmentsStreaming(fragmentsPath, region, cellBarcodes);
     }
 
+    console.log(`Found ${fragments.length} fragments in region`);
 
-    // If barcodeToCluster mapping provided, compute binned coverage
     if (barcodeToCluster && Object.keys(barcodeToCluster).length > 0) {
       const barcodeMap = new Map(Object.entries(barcodeToCluster));
       const regionStart = region.start;
@@ -3753,7 +3531,6 @@ ipcMain.handle('query-atac-fragments', async (event, options) => {
       };
     }
 
-    // Return raw fragments if no clustering info
     return {
       success: true,
       fragments,
@@ -3766,21 +3543,17 @@ ipcMain.handle('query-atac-fragments', async (event, options) => {
   }
 });
 
-// High-resolution screenshot capture for publication figures
-// Captures at native Retina resolution, then upscales with Sharp (lanczos3)
-// for publication-quality output without distorting the UI layout.
 ipcMain.handle('capture-screenshot', async (event, options = {}) => {
   try {
     const win = BrowserWindow.getFocusedWindow() || mainWindow;
     if (!win) return { success: false, error: 'No window available' };
 
-    const upscale = options.upscale || 2; // upscale factor applied after Retina 2× capture
+    const upscale = options.upscale || 2;
 
     const image = await win.webContents.capturePage();
     const pngBuffer = image.toPNG();
     const size = image.getSize();
 
-    // Upscale using Sharp with high-quality lanczos3 resampling
     const sharp = require('sharp');
     const finalWidth = size.width * upscale;
     const finalHeight = size.height * upscale;
@@ -3789,7 +3562,6 @@ ipcMain.handle('capture-screenshot', async (event, options = {}) => {
       .png()
       .toBuffer();
 
-    // Let user pick save location
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
       title: 'Save High-Resolution Screenshot',
       defaultPath: path.join(app.getPath('pictures'), `CellPilot_figure_${Date.now()}.png`),
@@ -3823,9 +3595,6 @@ ipcMain.handle('capture-screenshot', async (event, options = {}) => {
   }
 });
 
-// Screen recording support
-// Saves a recorded video buffer sent from the renderer to a user-chosen path.
-// ext: 'mp4' or 'webm' depending on what MediaRecorder used.
 ipcMain.handle('save-recording', async (event, buffer, ext = 'mp4') => {
   const win = BrowserWindow.getFocusedWindow() || mainWindow;
   const isMP4 = ext === 'mp4';
@@ -3845,3 +3614,4 @@ ipcMain.handle('save-recording', async (event, buffer, ext = 'mp4') => {
   }
 });
 
+console.log('Electron main process started');

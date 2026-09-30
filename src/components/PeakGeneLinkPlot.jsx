@@ -1,26 +1,3 @@
-/**
- * PeakGeneLinkPlot, Signac-style coverage + arc link visualization.
- *
- * Layout (top → bottom):
- *   1. Per-cluster ATAC coverage tracks (smooth area curves, like CoveragePlot)
- *   2. Peaks track, dark bars for each peak in the region
- *   3. Gene track, gene name + region label
- *   4. Links track, arcs from each linked peak to the gene TSS,
- *      coloured by correlation score (gradient purple→blue like Signac)
- *   5. Genomic axis
- *
- * Props:
- *   gene               string    gene name
- *   links              Array     output of linkPeaks() filtered to this gene
- *   coverageByCluster  Array     [{clusterId, label, cellCount, signal:[{start,end,value}]}]
- *   region             object    {chrom, start, end}
- *   peaksOnGene        Array     [{chrom, start, end, peakName}]
- *   genome             string    e.g. 'hg38'
- *   clusterColorOverrides object clusterId → hex color
- *   clusterLabelMap    object    clusterId → display label
- *   width              number    SVG width in px
- */
-
 import React, { useCallback, useEffect, useRef, useMemo } from 'react';
 import * as d3 from 'd3';
 
@@ -36,7 +13,6 @@ const ensurePaletteLength = (n) => {
   return basePalette.concat(d3.quantize(d3.interpolateTurbo, n - basePalette.length + 2).slice(1));
 };
 
-
 export default function PeakGeneLinkPlot({
   gene,
   links = [],
@@ -51,7 +27,6 @@ export default function PeakGeneLinkPlot({
   const wrapperRef = useRef(null);
   const svgRef = useRef(null);
 
-  // Derive region from links if not provided
   const region = useMemo(() => {
     if (externalRegion) return externalRegion;
     if (!links.length) return null;
@@ -62,7 +37,6 @@ export default function PeakGeneLinkPlot({
     return { chrom: chr, start: Math.max(0, minStart - 5000), end: maxEnd + 5000 };
   }, [externalRegion, links]);
 
-  // Filter and sort coverage
   const sortedClusters = useMemo(() => {
     if (!coverageByCluster?.length) return [];
     return [...coverageByCluster]
@@ -70,7 +44,6 @@ export default function PeakGeneLinkPlot({
       .slice(0, 12);
   }, [coverageByCluster]);
 
-  // Color scale
   const colorScale = useMemo(() => {
     if (!sortedClusters.length) return null;
     const ids = [...new Set(sortedClusters.map(c => c.clusterId))].sort((a, b) => {
@@ -96,7 +69,6 @@ export default function PeakGeneLinkPlot({
     [clusterLabelMap]
   );
 
-  // Peaks from links or external
   const peaksOnGene = useMemo(() => {
     if (externalPeaks && externalPeaks.length > 0) return externalPeaks;
     return links.map(l => ({
@@ -104,7 +76,6 @@ export default function PeakGeneLinkPlot({
     }));
   }, [externalPeaks, links]);
 
-  // Score range for link color scale
   const scoreExtent = useMemo(() => {
     if (!links.length) return [0, 1];
     const scores = links.map(l => Math.abs(l.score));
@@ -132,7 +103,7 @@ export default function PeakGeneLinkPlot({
 
     const totalH = margin.top
       + coverageTotalH
-      + (hasCoverage ? 6 : 0) // gap after coverage
+      + (hasCoverage ? 6 : 0)
       + peakTrackH + 4
       + geneTrackH + 4
       + linkTrackH + 4
@@ -152,7 +123,6 @@ export default function PeakGeneLinkPlot({
 
     let y = margin.top;
 
-    // Coverage tracks
     if (hasCoverage) {
       let globalMax = 0;
       for (const c of sortedClusters) {
@@ -173,7 +143,6 @@ export default function PeakGeneLinkPlot({
           .domain([0, globalMax])
           .range([trackY + trackH, trackY]);
 
-        // Background
         const bg = d3.color(color);
         if (bg) bg.opacity = 0.04;
         d3.select(svgEl).append('rect')
@@ -182,7 +151,6 @@ export default function PeakGeneLinkPlot({
           .attr('fill', bg ? bg.toString() : '#fafafa')
           .attr('stroke', '#e5e7eb').attr('stroke-width', 0.5);
 
-        // Area curve
         const sorted = [...(cluster.signal || [])].sort((a, b) => a.start - b.start);
         if (sorted.length > 0) {
           const data = sorted.map(d => ({
@@ -207,7 +175,6 @@ export default function PeakGeneLinkPlot({
             .attr('clip-path', `url(#${clipId})`);
         }
 
-        // Y-axis labels
         if (idx === 0) {
           d3.select(svgEl).append('text')
             .attr('x', margin.left - 3).attr('y', trackY + 9)
@@ -219,7 +186,6 @@ export default function PeakGeneLinkPlot({
           .attr('text-anchor', 'end').attr('font-size', '7px').attr('fill', '#9ca3af')
           .text('0');
 
-        // Cluster label
         const boxW = 42, boxH = 16;
         d3.select(svgEl).append('rect')
           .attr('x', 4).attr('y', trackY + (trackH - boxH) / 2)
@@ -235,7 +201,6 @@ export default function PeakGeneLinkPlot({
       y += coverageTotalH + 6;
     }
 
-    // Peaks track
     const peakY = y;
     d3.select(svgEl).append('rect')
       .attr('x', margin.left).attr('y', peakY)
@@ -259,7 +224,6 @@ export default function PeakGeneLinkPlot({
     }
     y = peakY + peakTrackH + 4;
 
-    // Gene track
     const geneY = y;
     d3.select(svgEl).append('rect')
       .attr('x', margin.left).attr('y', geneY)
@@ -271,21 +235,17 @@ export default function PeakGeneLinkPlot({
       .attr('font-size', '9px').attr('font-weight', '600').attr('fill', '#333')
       .text('Gene');
 
-    // Gene body: horizontal line from region start to end + TSS marker
     const tss = links.length > 0 ? links[0].tss : null;
     if (tss != null) {
       const tssX = xScale(tss);
-      // Gene body line
       d3.select(svgEl).append('line')
         .attr('x1', margin.left + 4).attr('y1', geneY + geneTrackH / 2)
         .attr('x2', w - margin.right - 4).attr('y2', geneY + geneTrackH / 2)
         .attr('stroke', '#1e3a5f').attr('stroke-width', 1.5);
-      // TSS triangle
       const triH = 6;
       d3.select(svgEl).append('polygon')
         .attr('points', `${tssX},${geneY + geneTrackH / 2 - triH} ${tssX - 4},${geneY + geneTrackH / 2 + triH} ${tssX + 4},${geneY + geneTrackH / 2 + triH}`)
         .attr('fill', '#1e3a5f');
-      // Gene name
       d3.select(svgEl).append('text')
         .attr('x', tssX + 6).attr('y', geneY + 10)
         .attr('font-size', '10px').attr('font-weight', '600').attr('fill', '#1e3a5f')
@@ -293,7 +253,6 @@ export default function PeakGeneLinkPlot({
     }
     y = geneY + geneTrackH + 4;
 
-    // Links track (arcs)
     const linkY = y;
     d3.select(svgEl).append('rect')
       .attr('x', margin.left).attr('y', linkY)
@@ -305,12 +264,10 @@ export default function PeakGeneLinkPlot({
       .attr('font-size', '9px').attr('font-weight', '600').attr('fill', '#333')
       .text('Links');
 
-    // Score color scale for arcs
     const linkColor = d3.scaleSequential(d3.interpolatePurples).domain([0, scoreExtent[1]]);
 
     if (tss != null) {
       const tssX = xScale(tss);
-      // TSS vertical dashed line through links panel
       d3.select(svgEl).append('line')
         .attr('x1', tssX).attr('y1', linkY)
         .attr('x2', tssX).attr('y2', linkY + linkTrackH)
@@ -327,7 +284,6 @@ export default function PeakGeneLinkPlot({
         const strokeW = 1 + absR * 3;
         const arcDepth = 4 + absR * (linkTrackH - 12);
         const mx = (x1 + x2) / 2;
-        // Arcs go upward from bottom of link panel
         const baseY = linkY + linkTrackH;
         const cpY = baseY - arcDepth;
         const pathD = `M ${x1} ${baseY} Q ${mx} ${cpY} ${x2} ${baseY}`;
@@ -345,7 +301,6 @@ export default function PeakGeneLinkPlot({
       }
     }
 
-    // Score legend (small)
     const legendX = w - margin.right - 80;
     const legendY2 = linkY + 6;
     const legendW = 60, legendH2 = 8;
@@ -370,7 +325,6 @@ export default function PeakGeneLinkPlot({
 
     y = linkY + linkTrackH + 4;
 
-    // Genomic axis
     const axisY2 = y;
     const xAxis = d3.axisBottom(xScale)
       .ticks(6)
@@ -379,7 +333,6 @@ export default function PeakGeneLinkPlot({
       .attr('transform', `translate(0, ${axisY2})`)
       .call(xAxis)
       .selectAll('text').attr('font-size', '8px').attr('fill', '#555');
-    // Chromosome label
     d3.select(svgEl).append('text')
       .attr('x', (margin.left + w - margin.right) / 2)
       .attr('y', axisY2 + axisH + 2)

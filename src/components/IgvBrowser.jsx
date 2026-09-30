@@ -50,10 +50,6 @@ const formatLabel = (label, clusterId, clusterLabelMap = {}) => {
   return numericMatch ? numericMatch[0] : (label || key).replace(/^cluster\s*/i, '').trim() || key;
 };
 
-/**
- * IGV.js browser for ATAC coverage-by-cluster and peaks. Uses in-memory features
- * (wig + annotation) so no blob URLs are required.
- */
 const IgvBrowser = ({
   region,
   coverageByCluster = [],
@@ -100,7 +96,7 @@ const IgvBrowser = ({
         name: (displayName || '').toUpperCase(),
         features,
         color,
-        height: 50, // Taller tracks for better visualization (like Signac CoveragePlot)
+        height: 50,
         autoscale: false,
         min: 0,
         max: 1,

@@ -1,18 +1,5 @@
 import { SparseMatrixCSC } from './sparse.js';
 
-/**
- * Run TF-IDF normalization (Signac method 1 by default).
- *
- * Method 1 (Stuart & Butler 2019): log1p(TF * IDF * scaleFactor)
- *   TF = count / colSum(cell)
- *   IDF = ncells / rowSum(feature)
- *
- * @param {SparseMatrixCSC} countMatrix: features x cells count matrix
- * @param {number} [method=1]: TF-IDF method (1-4)
- * @param {number} [scaleFactor=1e4]: scale factor
- * @param {(msg: string) => void} [statusCallback]: optional status callback
- * @returns {SparseMatrixCSC}
- */
 export function runTFIDF(countMatrix, method = 1, scaleFactor = 1e4, statusCallback = null) {
   if (statusCallback) statusCallback('Running TF-IDF normalization...');
   const t0 = Date.now();
@@ -81,15 +68,6 @@ export function runTFIDF(countMatrix, method = 1, scaleFactor = 1e4, statusCallb
   return new SparseMatrixCSC(nrows, ncols, colPtr, rowIdx, newValues);
 }
 
-/**
- * Find top features by count (equivalent to Signac FindTopFeatures).
- * Uses ecdf of row sums, keeps features where percentile > cutoff.
- *
- * @param {SparseMatrixCSC} countMatrix
- * @param {string} [minCutoff='q5']: cutoff percentile (e.g. 'q5' = bottom 5%)
- * @param {(msg: string) => void} [statusCallback]: optional status callback
- * @returns {number[]}: sorted array of feature indices to keep
- */
 export function findTopFeatures(countMatrix, minCutoff = 'q5', statusCallback = null) {
   if (statusCallback) statusCallback(`Finding top features (cutoff: ${minCutoff})...`);
   const rowS = countMatrix.rowSums();

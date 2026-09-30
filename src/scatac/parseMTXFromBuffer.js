@@ -1,11 +1,5 @@
 import { SparseMatrixCSC } from './sparse.js';
 
-/**
- * Parse Matrix Market format from a buffer (same logic as scATAC io.readMTX).
- * Assumes entries are sorted by column (standard 10x Genomics output).
- * @param {Uint8Array|ArrayBuffer} buffer: raw MTX file bytes (uncompressed)
- * @returns {SparseMatrixCSC} peaks x cells
- */
 export function parseMTXFromBuffer(buffer) {
   const buf = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer;
   let pos = 0;

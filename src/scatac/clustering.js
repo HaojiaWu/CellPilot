@@ -21,10 +21,6 @@ function swap(arr, i, j) {
   const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
 }
 
-/**
- * Build KNN graph using brute-force cosine distance (matching Seurat's default for LSI).
- * @param {() => number} [random=Math.random]: optional PRNG for reproducible KNN (same dataset → same graph)
- */
 export function buildKNN(embeddings, nCells, nDims, k = 20, statusCallback = null, random = Math.random) {
   if (statusCallback) statusCallback(`Building KNN graph (k=${k})...`);
 
@@ -71,9 +67,6 @@ export function buildKNN(embeddings, nCells, nDims, k = 20, statusCallback = nul
   return { indices: knnIndices, distances: knnDistances };
 }
 
-/**
- * Build SNN graph from KNN using Jaccard similarity of neighbor sets.
- */
 export function buildSNN(knnIndices, nCells, k, pruneSNN = 0, statusCallback = null) {
   if (statusCallback) statusCallback('Building SNN graph...');
 
@@ -230,10 +223,6 @@ function buildCoarsenedGraph(adjList, community, nNodes, nComms) {
   return coarseAdj;
 }
 
-/**
- * Full multi-level Louvain community detection.
- * @param {() => number} [random=Math.random]: optional PRNG for reproducible clustering (same graph → same communities)
- */
 export function louvain(adjList, nNodes, resolution = 1.0, statusCallback = null, random = null) {
   if (statusCallback) statusCallback(`Running Louvain clustering (resolution=${resolution})...`);
 

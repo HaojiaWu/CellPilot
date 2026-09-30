@@ -1,52 +1,41 @@
-/**
- * WebLLM Service: Browser-based LLM for intent classification and chat
- *
- * Uses @xenova/transformers with semantic similarity for intent classification.
- * Uses @mlc-ai/web-llm for generative chat responses (Qwen2.5-1.5B).
- * This hybrid approach provides fast intent matching + conversational fallback.
- */
-
 import { pipeline, env } from '@xenova/transformers';
 import * as webllm from '@mlc-ai/web-llm';
 import { generateApiChatResponse, isApiConfigured } from './apiChatService';
+import { extractIntentEntities } from './intentEntities';
+import { detectNonCommand, describeNonCommand, isAboutCellPilot } from './intentGate';
+import INTENT_MODEL from './intentModel.json';
+import {
+  parseRename, parseCellFilter, parseHvgCount, parseMinDist, parseParameterStep,
+  parseSamplePair, parseHighlightDirection, isChainedRenameLabel,
+  parseHighlightRequest, isClusterSummaryQuestion, isOneVsRestComparison, isSettingsQuestion,
+} from './intentParams';
 
-// Configure transformers.js to use local cache
 env.allowLocalModels = false;
 env.useBrowserCache = true;
-// Force single-threaded ONNX, multi-threaded blob workers crash in Electron
-// with COEP headers set (ReferenceError: B is not defined in blob:file:/// workers).
 env.backends.onnx.wasm.numThreads = 1;
 
-// ============================================================================
-// TYPO TOLERANCE UTILITIES
-// ============================================================================
-
-/**
- * Levenshtein distance: measures edit distance between two strings
- * Used for fuzzy matching keywords
- */
 function levenshteinDistance(str1, str2) {
   const m = str1.length;
   const n = str2.length;
 
-  // Create a 2D array to store distances
   const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
 
-  // Initialize first row and column
   for (let i = 0; i <= m; i++) dp[i][0] = i;
   for (let j = 0; j <= n; j++) dp[0][j] = j;
 
-  // Fill the rest of the matrix
   for (let i = 1; i <= m; i++) {
     for (let j = 1; j <= n; j++) {
       if (str1[i - 1] === str2[j - 1]) {
         dp[i][j] = dp[i - 1][j - 1];
       } else {
         dp[i][j] = 1 + Math.min(
-          dp[i - 1][j],     // deletion
-          dp[i][j - 1],     // insertion
-          dp[i - 1][j - 1]  // substitution
+          dp[i - 1][j],
+          dp[i][j - 1],
+          dp[i - 1][j - 1]
         );
+      }
+      if (i > 1 && j > 1 && str1[i - 1] === str2[j - 2] && str1[i - 2] === str2[j - 1]) {
+        dp[i][j] = Math.min(dp[i][j], dp[i - 2][j - 2] + 1);
       }
     }
   }
@@ -54,27 +43,17 @@ function levenshteinDistance(str1, str2) {
   return dp[m][n];
 }
 
-/**
- * Check if a word fuzzy-matches a target keyword
- * Allows up to maxDistance edits based on word length:
- * Words < 4 chars: no fuzzy matching (exact only)
- * Words 4-5 chars: allow 1 edit
- * Words >= 6 chars: allow 2 edits
- */
 function fuzzyMatch(word, target, maxDistance = null) {
   if (!word || !target) return false;
 
   const w = word.toLowerCase();
   const t = target.toLowerCase();
 
-  // Exact match
   if (w === t) return true;
 
-  // Calculate max allowed distance based on word length if not specified
   if (maxDistance === null) {
-    // Be stricter for short words to avoid false positives (e.g., "cell" → "tell")
     if (t.length < 4) {
-      return false; // No fuzzy matching for very short keywords
+      return false;
     } else if (t.length <= 5) {
       maxDistance = 1;
     } else {
@@ -82,15 +61,11 @@ function fuzzyMatch(word, target, maxDistance = null) {
     }
   }
 
-  // Skip if lengths are too different
   if (Math.abs(w.length - t.length) > maxDistance) return false;
 
   return levenshteinDistance(w, t) <= maxDistance;
 }
 
-/**
- * Keywords that should be fuzzy-matched in user input
- */
 const FUZZY_KEYWORDS = [
   'cluster', 'clusters', 'violin', 'dotplot', 'umap', 'expression',
   'markers', 'marker', 'rename', 'recluster', 'rerun', 'resolution',
@@ -100,25 +75,30 @@ const FUZZY_KEYWORDS = [
   'spatial', 'tissue', 'coordinates'
 ];
 
-/**
- * Pre-process user input for better matching:
- * 1. Strip trailing punctuation
- * 2. Normalize whitespace
- * 3. Fix common typos using fuzzy matching
- */
-function preprocessUserInput(text) {
+const NEVER_CORRECT = new Set([
+  'how', 'now', 'low', 'row', 'snow', 'slow', 'shoe', 'shop', 'shot', 'stow',
+  'call', 'calls', 'well', 'wells', 'sell', 'sells', 'tells', 'bell', 'bells', 'fell', 'yell', 'tall', 'till', 'toll', 'dell',
+  'fine', 'kind', 'mind', 'bind', 'wind', 'fund', 'fond', 'fins', 'gone', 'gent', 'gents',
+  'last', 'lost', 'lust', 'mist', 'most', 'must', 'just', 'dust', 'diet', 'disk',
+  'issue', 'market', 'special', 'revolution', 'pilot', 'impression',
+  'colon', 'filler', 'fitter', 'perimeter', 'perimeters', 'slot', 'blot', 'plod', 'ploy',
+]);
+
+export function preprocessUserInput(text) {
   if (!text) return '';
 
   let processed = text.trim();
 
-  // Strip trailing punctuation (but keep internal punctuation like hyphens in gene names)
   processed = processed.replace(/[,.?!;:]+$/, '');
 
-  // Normalize multiple spaces to single space
   processed = processed.replace(/\s+/g, ' ');
 
-  // Fix typos in keywords using fuzzy matching
-  // For rename commands, skip typo correction on the new label (text after "to"/"as")
+  processed = processed
+    .replace(/\bvln\s*plots?\b|\bvln\b/gi, 'violin plot')
+    .replace(/\bfeature\s*plots?\b/gi, 'feature plot')
+    .replace(/\bdot\s*plots?\b/gi, 'dot plot')
+    .replace(/\bdim\s*plots?\b/gi, 'umap plot');
+
   const renameToIdx = processed.search(/(?:rename|change|set|call|label)\s+cluster\s+\S+.*?\s+(?:to|as)\s+/i);
   let labelStartIdx = -1;
   if (renameToIdx !== -1) {
@@ -133,35 +113,31 @@ function preprocessUserInput(text) {
   let charIdx = 0;
   const correctedWords = words.map(word => {
     const wordStart = charIdx;
-    charIdx += word.length + 1; // +1 for the space separator
+    charIdx += word.length + 1;
 
-    // Skip typo correction for the new label portion of rename commands
     if (labelStartIdx !== -1 && wordStart >= labelStartIdx) {
       return word;
     }
 
-    // Skip short words, numbers, and words with special characters
     if (word.length < 3 || /^\d+$/.test(word) || /[^a-zA-Z]/.test(word)) {
       return word;
     }
 
     const lowerWord = word.toLowerCase();
+    if (NEVER_CORRECT.has(lowerWord)) return word;
 
-    // FIRST: Check ALL keywords for exact match (prevents "cell" → "tell" issue)
     for (const keyword of FUZZY_KEYWORDS) {
       if (lowerWord === keyword) {
-        // Exact match, no correction needed
         return word;
       }
     }
 
-    // THEN: Check for fuzzy matches (only if no exact match found)
     for (const keyword of FUZZY_KEYWORDS) {
       if (fuzzyMatch(lowerWord, keyword)) {
-        // Typo detected, replace with correct keyword (preserve case of first letter)
         const corrected = word[0] === word[0].toUpperCase()
           ? keyword.charAt(0).toUpperCase() + keyword.slice(1)
           : keyword;
+        console.log(`Typo corrected: "${word}" → "${corrected}"`);
         return corrected;
       }
     }
@@ -172,7 +148,6 @@ function preprocessUserInput(text) {
   return correctedWords.join(' ');
 }
 
-// Intent templates with example phrases for each action
 const INTENT_TEMPLATES = {
   find_markers: {
     description: 'Find marker genes for a cluster',
@@ -326,6 +301,24 @@ const INTENT_TEMPLATES = {
       'set colormap',
       'switch colors',
       'update colors',
+    ]
+  },
+  highlight_cluster: {
+    description: 'Highlight one or more clusters on the current view and dim the rest',
+    examples: [
+      'highlight cluster 3',
+      'only show cluster 5',
+      'focus on the PT cluster',
+      'isolate cluster 2 on the umap',
+    ]
+  },
+  clear_cluster_highlight: {
+    description: 'Clear the cluster highlight so all clusters are shown',
+    examples: [
+      'clear the highlight',
+      'remove the cluster highlight',
+      'show all clusters',
+      'deselect clusters',
     ]
   },
   highlight_rna_cluster_on_atac: {
@@ -494,7 +487,6 @@ const INTENT_TEMPLATES = {
   },
 };
 
-// Follow-up patterns
 const FOLLOW_UP_EXAMPLES = [
   'what about cluster',
   'how about cluster',
@@ -508,42 +500,55 @@ const FOLLOW_UP_EXAMPLES = [
   'repeat for cluster',
 ];
 
-// Embedding model options: using sentence transformers that work well
 const EMBEDDING_MODEL_MAP = {
-  'all-minilm-l6': 'Xenova/all-MiniLM-L6-v2',  // 22MB, fast, good quality
-  'bge-small': 'Xenova/bge-small-en-v1.5',     // 33MB, better quality
-  'gte-small': 'Xenova/gte-small',              // 33MB, excellent quality
+  'all-minilm-l6': 'Xenova/all-MiniLM-L6-v2',
+  'bge-small': 'Xenova/bge-small-en-v1.5',
+  'gte-small': 'Xenova/gte-small',
 };
 
-// Chat model options: using MLC WebLLM for generative responses
 const CHAT_MODEL_MAP = {
-  'qwen2.5-1.5b': 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',  // ~1GB, good quality
-  'qwen2.5-0.5b': 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC',  // ~0.5GB, faster
-  'llama-3.2-1b': 'Llama-3.2-1B-Instruct-q4f16_1-MLC',  // ~0.7GB, good quality
-  'smollm2-360m': 'SmolLM2-360M-Instruct-q4f16_1-MLC',  // ~360MB, fast
+  'qwen2.5-1.5b': 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',
+  'qwen2.5-0.5b': 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC',
+  'llama-3.2-1b': 'Llama-3.2-1B-Instruct-q4f16_1-MLC',
+  'smollm2-360m': 'SmolLM2-360M-Instruct-q4f16_1-MLC',
 };
 
-// API-based chat models (no local download required)
 const API_CHAT_MODELS = ['chatgpt', 'claude', 'gemini', 'groq', 'openrouter'];
 
-// State management: Embedding model (for intent classification)
 let currentEmbeddingModelId = null;
 let isEmbeddingLoading = false;
 let embedder = null;
-let intentEmbeddings = null;  // Pre-computed embeddings for intents
-let followUpEmbeddings = null;  // Pre-computed embeddings for follow-up patterns
+let intentEmbeddings = null;
+let followUpEmbeddings = null;
 
-// State management: Chat model (for conversational responses)
 let currentChatModelId = null;
 let isChatLoading = false;
 let chatEngine = null;
 
-// Store last action context for follow-up questions
 let lastActionContext = null;
 
-/**
- * Compute cosine similarity between two vectors
- */
+const INTENT_MODEL_EMBEDDER = 'Xenova/all-MiniLM-L6-v2';
+const AMBIGUITY_MARGIN = 0.15;
+const AMBIGUITY_MAX_TOP = 0.6;
+
+function scoreWithIntentModel(embedding) {
+  if (!INTENT_MODEL || EMBEDDING_MODEL_MAP[currentEmbeddingModelId] !== INTENT_MODEL_EMBEDDER) return null;
+  if (!embedding || embedding.length !== INTENT_MODEL.dims) return null;
+  const { classes, W, b } = INTENT_MODEL;
+  const logits = new Array(classes.length);
+  let max = -Infinity;
+  for (let c = 0; c < classes.length; c++) {
+    const w = W[c];
+    let z = b[c];
+    for (let d = 0; d < embedding.length; d++) z += w[d] * embedding[d];
+    logits[c] = z;
+    if (z > max) max = z;
+  }
+  let sum = 0;
+  for (let c = 0; c < logits.length; c++) { logits[c] = Math.exp(logits[c] - max); sum += logits[c]; }
+  return classes.map((action, c) => ({ action, score: logits[c] / sum }));
+}
+
 function cosineSimilarity(a, b) {
   let dotProduct = 0;
   let normA = 0;
@@ -556,23 +561,14 @@ function cosineSimilarity(a, b) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-/**
- * Update the last action context (call this after successful command execution)
- */
 export function setLastActionContext(action, params) {
   lastActionContext = { action, params };
 }
 
-/**
- * Get the last action context
- */
 export function getLastActionContext() {
   return lastActionContext;
 }
 
-/**
- * Check if WebLLM is available (browser supports WebGPU/WASM)
- */
 export async function checkWebLLMAvailable() {
   try {
     if (typeof window === 'undefined') return false;
@@ -584,9 +580,6 @@ export async function checkWebLLMAvailable() {
   }
 }
 
-/**
- * Check if an embedding model is already downloaded/cached
- */
 export async function isModelCached(modelId) {
   try {
     const hfModelId = EMBEDDING_MODEL_MAP[modelId];
@@ -601,21 +594,17 @@ export async function isModelCached(modelId) {
   }
 }
 
-/** Yield to main thread so UI can update (avoids "frozen" during pre-compute) */
 function yieldToMain() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/**
- * Pre-compute embeddings for all intent examples.
- * Yields to the main thread periodically so the UI stays responsive.
- */
 async function precomputeIntentEmbeddings() {
   if (!embedder) return;
 
+  console.log('Pre-computing intent embeddings...');
   intentEmbeddings = {};
   let count = 0;
-  const YIELD_EVERY = 5; // yield every N examples so UI doesn't freeze
+  const YIELD_EVERY = 5;
 
   for (const [action, data] of Object.entries(INTENT_TEMPLATES)) {
     intentEmbeddings[action] = [];
@@ -627,7 +616,6 @@ async function precomputeIntentEmbeddings() {
     }
   }
 
-  // Also compute follow-up embeddings
   followUpEmbeddings = [];
   for (const example of FOLLOW_UP_EXAMPLES) {
     const result = await embedder(example, { pooling: 'mean', normalize: true });
@@ -636,11 +624,9 @@ async function precomputeIntentEmbeddings() {
     if (count % YIELD_EVERY === 0) await yieldToMain();
   }
 
+  console.log('Intent embeddings pre-computed successfully');
 }
 
-/**
- * Download and initialize an embedding model (for intent classification)
- */
 export async function downloadModel(modelId, progressCallback = null) {
   if (isEmbeddingLoading) {
     console.warn('Embedding model download already in progress');
@@ -650,17 +636,16 @@ export async function downloadModel(modelId, progressCallback = null) {
   isEmbeddingLoading = true;
 
   try {
-    // Default to the smallest, fastest model
     let hfModelId = EMBEDDING_MODEL_MAP[modelId] || EMBEDDING_MODEL_MAP['all-minilm-l6'];
 
+    console.log(`Downloading embedding model: ${hfModelId}`);
 
     if (progressCallback) progressCallback(5);
 
-    // Create feature extraction (sentence embedding) pipeline
     embedder = await pipeline('feature-extraction', hfModelId, {
       progress_callback: (progress) => {
         if (progressCallback && progress.progress) {
-          const scaled = 5 + (progress.progress * 0.7);  // 5-75%
+          const scaled = 5 + (progress.progress * 0.7);
           progressCallback(Math.round(scaled));
         }
       },
@@ -669,13 +654,13 @@ export async function downloadModel(modelId, progressCallback = null) {
 
     if (progressCallback) progressCallback(80);
 
-    // Pre-compute intent embeddings
     await precomputeIntentEmbeddings();
 
     currentEmbeddingModelId = modelId;
 
     if (progressCallback) progressCallback(100);
 
+    console.log(`Model ${hfModelId} loaded and ready!`);
     return true;
 
   } catch (error) {
@@ -686,27 +671,14 @@ export async function downloadModel(modelId, progressCallback = null) {
   }
 }
 
-/**
- * Get the currently loaded embedding model ID
- */
 export function getCurrentModel() {
   return currentEmbeddingModelId;
 }
 
-/**
- * Check if embedding model is loaded and ready
- */
 export function isModelLoaded() {
   return embedder !== null && intentEmbeddings !== null;
 }
 
-// ============================================================================
-// CHAT MODEL FUNCTIONS (for conversational responses)
-// ============================================================================
-
-/**
- * Get available chat models
- */
 export function getAvailableChatModels() {
   return Object.entries(CHAT_MODEL_MAP).map(([id, mlcId]) => ({
     id,
@@ -715,9 +687,6 @@ export function getAvailableChatModels() {
   }));
 }
 
-/**
- * Check if WebGPU is available (required for chat models)
- */
 export async function checkWebGPUAvailable() {
   try {
     if (typeof navigator === 'undefined') return false;
@@ -730,25 +699,18 @@ export async function checkWebGPUAvailable() {
   }
 }
 
-/**
- * Download and initialize a chat model (for conversational responses)
- * Supports both local WebLLM models and API-based models
- */
 export async function downloadChatModel(modelId, progressCallback = null) {
   if (isChatLoading) {
     console.warn('Chat model download already in progress');
     return false;
   }
 
-  // Check if this is an API-based model
   if (API_CHAT_MODELS.includes(modelId)) {
-    // API models don't need downloading, just check if configured
     isChatLoading = true;
 
     try {
       if (progressCallback) progressCallback(50);
 
-      // Check if API is configured
       if (!isApiConfigured(modelId)) {
         console.error(`${modelId} API key not configured`);
         if (progressCallback) progressCallback(0);
@@ -757,6 +719,7 @@ export async function downloadChatModel(modelId, progressCallback = null) {
 
       if (progressCallback) progressCallback(100);
       currentChatModelId = modelId;
+      console.log(`API chat model ${modelId} ready!`);
       return true;
     } catch (error) {
       console.error('API chat model setup failed:', error);
@@ -766,7 +729,6 @@ export async function downloadChatModel(modelId, progressCallback = null) {
     }
   }
 
-  // Local WebLLM model: requires WebGPU
   const hasWebGPU = await checkWebGPUAvailable();
   if (!hasWebGPU) {
     console.error('WebGPU not available - local chat model requires WebGPU');
@@ -777,21 +739,22 @@ export async function downloadChatModel(modelId, progressCallback = null) {
 
   try {
     const mlcModelId = CHAT_MODEL_MAP[modelId] || CHAT_MODEL_MAP['qwen2.5-1.5b'];
+    console.log(`Downloading chat model: ${mlcModelId}`);
 
     if (progressCallback) progressCallback(1);
 
-    // Create the MLC engine with progress callback
     chatEngine = await webllm.CreateMLCEngine(mlcModelId, {
       initProgressCallback: (progress) => {
         if (progressCallback) {
-          // progress.progress is 0-1, convert to percentage
           const percent = Math.round((progress.progress || 0) * 100);
           progressCallback(percent);
+          console.log(`Chat model loading: ${progress.text || ''} (${percent}%)`);
         }
       },
     });
 
     currentChatModelId = modelId;
+    console.log(`Chat model ${mlcModelId} loaded and ready!`);
     return true;
 
   } catch (error) {
@@ -803,17 +766,11 @@ export async function downloadChatModel(modelId, progressCallback = null) {
   }
 }
 
-/**
- * Check if chat model is loaded and ready
- * Returns true for both local WebLLM models and configured API models
- */
 export function isChatModelLoaded() {
-  // Check local WebLLM model
   if (chatEngine !== null) {
     return true;
   }
 
-  // Check API models
   if (currentChatModelId && API_CHAT_MODELS.includes(currentChatModelId)) {
     return isApiConfigured(currentChatModelId);
   }
@@ -821,23 +778,16 @@ export function isChatModelLoaded() {
   return false;
 }
 
-/**
- * Get the currently loaded chat model ID
- */
 export function getCurrentChatModel() {
   return currentChatModelId;
 }
 
-/**
- * Generate a conversational response using the chat model
- * This is used for out-of-scope queries that don't match any CellPilot intents
- * Supports both local WebLLM models and API-based models
- */
 export async function generateChatResponse(userMessage, context = {}) {
-  // Check if using API-based model
   if (currentChatModelId && API_CHAT_MODELS.includes(currentChatModelId)) {
     try {
+      console.log(`Generating chat response using ${currentChatModelId} API`);
       const reply = await generateApiChatResponse(currentChatModelId, userMessage, context);
+      console.log('API chat response:', reply);
       return reply;
     } catch (error) {
       console.error('API chat generation failed:', error);
@@ -845,14 +795,12 @@ export async function generateChatResponse(userMessage, context = {}) {
     }
   }
 
-  // Use local WebLLM model
   if (!chatEngine) {
     console.warn('No chat model loaded, cannot generate response');
     return null;
   }
 
   try {
-    // Build a system prompt that explains CellPilot's capabilities and limitations
     const systemPrompt = `You are CellPilot, an AI assistant specialized in single-cell RNA sequencing (scRNA-seq) and spatial transcriptomics analysis. You run in a web browser and help researchers analyze their single-cell and spatial data.
 
 Your main capabilities include:
@@ -876,7 +824,7 @@ You do NOT have access to external databases or the internet. You cannot look up
 - NCBI Gene database
 - UniProt for protein information
 - PubMed for literature
-- Or AI assistants like Claude, ChatGPT, or Gemini for general questions
+- Or a general AI assistant for general questions
 
 Keep responses concise (2-4 sentences) and helpful. If the question is about scRNA-seq analysis that you CAN help with, guide the user on how to phrase their request.`;
 
@@ -885,7 +833,6 @@ Keep responses concise (2-4 sentences) and helpful. If the question is about scR
       { role: 'user', content: userMessage }
     ];
 
-    // Add data context if available
     if (context.clusters && context.clusters.length > 0) {
       messages[0].content += `\n\nCurrent data context: The user has ${context.totalCells || 'unknown'} cells in ${context.clusters.length} clusters.`;
       if (context.clusterLabels && Object.keys(context.clusterLabels).length > 0) {
@@ -896,6 +843,7 @@ Keep responses concise (2-4 sentences) and helpful. If the question is about scR
       }
     }
 
+    console.log('Generating chat response for:', userMessage);
 
     const response = await chatEngine.chat.completions.create({
       messages,
@@ -904,6 +852,7 @@ Keep responses concise (2-4 sentences) and helpful. If the question is about scR
     });
 
     const reply = response.choices[0]?.message?.content || null;
+    console.log('Chat response:', reply);
     return reply;
 
   } catch (error) {
@@ -912,10 +861,6 @@ Keep responses concise (2-4 sentences) and helpful. If the question is about scR
   }
 }
 
-/**
- * Unload the chat model to free memory
- * For API models, this just clears the current model ID
- */
 export async function unloadChatModel() {
   if (chatEngine) {
     try {
@@ -928,10 +873,6 @@ export async function unloadChatModel() {
   currentChatModelId = null;
 }
 
-/**
- * Classify user intent using semantic similarity
- * Returns confidence scores and supports top-K intents
- */
 export async function classifyIntent(userMessage, dataContext = {}, options = {}) {
   const { topK = 3 } = options;
 
@@ -941,36 +882,47 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
   }
 
   try {
-    // Pre-process input: strip punctuation, fix typos
     const originalMessage = userMessage;
-    userMessage = preprocessUserInput(userMessage);
-    if (userMessage !== originalMessage) {
+    const entities = extractIntentEntities(originalMessage.trim().replace(/[,.?!;:]+$/, ''), dataContext);
+
+    const nonCommand = detectNonCommand(originalMessage, entities);
+    if (nonCommand) {
+      console.log(`Not a command (${nonCommand}): "${originalMessage}"`);
+      return { action: 'NONE', params: {}, confidence: 0, topK: [], nonCommand, message: describeNonCommand(nonCommand, entities) };
     }
 
+    userMessage = preprocessUserInput(userMessage);
+    if (userMessage !== originalMessage) {
+      console.log(`Input preprocessed: "${originalMessage}" → "${userMessage}"`);
+    }
 
-    // Get embedding for user message
-    const userEmbeddingResult = await embedder(userMessage.toLowerCase(), {
+    if (!isAboutCellPilot(userMessage, entities)) {
+      console.log(`Not about CellPilot: "${originalMessage}"`);
+      return { action: 'NONE', params: {}, confidence: 0, topK: [], nonCommand: 'offtopic', message: describeNonCommand('offtopic', entities) };
+    }
+
+    const embedText = entities.hasGeneList || entities.genes.length > 0 ? preprocessUserInput(entities.masked) : userMessage;
+    console.log('WebLLM classifying intent for:', embedText);
+
+    const userEmbeddingResult = await embedder(embedText.toLowerCase(), {
       pooling: 'mean',
       normalize: true
     });
     const userEmbedding = Array.from(userEmbeddingResult.data);
 
-    // Check if this is a follow-up question
     let maxFollowUpSim = 0;
     for (const followUpEmb of followUpEmbeddings) {
       const sim = cosineSimilarity(userEmbedding, followUpEmb);
       maxFollowUpSim = Math.max(maxFollowUpSim, sim);
     }
 
-    // Extract cluster identifier from message (can be number or text label)
-    // Try more specific patterns first, then fall back to general pattern
     let clusterNum = null;
     let clusterLabel = null;
     const clusterPatterns = [
-      /(?:to|for|with)\s+cluster\s+(\d+)/i,  // "same to cluster 1", "same for cluster 2"
-      /cluster\s+(\d+)/i,  // "cluster 1"
-      /(\d+)\s*$/i,  // "1" at end
-      /^(\d+)$/i,  // Just "1"
+      /(?:to|for|with)\s+cluster\s+(\d+)/i,
+      /cluster\s+(\d+)/i,
+      /(\d+)\s*$/i,
+      /^(\d+)$/i,
     ];
     for (const pattern of clusterPatterns) {
       const match = userMessage.match(pattern);
@@ -980,16 +932,13 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       }
     }
 
-    // If no numeric cluster found, try to extract text label (e.g., "PT", "Podocytes")
-    // Pattern: "for PT", "for cluster PT", "markers for PT", etc.
     if (clusterNum === null) {
       const labelPatterns = [
-        /(?:for|to|with|about)\s+cluster\s+([A-Za-z0-9_-]+)/i,  // "for cluster PT", "to cluster Podocytes"
-        /(?:for|to|with|about)\s+([A-Za-z][A-Za-z0-9_-]*)/i,  // "for PT", "markers for Podocytes"
-        /cluster\s+([A-Za-z][A-Za-z0-9_-]*)/i,  // "cluster PT"
+        /(?:for|to|with|about)\s+cluster\s+([A-Za-z0-9_-]+)/i,
+        /(?:for|to|with|about)\s+([A-Za-z][A-Za-z0-9_-]*)/i,
+        /cluster\s+([A-Za-z][A-Za-z0-9_-]*)/i,
       ];
 
-      // Skip common words that shouldn't be treated as cluster labels
       const skipWords = new Set([
         'markers', 'marker', 'genes', 'gene', 'info', 'information', 'about', 'the', 'a', 'an',
         'this', 'that', 'these', 'those', 'all', 'each', 'every', 'some', 'any', 'which',
@@ -1000,47 +949,51 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
         const match = userMessage.match(pattern);
         if (match && match[1]) {
           const candidate = match[1].trim();
-          // Skip if it's a stopword or very short
           if (!skipWords.has(candidate.toLowerCase()) && candidate.length >= 2) {
             clusterLabel = candidate;
+            console.log(`Extracted cluster label: ${clusterLabel}`);
             break;
           }
         }
       }
     }
 
-    // Resolve cluster label to numeric ID if we have clusterLabels in dataContext
-    // Store multiple matching IDs for merged clusters
     let mergedClusterIds = null;
     if (clusterLabel && dataContext?.clusterLabels) {
       const labelMap = dataContext.clusterLabels;
+      console.log(`Attempting to resolve cluster label "${clusterLabel}" using label map:`, labelMap);
 
-      // Find all cluster IDs that have this label
       const matchingIds = Object.keys(labelMap).filter(
         key => labelMap[key].toLowerCase() === clusterLabel.toLowerCase()
       );
 
       if (matchingIds.length > 0) {
-        // Use the first one for backward compatibility
         clusterNum = parseInt(matchingIds[0]);
 
-        // If multiple clusters share the same label (merged), store all IDs
         if (matchingIds.length > 1) {
           mergedClusterIds = matchingIds.map(id => parseInt(id));
+          console.log(`✓ Resolved MERGED cluster label "${clusterLabel}" to IDs [${mergedClusterIds.join(', ')}]`);
         } else {
+          console.log(`✓ Resolved cluster label "${clusterLabel}" to ID ${clusterNum}`);
         }
-        clusterLabel = null; // Clear label since we resolved it
+        clusterLabel = null;
       } else {
+        console.log(`✗ Cluster label "${clusterLabel}" not found in label map. Available labels:`, Object.values(labelMap));
       }
     }
 
-    // Early return: "show cells in cluster X from RNA on ATAC" / "highlight RNA cluster X on ATAC" (multiome)
-    // Must run BEFORE gene extraction so "RNA" in "from RNA on ATAC" is not parsed as a gene name.
-    // Require explicit "RNA on ATAC" so "from ATAC on RNA" is not mistaken for RNA→ATAC.
+    if (clusterNum === null && entities.labels.length > 0) {
+      const ids = entities.labels[0].ids;
+      clusterNum = ids[0];
+      mergedClusterIds = ids.length > 1 ? ids : null;
+      clusterLabel = null;
+    }
+
     const showRnaClusterOnAtac = /\b(?:from\s+)?RNA\s+on\s+ATAC\b/i.test(userMessage) ||
       /\bhighlight\s+RNA\s+cluster\b.*\b(?:on\s+)?ATAC\b/i.test(userMessage);
     if (showRnaClusterOnAtac && (clusterNum !== null || clusterLabel)) {
       const clusterParam = clusterNum !== null ? clusterNum : clusterLabel;
+      console.log('Detected "highlight RNA cluster on ATAC" request, returning highlight_rna_cluster_on_atac for cluster', clusterParam);
       return {
         action: 'highlight_rna_cluster_on_atac',
         params: { cluster: clusterParam },
@@ -1049,6 +1002,7 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
     if (/\bclear\s+RNA\s+highlight\s+on\s+ATAC\b/i.test(userMessage)) {
+      console.log('Detected "clear RNA highlight on ATAC" request');
       return {
         action: 'clear_rna_highlight_on_atac',
         params: {},
@@ -1057,12 +1011,11 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
 
-    // Early return: "show cells in cluster X from ATAC on RNA" / "highlight ATAC cluster X on RNA" (multiome)
-    // Require explicit "ATAC on RNA" so we only highlight ATAC cluster on the RNA view.
     const showAtacClusterOnRna = /\b(?:from\s+)?ATAC\s+on\s+RNA\b/i.test(userMessage) ||
       /\bhighlight\s+ATAC\s+cluster\b.*\b(?:on\s+)?RNA\b/i.test(userMessage);
     if (showAtacClusterOnRna && (clusterNum !== null || clusterLabel)) {
       const clusterParam = clusterNum !== null ? clusterNum : clusterLabel;
+      console.log('Detected "highlight ATAC cluster on RNA" request, returning highlight_atac_cluster_on_rna for cluster', clusterParam);
       return {
         action: 'highlight_atac_cluster_on_rna',
         params: { cluster: clusterParam },
@@ -1071,6 +1024,7 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
     if (/\bclear\s+ATAC\s+highlight\s+on\s+RNA\b/i.test(userMessage)) {
+      console.log('Detected "clear ATAC highlight on RNA" request');
       return {
         action: 'clear_atac_highlight_on_rna',
         params: {},
@@ -1079,8 +1033,31 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
 
-    // SpaGE gene imputation: "impute GENE", "predict GENE expression", etc.
-    // Must run before general gene-plot detection to avoid treating "impute X" as plot X.
+    const asksForPeakMarkers = /\b(?:peaks?|da|differential(?:ly)?\s+accessib\w*|accessibility|chromatin)\b/i.test(userMessage);
+
+    const namesCluster = clusterNum !== null || entities.labels.length > 0;
+    const clusterParams = () => (mergedClusterIds ? { cluster: clusterNum, clusters: mergedClusterIds } : { cluster: clusterNum });
+
+    const highlightRequest = parseHighlightRequest(userMessage);
+    if (highlightRequest === 'clear') {
+      return { action: 'clear_cluster_highlight', params: {}, confidence: 0.95, topK: [] };
+    }
+    if (highlightRequest === 'highlight' && namesCluster && entities.genes.length === 0) {
+      return { action: 'highlight_cluster', params: clusterParams(), confidence: 0.95, topK: [] };
+    }
+
+    if (namesCluster && entities.genes.length === 0 && isClusterSummaryQuestion(userMessage)) {
+      return { action: 'cluster_info', params: clusterParams(), confidence: 0.95, topK: [] };
+    }
+    if (namesCluster && isOneVsRestComparison(userMessage)) {
+      return { action: 'find_markers', params: { ...clusterParams(), ...(asksForPeakMarkers ? { markerFeature: 'peak' } : {}) }, confidence: 0.95, topK: [] };
+    }
+
+    if (isSettingsQuestion(userMessage)) {
+      const step = parseParameterStep(userMessage);
+      return { action: 'show_parameters', params: step ? { step } : {}, confidence: 0.95, topK: [] };
+    }
+
     const imputeMsg = userMessage.trim();
     const imputeGeneMatch =
       imputeMsg.match(/\bimpute(?:\s+(?:gene|expression\s+of|missing\s+gene))?\s+([A-Za-z0-9_./-]+)/i) ||
@@ -1093,7 +1070,8 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       /\bspage\b/i.test(imputeMsg) ||
       /\bgene\s+imputation\b/i.test(imputeMsg);
     if (isImputeRequest) {
-      const gene = imputeGeneMatch ? imputeGeneMatch[1] : null;
+      const gene = entities.hasGeneList ? (entities.hasGeneList ? (entities.genes[0]?.symbol ?? null) : null) : (imputeGeneMatch ? imputeGeneMatch[1] : null);
+      console.log('Detected SpaGE gene imputation request, gene:', gene);
       return {
         action: 'impute_gene',
         params: gene ? { gene } : {},
@@ -1109,11 +1087,10 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       /\bcellchat\b/i.test(spatialInteractionMsg) ||
       /\b(?:interaction|communication)\s+analysis\b/i.test(spatialInteractionMsg);
     if (isSpatialInteraction) {
+      console.log('Detected spatial ligand-receptor interaction request (classifyIntent)');
       return { action: 'spatial_cell_interaction', params: {}, confidence: 0.95, topK: [] };
     }
 
-    // BANKSY region segmentation: "segment regions", "region analysis", "identify regions", etc.
-    // MUST run before gene extraction to prevent keywords being parsed as gene names.
     const banksyMsg = userMessage.trim().toLowerCase();
     const isBanksyRegion =
       /\bbanksy\b/.test(banksyMsg) ||
@@ -1126,8 +1103,14 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       /\bspatial\s+(?:region|domain)\s+(?:analysis|detection|segmentation|identification)\b/i.test(banksyMsg) ||
       /\btissue\s+(?:region|domain)\b/i.test(banksyMsg) ||
       /\bspatial\s+domain\b/i.test(banksyMsg);
+    const isViewRequest = /^(?:please\s+)?(?:show|display|plot|view|see|open|go\s+to|switch\s+to|back\s+to)\b/.test(banksyMsg) &&
+      !/\b(?:run|rerun|segment|identify|detect|find|compute|redo)\b/.test(banksyMsg);
+    if (isBanksyRegion && isViewRequest) {
+      console.log('BANKSY mentioned in a view request - showing existing regions');
+      return { action: 'show_regions', params: {}, confidence: 0.95, topK: [] };
+    }
     if (isBanksyRegion) {
-      // Extract inline parameters: resolution, lambda, neighbors
+      console.log('Detected BANKSY region segmentation request (classifyIntent)');
       const banksyParams = {};
       const _parseNum = (pattern) => {
         const m = userMessage.match(pattern);
@@ -1145,8 +1128,6 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       return { action: 'region_segmentation', params: banksyParams, confidence: 0.95, topK: [] };
     }
 
-    // Show regions: "plot umap colored by region", "show regions", "plot region", "what regions are there", etc.
-    // MUST run after BANKSY detection and before region composition (which requires a region number).
     const showRegionMsg = userMessage.trim().toLowerCase();
     const isShowRegions =
       /\b(?:plot|show|display)\s+(?:the\s+)?(?:umap\s+)?(?:colored?\s+by\s+)?regions?\b/.test(showRegionMsg) ||
@@ -1157,13 +1138,13 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       /\bcolor\s+(?:by|with)\s+region/.test(showRegionMsg) ||
       /\bregion\s+(?:plot|view|map|overlay)\b/.test(showRegionMsg);
     if (isShowRegions) {
+      console.log('Detected show regions request (classifyIntent)');
       return { action: 'show_regions', params: {}, confidence: 0.95, topK: [] };
     }
 
-    // Rename region: "rename region 6 to Pod", "call region 3 Cortex", etc.
-    // MUST run after BANKSY detection and show_regions but before region composition.
     const renameRegionMatch = userMessage.match(/(?:rename|change|set|call|label|name)\s+region\s+(\S+)\s+(?:to|as)\s+["']?([^"'\n]+?)["']?\s*$/i);
-    if (renameRegionMatch && renameRegionMatch[1] && renameRegionMatch[2]) {
+    if (renameRegionMatch && renameRegionMatch[1] && renameRegionMatch[2] && !isChainedRenameLabel(renameRegionMatch[2])) {
+      console.log('Detected rename region request (classifyIntent)');
       return {
         action: 'rename_region',
         params: {
@@ -1175,19 +1156,16 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
 
-    // Region composition: "what clusters in region 1", "cell types in region 0", "region 2 composition", etc.
-    // MUST run after BANKSY detection and show_regions (to avoid stealing "show regions") and before gene extraction.
     const regionCompMsg = userMessage.trim().toLowerCase();
     const regionCompMatch = regionCompMsg.match(
       /(?:what\s+(?:cell\s+)?(?:cluster|type|cell\s*type)s?\s+(?:are\s+)?(?:in|of)\s+region\s*(\d+))|(?:(?:cluster|type|cell\s*type)s?\s+(?:in|of|for)\s+region\s*(\d+))|(?:region\s*(\d+)\s+(?:composition|cell\s*type|cluster|makeup|breakdown))|(?:(?:show|plot|what)\s+(?:is\s+)?(?:the\s+)?(?:composition|cell\s*type|cluster)\s+(?:of|in|for)\s+region\s*(\d+))|(?:(?:composition|cell\s*type|cluster)\s+(?:composition\s+)?(?:of|in|for)\s+region\s*(\d+))/
     );
     if (regionCompMatch) {
       const regionId = Number(regionCompMatch[1] ?? regionCompMatch[2] ?? regionCompMatch[3] ?? regionCompMatch[4] ?? regionCompMatch[5]);
+      console.log(`Detected region composition request for region ${regionId} (classifyIntent)`);
       return { action: 'region_composition', params: { regionId }, confidence: 0.95, topK: [] };
     }
 
-    // WNN integration: "integrate RNA and ATAC", "run WNN", "WNN co-embedding", "multimodal integration", etc.
-    // MUST run before gene extraction to prevent "integrate" being parsed as a gene name.
     const wnnMsg = userMessage.trim().toLowerCase();
     const isWNNIntegration =
       /\bwnn\b/.test(wnnMsg) ||
@@ -1202,10 +1180,10 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       /\bjoint\s+(?:umap|embedding|analysis)\b/i.test(wnnMsg) ||
       /\bintegrate\s+(?:both\s+)?modalities\b/i.test(wnnMsg);
     if (isWNNIntegration) {
+      console.log('Detected WNN integration request (classifyIntent)');
       return { action: 'wnn_integrate', params: {}, confidence: 0.95, topK: [] };
     }
 
-    // Cell fraction / proportion: MUST run BEFORE gene extraction so "plot fraction" is not parsed as gene "fraction"
     const cellFracMsg = userMessage.trim().toLowerCase();
     const isPlotShowFraction =
       (cellFracMsg.includes('plot') || cellFracMsg.includes('show')) &&
@@ -1213,12 +1191,10 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
         cellFracMsg.includes('cell proportion') ||
         /\b(?:plot|show)\s+(?:cell\s+)?fraction\b/.test(cellFracMsg));
     if (isPlotShowFraction) {
+      console.log('Detected plot cell fraction / proportion / fraction (classifyIntent)');
       return { action: 'plot_cell_fraction', params: {}, confidence: 0.92, topK: [] };
     }
 
-    // Peak-gene link actions: MUST run BEFORE gene extraction so "links" is never treated as a gene name
-
-    // "show top TF for cluster N/PT" / "motif analysis for cluster PT" → tf_motif_analysis
     const tfMotifMatch =
       userMessage.match(/\b(?:prioriti[sz]e|rank|score)\s+(?:top\s+)?(?:tf|transcription\s+factors?)\s+(?:for|in|of)\s+cluster\s+([A-Za-z0-9_-]+)/i) ||
       userMessage.match(/\b(?:show|find|get|display|plot|run)\s+(?:me\s+)?(?:top\s+)?(?:tf|transcription\s+factors?|motif(?:s|s\s+analysis)?)\s+(?:for|in|of)\s+cluster\s+([A-Za-z0-9_-]+)/i) ||
@@ -1231,7 +1207,6 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       return { action: 'tf_motif_analysis', params: { cluster: clusterVal }, confidence: 0.95, topK: [] };
     }
 
-    // "show links for GENE" / "show peaks for GENE" / "show peak gene links for GENE" → show_peak_gene_links
     const showLinksMatch =
       userMessage.match(/\b(?:show|display|plot)\s+(?:peak[\s-]?(?:to[\s-]?)?gene\s+)?links?\s+for\s+([A-Za-z0-9-]+)/i) ||
       userMessage.match(/\b(?:show|display|plot)\s+(?:peak[\s-]?(?:to[\s-]?)?gene\s+)?links?\s+of\s+([A-Za-z0-9-]+)/i) ||
@@ -1239,10 +1214,9 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       userMessage.match(/\b(?:show|display|plot)\s+(?:linked\s+)?peaks?\s+(?:for|of)\s+([A-Za-z0-9-]+)/i) ||
       userMessage.match(/\b(?:show|display|plot)\s+peaks?\s+linked\s+to\s+([A-Za-z0-9-]+)/i);
     if (showLinksMatch) {
-      return { action: 'show_peak_gene_links', params: { gene: showLinksMatch[1] }, confidence: 0.95, topK: [] };
+      return { action: 'show_peak_gene_links', params: { gene: (entities.hasGeneList ? (entities.genes[0]?.symbol ?? null) : null) ?? showLinksMatch[1] }, confidence: 0.95, topK: [] };
     }
 
-    // "link peaks (to genes)" / "run linkpeaks" / "peak-to-gene correlation" / "cis-regulatory" → link_peaks
     const linkPeaksLower = userMessage.toLowerCase();
     const isLinkPeaks =
       /\blink\s+peaks?\b/.test(linkPeaksLower) ||
@@ -1251,7 +1225,7 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       /\bcis[\s-]regulat/.test(linkPeaksLower) ||
       /\bpeak\s+gene\s+(?:link|correlation|association|connect)/.test(linkPeaksLower);
     if (isLinkPeaks) {
-      const geneForLink =
+      const geneForLink = (entities.hasGeneList ? (entities.genes[0]?.symbol ?? null) : null) ||
         userMessage.match(/\blink\s+peaks?\s+for\s+([A-Za-z0-9-]+)/i)?.[1] ||
         userMessage.match(/\blinkpeaks?\s+for\s+([A-Za-z0-9-]+)/i)?.[1];
       return {
@@ -1262,42 +1236,35 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
 
-    // Extract gene name: use multiple patterns to catch various formats
-    // Gene names can be: all caps (NPHS2), mixed case (Nphs2), lowercase (nphs2), or ATAC peak coordinates (chr6:88141558-88142467)
-    // Order matters: more specific patterns first
     let geneName = null;
     const genePatterns = [
-      // Coverage plot + gene (multiome/scATAC: RNA view = expression, ATAC view = peak coverage)
       /(?:coverage\s+plot|plot\s+coverage)\s+(?:for\s+)?([A-Za-z0-9-]+)/i,
       /(?:show|plot)\s+(?:me\s+)?coverage\s+(?:plot\s+)?(?:for\s+)?([A-Za-z0-9-]+)/i,
-      // ATAC peak coordinates (chrN:start-end): must come before generic gene patterns
-      /(?:plot|show)\s+(?:me\s+)?(?:gene\s+)?(chr\w+:\d+-\d+)/i,  // "plot chr6:88141558-88142467"
-      /(?:plot|show)\s+(?:me\s+)?(chr\w+:\d+-\d+)\s*$/i,  // "plot chr6:88141558-88142467" (end of string)
-      /\b(chr\w+:\d+-\d+)\b/,  // peak ID anywhere (e.g. after "plot" or "show")
-      // Gene activity (ATAC): "plot gene activity for CD4" or "plot gene activity ms4a1" (no for/of)
+      /(?:plot|show)\s+(?:me\s+)?(?:gene\s+)?(chr\w+:\d+-\d+)/i,
+      /(?:plot|show)\s+(?:me\s+)?(chr\w+:\d+-\d+)\s*$/i,
+      /\b(chr\w+:\d+-\d+)\b/,
       /(?:plot|show)\s+(?:me\s+)?gene\s+activi?ty\s+(?:for|of)\s+([A-Za-z0-9-]+)/i,
       /(?:plot|show)\s+(?:me\s+)?gene\s+activi?ty\s+([A-Za-z0-9-]+)/i,
       /gene\s+activi?ty\s+(?:for|of)\s+([A-Za-z0-9-]+)/i,
-      // Most specific patterns first (gene symbols)
-      /(?:show|plot)\s+(?:me\s+)?gene\s+expression\s+(?:of|for)\s+([A-Za-z0-9-]+)/i,  // "show me gene expression of Nphs2"
-      /gene\s+expression\s+(?:of|for)\s+([A-Za-z0-9-]+)/i,  // "gene expression of Nphs2"
-      /(?:plot|show)\s+(?:me\s+)?gene\s+([A-Za-z0-9-]+)/i,  // "show me gene NPHS2"
-      /(?:show|plot)\s+me\s+([A-Za-z0-9-]+)/i,  // "show me NPHS2" (no "gene" word)
-      /(?:show|plot)\s+([A-Za-z0-9-]+)(?:\s|$|\.|,)/i,  // "show NPHS2" or "plot NPHS2" (same as "show me geneName")
-      /(?:plot|show)\s+(?:me\s+)?(?:gene\s+)?([A-Za-z0-9-]+)\s+(?:expression|on\s+umap)/i,  // "show me gene NPHS2 expression"
-      /what\s+is\s+(?:the\s+)?(?:gene\s+)?expression\s+(?:for|of)\s+([A-Za-z0-9-]+)/i,  // "what is the gene expression for NPHS2"
-      /(?:expression|gene)\s+(?:of|for)\s+([A-Za-z0-9-]+)/i,  // "expression of NPHS2"
-      /([A-Za-z0-9-]+)\s+expression(?:\s+plot)?/i,  // "NPHS2 expression" or "NPHS2 expression plot"
-      /expression\s+([A-Za-z0-9-]+)/i,  // "expression NPHS2"
-      /([A-Za-z0-9-]+)\s+on\s+umap/i,  // "NPHS2 on umap"
-      /^(?:plot|show)\s+(?:me\s+)?([A-Za-z0-9-]+)\s*$/i,  // "plot NPHS2" (whole string)
-      /gene\s+([A-Za-z0-9-]+)/i,  // "gene NPHS2": fallback
-      /violin\s+(?:plot\s+)?(?:for\s+)?([A-Za-z0-9-]+)/i,  // "violin plot slc5a2", "violin slc5a2"
-      /([A-Za-z0-9-]+)\s+violin(?:\s+plot)?/i,  // "slc5a2 violin plot"
-      /(?:dotplot|dot\s+plot)\s+(?:for\s+)?([A-Za-z0-9-]+)/i,  // "dotplot slc5a2", "dot plot for slc5a2"
-      /([A-Za-z0-9-]+)\s+(?:dotplot|dot\s+plot)/i,  // "slc5a2 dotplot"
-      /\b([A-Z][A-Z0-9]+[A-Z0-9]*)\b/,  // All caps gene names like NPHS2, SLC5A2
-      /\b([A-Za-z][A-Za-z0-9]+[A-Za-z0-9]*)\b/,  // Any alphanumeric gene name (case-insensitive fallback)
+      /(?:show|plot)\s+(?:me\s+)?gene\s+expression\s+(?:of|for)\s+([A-Za-z0-9-]+)/i,
+      /gene\s+expression\s+(?:of|for)\s+([A-Za-z0-9-]+)/i,
+      /(?:plot|show)\s+(?:me\s+)?gene\s+([A-Za-z0-9-]+)/i,
+      /(?:show|plot)\s+me\s+([A-Za-z0-9-]+)/i,
+      /(?:show|plot)\s+([A-Za-z0-9-]+)(?:\s|$|\.|,)/i,
+      /(?:plot|show)\s+(?:me\s+)?(?:gene\s+)?([A-Za-z0-9-]+)\s+(?:expression|on\s+umap)/i,
+      /what\s+is\s+(?:the\s+)?(?:gene\s+)?expression\s+(?:for|of)\s+([A-Za-z0-9-]+)/i,
+      /(?:expression|gene)\s+(?:of|for)\s+([A-Za-z0-9-]+)/i,
+      /([A-Za-z0-9-]+)\s+expression(?:\s+plot)?/i,
+      /expression\s+([A-Za-z0-9-]+)/i,
+      /([A-Za-z0-9-]+)\s+on\s+umap/i,
+      /^(?:plot|show)\s+(?:me\s+)?([A-Za-z0-9-]+)\s*$/i,
+      /gene\s+([A-Za-z0-9-]+)/i,
+      /violin\s+(?:plot\s+)?(?:for\s+)?([A-Za-z0-9-]+)/i,
+      /([A-Za-z0-9-]+)\s+violin(?:\s+plot)?/i,
+      /(?:dotplot|dot\s+plot)\s+(?:for\s+)?([A-Za-z0-9-]+)/i,
+      /([A-Za-z0-9-]+)\s+(?:dotplot|dot\s+plot)/i,
+      /\b([A-Z][A-Z0-9]+[A-Z0-9]*)\b/,
+      /\b([A-Za-z][A-Za-z0-9]+[A-Za-z0-9]*)\b/,
     ];
 
     const stopwords = new Set([
@@ -1310,25 +1277,29 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       'spatial', 'tissue', 'coordinates', 'fraction', 'proportion'
     ]);
 
-    for (const pattern of genePatterns) {
+    if (entities.hasGeneList) {
+      geneName = entities.genes.length > 0 ? entities.genes[0].symbol : null;
+    }
+    for (const pattern of entities.hasGeneList ? [] : genePatterns) {
       const match = userMessage.match(pattern);
       if (match && match[1]) {
         const candidate = match[1].toLowerCase();
-        // Skip stopwords and very short matches
         if (!stopwords.has(candidate) && match[1].length >= 2) {
-          geneName = match[1]; // Keep original case
+          geneName = match[1];
+          console.log(`Extracted gene name: ${geneName} using pattern: ${pattern}`);
           break;
         }
       }
     }
 
     if (!geneName) {
+      console.log('No gene name extracted from:', userMessage);
     }
 
-    // Early return: "coverage plot [gene]" → plot_gene_expression (RNA view = expression, ATAC view = peak coverage)
     const trimmed = userMessage.trim();
     const isCoveragePlotGene = /\b(?:coverage\s+plot|plot\s+coverage)\b/i.test(trimmed) && geneName && !stopwords.has(geneName.toLowerCase());
     if (isCoveragePlotGene) {
+      console.log(`Early return: coverage plot command with gene "${geneName}" → plot_gene_expression (showPeakView)`);
       return {
         action: 'plot_gene_expression',
         params: { gene: geneName, showPeakView: true },
@@ -1337,11 +1308,10 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
 
-    // Early return: "plot/show [gene]" (no "coverage") → plot_gene_expression without showPeakView.
-    // In multiome: RNA view = gene expression, ATAC view = gene activity. Only "coverage plot [gene]" sets showPeakView.
     const isPlotShowOnly = /^(?:plot|show)\s+(?:me\s+)?(?:gene\s+(?:activi?ty\s+)?(?:for\s+|of\s+)?)?/i.test(trimmed) &&
       !/\b(violin|dotplot|dot\s+plot|marker)\b/i.test(trimmed);
     if (geneName && !stopwords.has(geneName.toLowerCase()) && isPlotShowOnly) {
+      console.log(`Early return: plot/show command with gene/peak "${geneName}" → plot_gene_expression (no showPeakView)`);
       return {
         action: 'plot_gene_expression',
         params: { gene: geneName, showPeakView: false },
@@ -1350,9 +1320,9 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
 
-    // "what is the gene expression for X" / "what is gene expression for X" → plot gene
     const isWhatIsGeneExpression = geneName && !stopwords.has(geneName.toLowerCase()) && /what\s+is\s+(?:the\s+)?(?:gene\s+)?expression\s+(?:for|of)\s+/i.test(trimmed);
     if (isWhatIsGeneExpression) {
+      console.log(`Early return: what is gene expression for "${geneName}" → plot_gene_expression`);
       return {
         action: 'plot_gene_expression',
         params: { gene: geneName, showPeakView: false },
@@ -1361,9 +1331,9 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
 
-    // "geneName expression plot" → plot gene
     const isExpressionPlot = geneName && !stopwords.has(geneName.toLowerCase()) && /\bexpression\s+plot\b/i.test(trimmed);
     if (isExpressionPlot) {
+      console.log(`Early return: expression plot "${geneName}" → plot_gene_expression`);
       return {
         action: 'plot_gene_expression',
         params: { gene: geneName, showPeakView: false },
@@ -1372,15 +1342,10 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       };
     }
 
-    // If high follow-up similarity and we have context, repeat last action
-    // BUT: Don't treat explicit cluster info queries as follow-ups
-    // "What about cluster X", "show me about cluster X", "show me cluster X" should be NEW questions, not follow-ups
     const isExplicitClusterInfoQuery = /(?:what\s+(?:is|define|are|about)|tell\s+me\s+about|show\s+me\s+(?:about\s+)?cluster|describe|info|information|know\s+(?:more\s+)?about|do\s+you\s+know)\s+(?:anything\s+)?(?:about\s+)?cluster/i.test(userMessage);
 
-    // Also check if "what about" is being used: this is usually a new question, not a follow-up
     const isWhatAboutQuestion = /^what\s+about/i.test(userMessage.trim());
 
-    // Check for explicit follow-up patterns like "same to", "same for", etc.
     const explicitFollowUpPatterns = [
       /^same\s+(?:to|for|with)\s+cluster/i,
       /^do\s+the\s+same\s+(?:to|for|with)\s+cluster/i,
@@ -1389,23 +1354,24 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
     ];
     const isExplicitFollowUp = explicitFollowUpPatterns.some(p => p.test(userMessage.trim()));
 
-    // Explicit "show me [about] cluster X" → always cluster_info, never follow-up
     const showMeClusterMatch = userMessage.trim().match(/^show\s+me\s+(?:about\s+)?cluster\s+(\S+)/i);
     if (showMeClusterMatch && showMeClusterMatch[1]) {
       let cid = showMeClusterMatch[1].trim();
       const parsed = parseInt(cid, 10);
       if (!Number.isNaN(parsed)) {
+        console.log('Detected "show me cluster" request, returning cluster_info for cluster', parsed);
         return { action: 'cluster_info', params: { cluster: parsed }, confidence: 0.95, topK: [] };
       }
       const labels = dataContext?.clusterLabels || {};
       const resolved = Object.keys(labels).find(k => String(labels[k]).toLowerCase() === cid.toLowerCase());
       if (resolved) {
+        console.log('Detected "show me cluster" request, returning cluster_info for cluster', resolved);
         return { action: 'cluster_info', params: { cluster: parseInt(resolved, 10), originalLabel: cid }, confidence: 0.95, topK: [] };
       }
+      console.log('Detected "show me cluster" but unknown cluster:', cid);
       return { action: 'cluster_info', params: { cluster: cid, originalLabel: cid }, confidence: 0.95, topK: [] };
     }
 
-    // DEG between two samples within a cluster (integration / xenium integration)
     const degBetweenMsg = userMessage.trim().toLowerCase();
     const degBetweenMatchMsg = userMessage.match(/(?:find\s+markers|deg|differential(?:\s+genes?)?|differentially\s+expressed)\s+(?:for\s+)?cluster\s+(\d+)\s+between\s+(.+?)\s+and\s+(.+?)(?=[.?!]?\s*$|$)/i)
       || userMessage.match(/(?:deg|differential(?:\s+genes?)?|differentially\s+expressed)\s+(?:for\s+)?cluster\s+(\d+)\s+between\s+(\S+)\s+and\s+(\S+)/i)
@@ -1418,6 +1384,7 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       const sa = (degBetweenMatchMsg[2] || '').trim().replace(/[.?!]+$/, '');
       const sb = (degBetweenMatchMsg[3] || '').trim().replace(/[.?!]+$/, '');
       if (sa && sb && !Number.isNaN(c)) {
+        console.log('Detected DEG between samples (classifyIntent):', { cluster: c, sample1: sa, sample2: sb });
         return {
           action: 'deg_between_samples',
           params: { cluster: c, sample1: sa, sample2: sb },
@@ -1427,72 +1394,76 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       }
     }
 
-    // Only treat as follow-up if:
-    // 1. High similarity to follow-up patterns OR explicit follow-up pattern matched
-    // 2. Has last action context
-    // 3. Has a cluster number
-    // 4. NOT an explicit cluster info query
-    // 5. NOT a "what about" question (these are new questions)
     if ((maxFollowUpSim > 0.6 || isExplicitFollowUp) && lastActionContext && clusterNum !== null && !isExplicitClusterInfoQuery && !isWhatAboutQuestion) {
+      console.log(`Detected follow-up (similarity: ${maxFollowUpSim.toFixed(3)}, explicit: ${isExplicitFollowUp}), repeating: ${lastActionContext.action}`);
 
-      // For rename_cluster, preserve newLabel from previous action
-      // For other actions (find_markers, cluster_info, etc.), just update the cluster parameter
       const params = { ...lastActionContext.params, cluster: clusterNum };
       if (lastActionContext.action === 'rename_cluster' && lastActionContext.params.newLabel) {
-        // Use the new cluster number as oldLabel, and preserve newLabel
         params.oldLabel = String(clusterNum);
         params.newLabel = lastActionContext.params.newLabel;
       }
-      // For other actions, the spread operator above already updates the cluster parameter
 
       return {
         action: lastActionContext.action,
         params,
-        confidence: 0.8, // High confidence for follow-ups
+        confidence: 0.8,
         topK: []
       };
     }
 
-    // Check for chained commands FIRST: if detected, return a special indicator
-    // This allows the router to handle chaining intelligently
     const hasChaining = /,\s*(?:and\s+)?then\s+/i.test(userMessage) ||
                        /(?:rename|change|set|call|label)\s+cluster\s+\d+\s+(?:to|as)\s+[^,]+?\s+and\s+cluster\s+\d+\s+(?:to|as)\s+/i.test(userMessage);
 
     if (hasChaining) {
-      // Return low confidence so router falls back to chaining handler
+      console.log('Intent model detected potential chaining, returning lower confidence to trigger chaining handler');
       return {
         action: 'NONE',
         confidence: 0.2,
         topK: [],
         params: {},
-        _suggestChaining: true // Flag for router
+        _suggestChaining: true
       };
     }
 
-    // Find top-K matching intents with scores
-    const intentScores = [];
+    let intentScores = [];
+    let ambiguous = false;
 
-    for (const [action, embeddings] of Object.entries(intentEmbeddings)) {
-      let maxSim = 0;
-      for (const intentEmb of embeddings) {
-        const similarity = cosineSimilarity(userEmbedding, intentEmb);
-        maxSim = Math.max(maxSim, similarity);
+    const classifierProbs = scoreWithIntentModel(userEmbedding);
+    if (classifierProbs) {
+      const ranked = classifierProbs.slice().sort((a, b) => b.score - a.score);
+      if (ranked[0].action === 'NONE' && ranked[0].score >= 0.5) {
+        console.log(`Intent model: not a command (p=${ranked[0].score.toFixed(2)})`);
+        return { action: 'NONE', params: {}, confidence: 0, topK: [] };
       }
-      if (maxSim > 0) {
-        intentScores.push({ action, score: maxSim });
+      intentScores = ranked.filter((item) => item.action !== 'NONE');
+      ambiguous = intentScores.length > 1 &&
+        intentScores[0].score < AMBIGUITY_MAX_TOP &&
+        intentScores[0].score - intentScores[1].score < AMBIGUITY_MARGIN;
+    } else {
+      for (const [action, embeddings] of Object.entries(intentEmbeddings)) {
+        let maxSim = 0;
+        for (const intentEmb of embeddings) {
+          const similarity = cosineSimilarity(userEmbedding, intentEmb);
+          maxSim = Math.max(maxSim, similarity);
+        }
+        if (maxSim > 0) {
+          intentScores.push({ action, score: maxSim });
+        }
       }
+      intentScores.sort((a, b) => b.score - a.score);
     }
 
-    // Sort by score (highest first)
-    intentScores.sort((a, b) => b.score - a.score);
-
-    // Extract rename cluster params (oldLabel and newLabel) if present
     let renameOldLabel = null;
     let renameNewLabel = null;
     let renameIsRegion = false;
     const renameRegionMatch2 = userMessage.match(/(?:rename|change|set|call|label|name)\s+region\s+(\S+)\s+(?:to|as)\s+["']?([^"'\n]+?)["']?\s*$/i);
     const renameMatch = userMessage.match(/(?:rename|change|set|call|label)\s+cluster\s+(\S+)(?:\s+(?:in|for|from)\s+(?:rna|atac|gene\s*expression|chromatin))?\s+(?:to|as)\s+["']?([^"'\n]+?)["']?\s*$/i);
-    if (renameRegionMatch2 && renameRegionMatch2[1] && renameRegionMatch2[2]) {
+    const parsedRename = parseRename(originalMessage, dataContext?.clusterLabels);
+    if (parsedRename) {
+      renameOldLabel = parsedRename.oldLabel;
+      renameNewLabel = parsedRename.newLabel;
+      renameIsRegion = parsedRename.kind === 'region';
+    } else if (renameRegionMatch2 && renameRegionMatch2[1] && renameRegionMatch2[2]) {
       renameOldLabel = renameRegionMatch2[1].trim();
       renameNewLabel = renameRegionMatch2[2].trim();
       renameIsRegion = true;
@@ -1500,8 +1471,11 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       renameOldLabel = renameMatch[1].trim();
       renameNewLabel = renameMatch[2].trim();
     }
+    if (renameNewLabel && isChainedRenameLabel(renameNewLabel)) {
+      renameOldLabel = null;
+      renameNewLabel = null;
+    }
 
-    // Extract resolution parameter if present
     const parseNumber = (pattern) => {
       const match = userMessage.match(pattern);
       if (match && match[1]) {
@@ -1526,17 +1500,14 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
     const resolutionMatch = parseNumber(/resolution\s*(?:=|to)?\s*(\d+(?:\.\d+)?)/i) ??
       parseNumberBefore(/(\d+(?:\.\d+)?)\s*(?:resolution)/i);
 
-    // Extract other parameters
     const pcaMatch = parseNumber(/(?:pca|principal\s+components?|pcs?)\s*(?:for\s+umap)?\s*(?:=|to|use)?\s*(\d+(?:\.\d+)?)/i) ??
       parseNumberBefore(/(\d+(?:\.\d+)?)\s*(?:pca|principal\s+components?|pcs?)(?:\s*for\s*umap)?/i);
 
-    const minDistMatch = parseNumber(/min(?:imum)?\s*dist(?:ance)?\s*(?:=|to|use)?\s*(\d+(?:\.\d+)?)/i) ??
+    const minDistMatch = parseMinDist(userMessage) ?? parseNumber(/min(?:imum)?\s*dist(?:ance)?\s*(?:=|to|use)?\s*(\d+(?:\.\d+)?)/i) ??
       parseNumberBefore(/(\d+(?:\.\d+)?)\s*(?:min(?:imum)?\s*dist(?:ance)?)/i);
     const neighborMatch = parseNumber(/(?:k\s*=\s*|neighbors?\s*(?:=|to|use)?\s*)(\d+(?:\.\d+)?)/i) ??
       parseNumberBefore(/(\d+(?:\.\d+)?)\s*(?:neighbors?|nearest\s+neighbors?|k\s*neighbors?)/i);
 
-    // Extract cell filtering parameters
-    // Note: Include "=" in the pattern to match "min genes= 500" or "min genes = 500"
     const geneThreshold = parseNumber(/(?:min(?:imum)?\s*genes?|genes?\s*detected)\s*(?:=|>=|>|at\s+least|more\s+than|over)?\s*(\d+(?:\.\d+)?)/i) ??
       parseNumberBefore(/(\d+(?:\.\d+)?)\s*(?:genes?\s*detected|min(?:imum)?\s*genes?)/i);
     const geneThresholdFromFilter = (() => {
@@ -1549,19 +1520,18 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
       }
       return null;
     })();
-    const effectiveGeneThreshold = geneThreshold ?? geneThresholdFromFilter;
-    const umiThreshold = parseNumber(/(?:umi(?:s)?|counts?)\s*(?:>=|>|at\s+least|more\s+than|over)?\s*(\d+(?:\.\d+)?)/i) ??
+    const parsedFilter = parseCellFilter(userMessage);
+    const effectiveGeneThreshold = parsedFilter.detected_threshold ?? geneThreshold ?? geneThresholdFromFilter;
+    const umiThreshold = parsedFilter.sum_threshold ?? parseNumber(/(?:umi(?:s)?|counts?)\s*(?:>=|>|at\s+least|more\s+than|over)?\s*(\d+(?:\.\d+)?)/i) ??
       parseNumberBefore(/(\d+(?:\.\d+)?)\s*(?:umis?|counts?)/i);
-    const mitoThreshold = parseNumber(/mito(?:chondrial)?(?:\s*(?:percent|percentage|fraction))?\s*(?:<=|<|less\s+than|under)?\s*(\d+(?:\.\d+)?)/i) ??
+    const mitoThreshold = parsedFilter.mito_threshold ?? parseNumber(/mito(?:chondrial)?(?:\s*(?:percent|percentage|fraction))?\s*(?:<=|<|less\s+than|under)?\s*(\d+(?:\.\d+)?)/i) ??
       parseNumberBefore(/(\d+(?:\.\d+)?)\s*(?:mito(?:chondrial)?(?:\s*(?:percent|percentage|fraction))?)/i);
 
-    // Extract variable genes parameter
-    let hvgMatch = parseNumber(/(?:variable\s+genes?|hvg(?:s)?)\s*(?:=|to|of)?\s*(\d+(?:\.\d+)?)/i);
+    let hvgMatch = parseHvgCount(userMessage) ?? parseNumber(/(?:variable\s+genes?|hvg(?:s)?)\s*(?:=|to|of)?\s*(\d+(?:\.\d+)?)/i);
     if (hvgMatch === null) {
       hvgMatch = parseNumberBefore(/(\d+(?:\.\d+)?)\s*(?:highly\s+variable\s+genes?|variable\s+genes?|hvg(?:s)?)/i);
     }
 
-    // Extract color directive
     const extractColorDirective = (text) => {
       const lower = text.toLowerCase();
       const knownColorSchemes = ['viridis', 'magma', 'inferno', 'plasma', 'cividis', 'turbo', 'cubehelix'];
@@ -1572,16 +1542,12 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
         }
       }
 
-      // Try multiple patterns to extract custom colors
-      // Pattern 1: "color to X Y Z" or "colors to X Y Z"
       let customMatch = text.match(/colou?rs?(?:\s?bar|\s?map)?(?:\s+use|\s+with|\s+to)?\s+([a-zA-Z,\s]+)/i);
 
-      // Pattern 2: "change color to X Y Z" or "set color to X Y Z"
       if (!customMatch) {
         customMatch = text.match(/(?:change|set|use|switch|update)\s+colou?rs?(?:\s?bar|\s?map)?\s+to\s+([a-zA-Z,\s]+)/i);
       }
 
-      // Pattern 3: "color X Y Z" (without "to")
       if (!customMatch) {
         customMatch = text.match(/colou?rs?(?:\s?bar|\s?map)?\s+([a-zA-Z,\s]+?)(?:\s+on|\s+for|\s+to|\s+with|$)/i);
       }
@@ -1605,104 +1571,106 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
 
     const colorDirective = extractColorDirective(userMessage);
 
-    // Get top-K intents
     const topKIntents = intentScores.slice(0, topK).map(item => {
       const params = {};
-      if (['find_markers', 'cluster_info', 'rename_cluster', 'highlight_rna_cluster_on_atac', 'highlight_atac_cluster_on_rna'].includes(item.action)) {
+      if (!/\batac\b/i.test(userMessage)) {
+        if (item.action === 'highlight_rna_cluster_on_atac' || item.action === 'highlight_atac_cluster_on_rna') item.action = 'highlight_cluster';
+        if (item.action === 'clear_rna_highlight_on_atac' || item.action === 'clear_atac_highlight_on_rna') item.action = 'clear_cluster_highlight';
+      }
+      if (['find_markers', 'cluster_info', 'rename_cluster', 'highlight_cluster', 'highlight_rna_cluster_on_atac', 'highlight_atac_cluster_on_rna'].includes(item.action)) {
         if (clusterNum !== null) {
           params.cluster = clusterNum;
-          // If this is a merged cluster (multiple IDs with same label), pass all IDs
           if (mergedClusterIds && mergedClusterIds.length > 1 && item.action !== 'highlight_rna_cluster_on_atac' && item.action !== 'highlight_atac_cluster_on_rna') {
             params.clusters = mergedClusterIds;
+            console.log(`Passing merged cluster IDs [${mergedClusterIds.join(', ')}] for ${item.action}`);
           }
         } else if (clusterLabel) {
-          // If we have a label but couldn't resolve it, pass it as string
-          // ChatBot will try to resolve it using the clusterLabelMap
           params.cluster = clusterLabel;
+          console.log(`Passing unresolved cluster label "${clusterLabel}" as string parameter`);
         }
       }
-      if (['plot_gene_expression', 'plot_gene_violin'].includes(item.action)) {
+      if (item.action === 'find_markers' && asksForPeakMarkers) {
+        params.markerFeature = 'peak';
+      }
+      if (['plot_gene_expression', 'plot_gene_violin', 'impute_gene', 'show_peak_gene_links', 'link_peaks'].includes(item.action)) {
         if (geneName) params.gene = geneName;
       }
-      // For plot_gene_dotplot, extract genes (can be single or multiple)
       if (item.action === 'plot_gene_dotplot') {
-        let extractedGenes = null;
+        let extractedGenes = entities.hasGeneList && entities.genes.length > 0
+          ? entities.genes.map((g) => g.symbol)
+          : null;
 
-        // First, try to extract ALL genes from text after "dotplot" or "dot plot"
-        // This handles: "dotplot for UMOD, nphs2" or "dotplot for UMOD and nphs2" or "dotplot for genes slc5a12 umod nphs2"
         const dotplotMatch = userMessage.match(/(?:dotplot|dot\s+plot)\s+(?:for|of)?\s*(.+)/i);
-        if (dotplotMatch && dotplotMatch[1]) {
+        if (!entities.hasGeneList && dotplotMatch && dotplotMatch[1]) {
           const afterDotplot = dotplotMatch[1].trim();
 
-          // Remove "gene" or "genes" if present
           const cleaned = afterDotplot.replace(/^genes?\s+/i, '').trim();
 
-          // Check for comma-separated genes: "UMOD, nphs2" or "UMOD, nphs2, slc5a2"
           if (cleaned.includes(',')) {
             const commaGenes = cleaned.split(',')
               .map(g => g.trim())
               .filter(g => g.length > 0 && !stopwords.has(g.toLowerCase()) && g.length >= 2);
             if (commaGenes.length > 0) {
               extractedGenes = commaGenes;
+              console.log(`Extracted comma-separated genes for dotplot: ${extractedGenes.join(', ')}`);
             }
           }
-          // Check for "and"-separated genes: "UMOD and nphs2"
           else if (/\s+and\s+/i.test(cleaned)) {
             const andGenes = cleaned.split(/\s+and\s+/i)
               .map(g => g.trim())
               .filter(g => g.length > 0 && !stopwords.has(g.toLowerCase()) && g.length >= 2);
             if (andGenes.length > 0) {
               extractedGenes = andGenes;
+              console.log(`Extracted and-separated genes for dotplot: ${extractedGenes.join(', ')}`);
             }
           }
-          // Check for space-separated genes: "slc5a12 umod nphs2" (multiple genes separated by spaces)
           else {
             const spaceGenes = cleaned.split(/\s+/)
               .map(g => g.trim())
               .filter(g => g.length > 0 && !stopwords.has(g.toLowerCase()) && g.length >= 2);
 
             if (spaceGenes.length > 1) {
-              // Multiple space-separated genes
               extractedGenes = spaceGenes;
+              console.log(`Extracted space-separated genes for dotplot: ${extractedGenes.join(', ')}`);
             } else if (spaceGenes.length === 1) {
-              // Single gene
               extractedGenes = spaceGenes;
+              console.log(`Extracted single gene for dotplot: ${extractedGenes[0]}`);
             }
           }
         }
 
-        // Fallback to geneName if we have it but didn't extract from dotplot patterns
         if (!extractedGenes && geneName) {
           extractedGenes = [geneName];
+          console.log(`Using geneName fallback for dotplot: ${geneName}`);
         }
 
         if (extractedGenes && extractedGenes.length > 0) {
           params.genes = extractedGenes;
+          console.log(`Final genes for dotplot: ${extractedGenes.join(', ')}`);
         }
       }
-      // For rename_cluster / rename_region, extract oldLabel and newLabel
       if (item.action === 'rename_cluster' || item.action === 'rename_region') {
         if (renameOldLabel && renameNewLabel) {
           params.oldLabel = renameOldLabel;
           params.newLabel = renameNewLabel;
-          // If user said "region", override action to rename_region
+          if (/^\d+$/.test(renameOldLabel)) params.cluster = Number(renameOldLabel);
           if (renameIsRegion && item.action === 'rename_cluster') {
             item.action = 'rename_region';
           }
+          if (!renameIsRegion && item.action === 'rename_region' && !/\bregions?\b/i.test(userMessage)) {
+            item.action = 'rename_cluster';
+          }
         }
       }
-      // For clustering actions, extract resolution if present
       if (['cluster_and_visualize', 'update_clustering_resolution'].includes(item.action)) {
         if (resolutionMatch !== null) {
           params.resolution = resolutionMatch;
-          // Detect algorithm
           const lower = userMessage.toLowerCase();
           const usesLeiden = lower.includes('leiden');
           const usesWalktrap = lower.includes('walktrap');
           params.algorithm = usesLeiden ? 'leiden' : usesWalktrap ? 'walktrap' : 'multilevel';
         }
       }
-      // For UMAP actions, extract PCA and UMAP parameters
       if (['run_umap', 'cluster_and_visualize'].includes(item.action)) {
         if (pcaMatch !== null) {
           params.num_pcs = pcaMatch;
@@ -1712,17 +1680,26 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
           if (neighborMatch !== null) params.num_neighbors = neighborMatch;
         }
       }
-      // For set_colormap, extract color directive
+      if (item.action === 'deg_between_samples') {
+        if (clusterNum !== null) params.cluster = clusterNum;
+        const pair = parseSamplePair(originalMessage, dataContext?.sampleNames);
+        if (pair) Object.assign(params, pair);
+      }
+      if (item.action === 'region_composition') {
+        const regionMatch = userMessage.match(/\bregion\s*#?\s*(\d+)/i);
+        if (regionMatch) params.regionId = Number(regionMatch[1]);
+      }
+      if (item.action === 'tf_motif_analysis' && clusterNum !== null) {
+        params.cluster = clusterNum;
+      }
       if (item.action === 'set_colormap') {
         if (colorDirective) {
           params.colorMap = colorDirective;
         }
       }
-      // For gene plotting actions, include color directive if present
       if (['plot_gene_expression', 'plot_gene_dotplot'].includes(item.action) && colorDirective) {
         params.colorMap = colorDirective;
       }
-      // For update_cell_filtering, extract cell filtering parameters
       if (item.action === 'update_cell_filtering') {
         if (effectiveGeneThreshold !== null) {
           params.detected_threshold = effectiveGeneThreshold;
@@ -1734,19 +1711,16 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
           params.mito_threshold = mitoThreshold;
         }
       }
-      // For update_variable_genes, extract HVG count
       if (item.action === 'update_variable_genes') {
         if (hvgMatch !== null) {
           params.num_hvgs = hvgMatch;
         }
       }
-      // For update_pca_for_umap, extract PCA components
       if (item.action === 'update_pca_for_umap') {
         if (pcaMatch !== null) {
           params.num_pcs = pcaMatch;
         }
       }
-      // For update_umap_parameters, extract UMAP parameters
       if (item.action === 'update_umap_parameters') {
         if (minDistMatch !== null) {
           params.min_dist = minDistMatch;
@@ -1755,7 +1729,6 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
           params.num_neighbors = neighborMatch;
         }
       }
-      // For region_segmentation, extract BANKSY parameters
       if (item.action === 'region_segmentation') {
         const lambdaMatch = parseNumber(/lambda\s*(?:=|to|of)?\s*(\d+(?:\.\d+)?)/i) ??
           parseNumberBefore(/(\d+(?:\.\d+)?)\s*lambda/i);
@@ -1763,10 +1736,10 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
         if (lambdaMatch !== null) params.lambda = lambdaMatch;
         if (neighborMatch !== null) params.numNeighbors = neighborMatch;
       }
-      // For show_parameters, extract the step/category filter
       if (item.action === 'show_parameters') {
-        const lower = userMessage.toLowerCase();
-        // Map user-friendly names to internal step names
+        const parsedStep = parseParameterStep(userMessage);
+        if (parsedStep) params.step = parsedStep;
+        const lower = parsedStep ? '' : userMessage.toLowerCase();
         if (lower.includes('cell filter') || lower.includes('cell quality') || lower.includes('qc')) {
           params.step = 'cellFiltering';
         } else if (lower.includes('gene filter')) {
@@ -1780,7 +1753,6 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
         } else if (lower.includes('umap') || lower.includes('embedding')) {
           params.step = 'umap';
         }
-        // If no specific step found, params.step remains undefined and all parameters are shown
       }
 
       return {
@@ -1788,148 +1760,160 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
         params,
         confidence: item.score
       };
-    });
+    })
+      .filter((item, i, all) => all.findIndex((o) => o.action === item.action) === i);
 
     if (topKIntents.length === 0) {
+      console.log('No intents found, returning NONE');
       return { action: 'NONE', confidence: 0, topK: [] };
     }
 
     const bestIntent = topKIntents[0];
+    console.log(`Best match: ${bestIntent.action} (similarity: ${bestIntent.confidence.toFixed(3)})`);
 
-    // If best score is very low, return NONE instead of unknown
     if (bestIntent.confidence < 0.3) {
+      console.log('Similarity too low (< 0.3), returning NONE');
       return { action: 'NONE', confidence: bestIntent.confidence, topK: topKIntents };
     }
 
-    // Additional validation: if the action requires a parameter but none was found,
-    // lower confidence or return NONE
-    // BUT: if parameter IS found, boost confidence (clear commands should execute immediately)
     const requiresGene = ['plot_gene_expression', 'plot_gene_violin'].includes(bestIntent.action);
     if (requiresGene) {
       if (!bestIntent.params.gene) {
-        // Lower confidence significantly
+        console.log(`Action ${bestIntent.action} requires a gene but none found`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
       } else {
-        // Gene was successfully extracted: this is a clear, unambiguous command
-        // Boost confidence to ensure it executes immediately without clarification
-        bestIntent.confidence = Math.max(bestIntent.confidence, 0.75); // High confidence for clear commands
+        console.log(`Action ${bestIntent.action} has gene parameter (${bestIntent.params.gene}) - boosting confidence`);
+        bestIntent.confidence = Math.max(bestIntent.confidence, 0.75);
       }
     }
 
-    // For plot_gene_dotplot, require genes array
     if (bestIntent.action === 'plot_gene_dotplot') {
       if (!bestIntent.params.genes || !Array.isArray(bestIntent.params.genes) || bestIntent.params.genes.length === 0) {
-        // Lower confidence significantly
+        console.log(`Action ${bestIntent.action} requires genes but none found`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
       } else {
-        // Genes were successfully extracted: this is a clear, unambiguous command
-        // Boost confidence to ensure it executes immediately without clarification
-        bestIntent.confidence = Math.max(bestIntent.confidence, 0.75); // High confidence for clear commands
+        console.log(`Action ${bestIntent.action} has genes parameter (${bestIntent.params.genes.join(', ')}) - boosting confidence`);
+        bestIntent.confidence = Math.max(bestIntent.confidence, 0.75);
       }
     }
 
-    // For rename_cluster / rename_region, require oldLabel and newLabel
     if (bestIntent.action === 'rename_cluster' || bestIntent.action === 'rename_region') {
-      // If user said "region", override action even at the best-intent level
       if (renameIsRegion && bestIntent.action === 'rename_cluster') {
         bestIntent.action = 'rename_region';
       }
       if (!bestIntent.params.oldLabel || !bestIntent.params.newLabel) {
+        console.log(`Action ${bestIntent.action} requires oldLabel and newLabel but they were not found`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
       }
     }
 
-    // For set_colormap, require colorMap parameter
     if (bestIntent.action === 'set_colormap') {
       if (!bestIntent.params.colorMap) {
-        // Lower confidence significantly: missing required parameters
+        console.log(`Action ${bestIntent.action} requires colorMap but none found`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
       } else {
-        // Color directive was successfully extracted: this is a clear command
-        bestIntent.confidence = Math.max(bestIntent.confidence, 0.75); // High confidence for clear commands
+        console.log(`Action ${bestIntent.action} has colorMap parameter - boosting confidence`);
+        bestIntent.confidence = Math.max(bestIntent.confidence, 0.75);
       }
     }
 
-    // For update_cell_filtering, check if any filtering parameter was extracted
     if (bestIntent.action === 'update_cell_filtering') {
       const hasParams = bestIntent.params.detected_threshold != null ||
                        bestIntent.params.sum_threshold != null ||
                        bestIntent.params.mito_threshold != null;
       if (!hasParams) {
-        // Lower confidence: missing required parameters
+        console.log(`Action ${bestIntent.action} requires at least one filtering parameter but none found`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
       } else {
-        // Parameters were successfully extracted: this is a clear command
+        console.log(`Action ${bestIntent.action} has filtering parameters - boosting confidence`);
         bestIntent.confidence = Math.max(bestIntent.confidence, 0.75);
       }
     }
 
-    // For update_variable_genes, require num_hvgs parameter
     if (bestIntent.action === 'update_variable_genes') {
       if (bestIntent.params.num_hvgs == null) {
+        console.log(`Action ${bestIntent.action} requires num_hvgs but none found`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
       } else {
+        console.log(`Action ${bestIntent.action} has num_hvgs parameter (${bestIntent.params.num_hvgs}) - boosting confidence`);
         bestIntent.confidence = Math.max(bestIntent.confidence, 0.75);
       }
     }
 
-    // For update_clustering_resolution, require resolution parameter
     if (bestIntent.action === 'update_clustering_resolution') {
       if (bestIntent.params.resolution == null) {
+        console.log(`Action ${bestIntent.action} requires resolution but none found`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
       } else {
+        console.log(`Action ${bestIntent.action} has resolution parameter (${bestIntent.params.resolution}) - boosting confidence`);
         bestIntent.confidence = Math.max(bestIntent.confidence, 0.75);
       }
     }
 
-    // For update_pca_for_umap, require num_pcs parameter
     if (bestIntent.action === 'update_pca_for_umap') {
       if (bestIntent.params.num_pcs == null) {
+        console.log(`Action ${bestIntent.action} requires num_pcs but none found`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
       } else {
+        console.log(`Action ${bestIntent.action} has num_pcs parameter (${bestIntent.params.num_pcs}) - boosting confidence`);
         bestIntent.confidence = Math.max(bestIntent.confidence, 0.75);
       }
     }
 
-    // For update_umap_parameters, require at least one UMAP parameter
     if (bestIntent.action === 'update_umap_parameters') {
       const hasParams = bestIntent.params.min_dist != null ||
                        bestIntent.params.num_neighbors != null;
       if (!hasParams) {
+        console.log(`Action ${bestIntent.action} requires at least one UMAP parameter but none found`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
       } else {
+        console.log(`Action ${bestIntent.action} has UMAP parameters - boosting confidence`);
         bestIntent.confidence = Math.max(bestIntent.confidence, 0.75);
       }
     }
 
-    // Special handling: If user says "rerun" with filtering parameters, prioritize update_cell_filtering
+    if (bestIntent.action === 'highlight_rna_cluster_on_atac' || bestIntent.action === 'highlight_atac_cluster_on_rna') {
+      const direction = parseHighlightDirection(userMessage);
+      if (direction === 'rna_on_atac') bestIntent.action = 'highlight_rna_cluster_on_atac';
+      if (direction === 'atac_on_rna') bestIntent.action = 'highlight_atac_cluster_on_rna';
+    }
+
+    if ((bestIntent.action === 'region_composition' && bestIntent.params.regionId == null) ||
+        (bestIntent.action === 'tf_motif_analysis' && bestIntent.params.cluster == null)) {
+      bestIntent.confidence = Math.min(bestIntent.confidence, 0.3);
+    }
+
     const hasRerunKeyword = /rerun|re-run|reanalyze|re-analyze|recalculate|re-calculate/i.test(userMessage);
     if (hasRerunKeyword && (effectiveGeneThreshold !== null || umiThreshold !== null || mitoThreshold !== null)) {
-      // Check if update_cell_filtering is in top-K intents
       const cellFilteringIntent = topKIntents.find(item => item.action === 'update_cell_filtering');
       if (cellFilteringIntent) {
+        console.log('Detected rerun with cell filtering parameters - using update_cell_filtering');
         bestIntent.action = 'update_cell_filtering';
         bestIntent.params = cellFilteringIntent.params;
         bestIntent.confidence = Math.max(cellFilteringIntent.confidence, 0.75);
       }
     }
 
-    // For cluster_and_visualize, if resolution is extracted, change action to update_clustering_resolution
     if (bestIntent.action === 'cluster_and_visualize' && bestIntent.params.resolution) {
+      console.log(`Changing action from cluster_and_visualize to update_clustering_resolution (resolution=${bestIntent.params.resolution})`);
       bestIntent.action = 'update_clustering_resolution';
     }
 
-    // For cluster_and_visualize, if resolution is mentioned but not extracted, lower confidence
-    // This helps the router ask for clarification
     if (bestIntent.action === 'cluster_and_visualize') {
       const hasResolutionMention = /resolution\s*(?:=|to)?\s*\d+/i.test(userMessage) || /\d+\s*resolution/i.test(userMessage);
       if (hasResolutionMention && !bestIntent.params.resolution) {
-        // Lower confidence to trigger clarification
+        console.log(`Action ${bestIntent.action} mentions resolution but parameter was not extracted`);
         bestIntent.confidence = Math.min(bestIntent.confidence, 0.4);
       }
     }
 
-    // Return with confidence and top-K
+    const runnerUp = topKIntents[1];
+    if (ambiguous && bestIntent.action === intentScores[0].action && runnerUp &&
+        intentScores[0].score - runnerUp.confidence < AMBIGUITY_MARGIN) {
+      console.log(`Ambiguous: ${intentScores[0].action} vs ${runnerUp.action} - asking the user`);
+      bestIntent.confidence = Math.min(bestIntent.confidence, 0.45);
+    }
+
     return {
       action: bestIntent.confidence < 0.5 ? 'NONE' : bestIntent.action,
       params: bestIntent.params,
@@ -1943,16 +1927,10 @@ export async function classifyIntent(userMessage, dataContext = {}, options = {}
   }
 }
 
-/**
- * Simple fallback classifier for when LLM fails (legacy: kept for compatibility)
- * Note: This is a basic pattern matcher, not used in the main flow
- */
 export function classifyIntentSimple(userMessage) {
-  // Pre-process input: strip punctuation, fix typos
   userMessage = preprocessUserInput(userMessage);
   const lower = userMessage.toLowerCase();
 
-  // WNN integration detection (before gene extraction)
   const isWNNSimple =
     /\bwnn\b/.test(lower) ||
     /\bweighted\s+nearest\s+neighbor/.test(lower) ||
@@ -1964,25 +1942,23 @@ export function classifyIntentSimple(userMessage) {
     return { action: 'wnn_integrate', params: {}, confidence: 0.95, topK: [] };
   }
 
-  // Extract potential gene name or peak ID (case-insensitive)
-  // Try multiple patterns, prioritizing more specific ones
   const genePatterns = [
-    /(?:plot|show)\s+(?:me\s+)?(?:gene\s+)?(chr\w+:\d+-\d+)/i,  // "plot chr18:73073416-73074285" (ATAC peak)
-    /(?:plot|show)\s+(?:me\s+)?gene\s+activi?ty\s+(?:for|of)\s+([A-Za-z0-9-]+)/i,  // "plot gene activity for ms4a1"
-    /(?:plot|show)\s+(?:me\s+)?gene\s+activi?ty\s+([A-Za-z0-9-]+)/i,  // "plot gene activity ms4a1"
-    /(?:plot|show)\s+(?:me\s+)?gene\s+([A-Za-z0-9-]+)/i,  // "plot gene ms4a1"
-    /(?:show|plot)\s+me\s+([A-Za-z0-9-]+)/i,  // "show me NPHS2"
-    /(?:show|plot)\s+([A-Za-z0-9-]+)(?:\s|$|\.|,)/i,  // "show NPHS2" or "plot NPHS2" (same as "show me geneName")
-    /what\s+is\s+(?:the\s+)?(?:gene\s+)?expression\s+(?:for|of)\s+([A-Za-z0-9-]+)/i,  // "what is the gene expression for NPHS2"
-    /([A-Za-z0-9-]+)\s+expression\s+plot/i,  // "NPHS2 expression plot"
-    /^(?:plot|show)\s+(?:me\s+)?([A-Za-z0-9-]+)\s*$/i,  // "plot ms4a1" or "show ms4a1" (single token)
-    /violin\s+(?:plot\s+)?(?:for\s+)?([A-Za-z0-9-]+)/i,  // "violin plot slc5a2"
-    /([A-Za-z0-9-]+)\s+violin(?:\s+plot)?/i,  // "slc5a2 violin plot"
-    /(?:dotplot|dot\s+plot)\s+(?:for\s+)?([A-Za-z0-9-]+)/i,  // "dotplot slc5a2"
-    /([A-Za-z0-9-]+)\s+(?:dotplot|dot\s+plot)/i,  // "slc5a2 dotplot"
-    /gene\s+([A-Za-z0-9-]+)/i,  // "gene slc5a2"
-    /\b([A-Z][a-z0-9]+[A-Z0-9]*[a-z0-9]*)\b/,  // Mixed case like Nphs2
-    /\b([A-Za-z][A-Za-z0-9]+)\b/,  // Any alphanumeric (case-insensitive fallback)
+    /(?:plot|show)\s+(?:me\s+)?(?:gene\s+)?(chr\w+:\d+-\d+)/i,
+    /(?:plot|show)\s+(?:me\s+)?gene\s+activi?ty\s+(?:for|of)\s+([A-Za-z0-9-]+)/i,
+    /(?:plot|show)\s+(?:me\s+)?gene\s+activi?ty\s+([A-Za-z0-9-]+)/i,
+    /(?:plot|show)\s+(?:me\s+)?gene\s+([A-Za-z0-9-]+)/i,
+    /(?:show|plot)\s+me\s+([A-Za-z0-9-]+)/i,
+    /(?:show|plot)\s+([A-Za-z0-9-]+)(?:\s|$|\.|,)/i,
+    /what\s+is\s+(?:the\s+)?(?:gene\s+)?expression\s+(?:for|of)\s+([A-Za-z0-9-]+)/i,
+    /([A-Za-z0-9-]+)\s+expression\s+plot/i,
+    /^(?:plot|show)\s+(?:me\s+)?([A-Za-z0-9-]+)\s*$/i,
+    /violin\s+(?:plot\s+)?(?:for\s+)?([A-Za-z0-9-]+)/i,
+    /([A-Za-z0-9-]+)\s+violin(?:\s+plot)?/i,
+    /(?:dotplot|dot\s+plot)\s+(?:for\s+)?([A-Za-z0-9-]+)/i,
+    /([A-Za-z0-9-]+)\s+(?:dotplot|dot\s+plot)/i,
+    /gene\s+([A-Za-z0-9-]+)/i,
+    /\b([A-Z][a-z0-9]+[A-Z0-9]*[a-z0-9]*)\b/,
+    /\b([A-Za-z][A-Za-z0-9]+)\b/,
   ];
   const stopwords = new Set(['gene', 'genes', 'plot', 'violin', 'dotplot', 'dot', 'show', 'me', 'the', 'for', 'of', 'cluster', 'clusters', 'please', 'activity', 'fraction', 'proportion', 'umap', 'embedding', 'cell', 'cells']);
   let geneName = null;
@@ -1994,7 +1970,6 @@ export function classifyIntentSimple(userMessage) {
     }
   }
 
-  // Extract cluster number
   let clusterNum = null;
   const clusterPatterns = [
     /cluster\s+(\d+)/i,
@@ -2012,35 +1987,28 @@ export function classifyIntentSimple(userMessage) {
     }
   }
 
-  // Check for follow-up patterns
-  // NOTE: "what about cluster X" should be treated as a NEW question, not a follow-up
   const followUpPatterns = [
     /^same\s+(?:to|for|with)/i,
     /^do\s+the\s+same\s+(?:to|for|with)/i,
     /^and\s+(?:for\s+)?(?:cluster\s+)?(\d+)/i,
     /^now\s+(?:for\s+)?(?:cluster\s+)?(\d+)/i,
     /^(?:cluster\s+)?(\d+)\??$/i,
-    // Only treat "what about" as follow-up if it's NOT asking about a cluster
     /^what\s+about\s+(?!cluster)/i,
     /^how\s+about\s+(?!cluster)/i,
   ];
 
   const isFollowUp = followUpPatterns.some(p => p.test(lower));
 
-  // Don't treat explicit cluster info queries as follow-ups
-  // "what about cluster X", "show me about cluster X", "show me cluster X" should be cluster_info, not follow-ups
   const isExplicitClusterInfoQuery = /(?:what\s+(?:is|define|are|about)|tell\s+me\s+about|show\s+me\s+(?:about\s+)?cluster|describe|info|information|know\s+(?:more\s+)?about|do\s+you\s+know)\s+(?:anything\s+)?(?:about\s+)?cluster/i.test(userMessage);
 
-  // "What about cluster X" and "show me [about] cluster X" are always new questions, not follow-ups
   const isWhatAboutCluster = /^what\s+about\s+cluster/i.test(lower);
   const isShowMeCluster = /^show\s+me\s+(?:about\s+)?cluster/i.test(lower);
 
   if (isFollowUp && lastActionContext && clusterNum !== null && !isExplicitClusterInfoQuery && !isWhatAboutCluster && !isShowMeCluster) {
+    console.log('Detected follow-up question, repeating last action:', lastActionContext.action);
 
-    // For rename_cluster, preserve newLabel from previous action
     const params = { ...lastActionContext.params, cluster: clusterNum };
     if (lastActionContext.action === 'rename_cluster' && lastActionContext.params.newLabel) {
-      // Use the new cluster number as oldLabel, and preserve newLabel
       params.oldLabel = String(clusterNum);
       params.newLabel = lastActionContext.params.newLabel;
     }
@@ -2051,15 +2019,14 @@ export function classifyIntentSimple(userMessage) {
     };
   }
 
-  // If "what about cluster X" or "show me [about] cluster X", treat as cluster_info request
   if ((isWhatAboutCluster || isShowMeCluster) && clusterNum !== null) {
+    console.log('Detected cluster info question (what/show cluster), treating as cluster_info');
     return {
       action: 'cluster_info',
       params: { cluster: clusterNum }
     };
   }
 
-  // Multiome: show cells from RNA cluster X on ATAC view (highlight in red)
   const clearRnaHighlightMatch = /clear\s+RNA\s+highlight\s+on\s+ATAC/i.test(lower);
   if (clearRnaHighlightMatch) {
     return { action: 'clear_rna_highlight_on_atac', params: {} };
@@ -2077,7 +2044,6 @@ export function classifyIntentSimple(userMessage) {
     };
   }
 
-  // Multiome: show cells from ATAC cluster X on RNA view (highlight in red)
   const clearAtacHighlightMatch = /clear\s+ATAC\s+highlight\s+on\s+RNA/i.test(lower);
   if (clearAtacHighlightMatch) {
     return { action: 'clear_atac_highlight_on_rna', params: {} };
@@ -2095,7 +2061,6 @@ export function classifyIntentSimple(userMessage) {
     };
   }
 
-  // DEG between two samples within a cluster (integration / xenium integration): "find markers for cluster 21 between sample 1 and sample 2"
   const degBetweenMatch = lower.match(/(?:find\s+markers|deg|differential(?:\s+genes?)?|differentially\s+expressed)\s+(?:for\s+)?cluster\s+(\d+)\s+between\s+(.+?)\s+and\s+(.+?)(?=[.?!]?\s*$|$)/i)
     || lower.match(/(?:deg|differential(?:\s+genes?)?|differentially\s+expressed)\s+(?:for\s+)?cluster\s+(\d+)\s+between\s+(\S+)\s+and\s+(\S+)/i)
     || lower.match(/(?:deg|differential(?:\s+genes?)?)\s+(?:for\s+)?cluster\s+(\d+)\s+(\S+)\s+vs\.?\s+(\S+)/i)
@@ -2107,6 +2072,7 @@ export function classifyIntentSimple(userMessage) {
     const sa = (degBetweenMatch[2] || '').trim().replace(/[.?!]+$/, '');
     const sb = (degBetweenMatch[3] || '').trim().replace(/[.?!]+$/, '');
     if (sa && sb) {
+      console.log('Detected DEG between samples:', { cluster: c, sample1: sa, sample2: sb });
       return {
         action: 'deg_between_samples',
         params: { cluster: c, sample1: sa, sample2: sb },
@@ -2116,7 +2082,6 @@ export function classifyIntentSimple(userMessage) {
     }
   }
 
-  // Check for each action
   if (lower.includes('marker') || lower.includes('top genes') || lower.includes('deg')) {
     return { action: 'find_markers', params: { cluster: clusterNum } };
   }
@@ -2125,7 +2090,6 @@ export function classifyIntentSimple(userMessage) {
     return { action: 'plot_gene_violin', params: { gene: geneName } };
   }
 
-  // Check for dotplot BEFORE general plot check (since "dotplot" contains "plot")
   if (lower.includes('dotplot') || lower.includes('dot plot')) {
     if (geneName) {
       return { action: 'plot_gene_dotplot', params: { genes: [geneName] } };
@@ -2136,7 +2100,6 @@ export function classifyIntentSimple(userMessage) {
     return { action: 'cluster_info', params: { cluster: clusterNum } };
   }
 
-  // Cell fraction / proportion (integration): MUST run before plot_gene_expression so "plot fraction" is not parsed as gene "fraction"
   if ((lower.includes('plot') || lower.includes('show')) && (lower.includes('cell fraction') || lower.includes('cell proportion') || /\b(?:plot|show)\s+(?:cell\s+)?fraction\b/.test(lower))) {
     return { action: 'plot_cell_fraction', params: {}, confidence: 0.9, topK: [] };
   }
@@ -2144,12 +2107,10 @@ export function classifyIntentSimple(userMessage) {
     return { action: 'plot_cell_fraction', params: {}, confidence: 0.9, topK: [] };
   }
 
-  // "show region", "plot region", "what regions" → show UMAP/spatial colored by BANKSY regions
   if (/\bregions?\b/.test(lower) && (lower.includes('plot') || lower.includes('show') || lower.includes('display') || lower.includes('color') || /\bwhat\s+region/.test(lower) || /\bhow\s+many\s+region/.test(lower))) {
     return { action: 'show_regions', params: {}, confidence: 0.9, topK: [] };
   }
 
-  // "plot/show umap" or "plot/show cell clusters/cell types" → show UMAP colored by clusters (BEFORE plot_gene_expression so "umap"/"clusters"/"cell" are not treated as genes)
   if (lower.includes('umap') || lower.includes('embedding')) {
     return { action: 'run_umap', params: {} };
   }
@@ -2157,7 +2118,6 @@ export function classifyIntentSimple(userMessage) {
     return { action: 'cluster_and_visualize', params: {} };
   }
 
-  // General plot/expression check: but exclude "dotplot" which was handled above (no coverage → showPeakView: false for multiome)
   if ((lower.includes('expression') || (lower.includes('plot') && !lower.includes('dotplot')) || lower.includes('show'))) {
     if (geneName) {
       return { action: 'plot_gene_expression', params: { gene: geneName, showPeakView: false } };
@@ -2179,7 +2139,6 @@ export function classifyIntentSimple(userMessage) {
   }
 
   if (lower.includes('parameter') || lower.includes('setting')) {
-    // Extract step/category filter
     let step = null;
     if (lower.includes('cell filter') || lower.includes('cell quality') || lower.includes('qc')) {
       step = 'cellFiltering';
@@ -2200,9 +2159,6 @@ export function classifyIntentSimple(userMessage) {
   return { action: 'unknown' };
 }
 
-/**
- * Format a friendly "I don't understand" message
- */
 export function getUnknownResponseMessage() {
   return `I'm not sure what you're asking for. Here are some things I can help with:
 
@@ -2216,9 +2172,6 @@ export function getUnknownResponseMessage() {
 Try asking in a different way!`;
 }
 
-/**
- * Unload the embedding model to free memory
- */
 export async function unloadModel() {
   embedder = null;
   intentEmbeddings = null;
@@ -2227,7 +2180,6 @@ export async function unloadModel() {
 }
 
 const webllmService = {
-  // Embedding model (intent classification)
   checkWebLLMAvailable,
   isModelCached,
   downloadModel,
@@ -2239,7 +2191,6 @@ const webllmService = {
   unloadModel,
   setLastActionContext,
   getLastActionContext,
-  // Chat model (conversational responses)
   checkWebGPUAvailable,
   getAvailableChatModels,
   downloadChatModel,

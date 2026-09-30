@@ -1,6 +1,3 @@
-/**
- * Seeded PRNG (Mulberry32) for reproducible multi-sample pipeline (same samples → same UMAP and clustering).
- */
 function seededRandom(seed) {
   return function () {
     let t = (seed += 0x6d2b79f5);
@@ -10,36 +7,11 @@ function seededRandom(seed) {
   };
 }
 
-/** Fixed seed so the same samples always yield the same UMAP and clustering (match single-sample SCATAC_RANDOM_SEED). */
 const ATAC_INTEGRATION_RANDOM_SEED = 42;
 
-/**
- * Multi-sample scATAC-seq integration pipeline.
- *
- * Pipeline: unified peaks → TF-IDF → fast WASM SVD (LSI) → Harmony → UMAP → Louvain
- * Uses a fixed random seed so loading the same samples produces identical UMAP and clusters.
- *
- * @param {Array<{ countMatrix: import('./sparse.js').SparseMatrixCSC, peakNames: string[], barcodes: string[], name: string }>} samples
- * @param {Object} [options]
- * @param {(msg: string) => void} [options.statusCallback]
- * @param {number} [options.resolution]: Louvain resolution; default 0.6 for 2 samples, 0.3 for 3 (single-sample uses 0.8 in runSingleSamplePipeline)
- * @param {number} [options.minDist=0.3]
- * @param {number} [options.numNeighbors=30]
- * @returns {Promise<{
- *   umapEmbedding: number[][],
- *   clusters: number[],
- *   correctedEmbeddings: Float64Array,
- *   mergedMatrix: import('./sparse.js').SparseMatrixCSC,
- *   unifiedPeaks: Array<{chr:string,start:number,end:number}>,
- *   unifiedPeakNames: string[],
- *   allBarcodes: string[],
- *   integrationViews: Record<string, {indices: number[]}>,
- *   datasetNames: string[]
- * }>}
- */
 export async function runMultiSamplePipeline(samples, options = {}) {
   const nSamples = samples.length;
-  const defaultResolution = nSamples === 2 ? 0.6 : 0.3; // 2 samples → 0.6, 3 samples → 0.3 (1 sample uses runSingleSamplePipeline with 0.8)
+  const defaultResolution = nSamples === 2 ? 0.6 : 0.3;
   const {
     statusCallback = null,
     resolution = defaultResolution,
@@ -49,6 +21,7 @@ export async function runMultiSamplePipeline(samples, options = {}) {
 
   const post = (msg) => {
     if (statusCallback) statusCallback(msg);
+    console.log('[ATAC Integration]', msg);
   };
 
   const { parsePeakName, createUnifiedPeaks, mapPeaksToUnified, remapCountMatrix, hconcatMatrices, peaksToNames } = await import('./peaks.js');
@@ -58,18 +31,15 @@ export async function runMultiSamplePipeline(samples, options = {}) {
   const { buildKNN, buildSNN, louvain } = await import('./clustering.js');
   const { UMAP } = await import('umap-js');
 
-  // ---- Step 1: Parse peak names ----
   post('Parsing peak names...');
   const allPeakSets = samples.map((s) => s.peakNames.map(parsePeakName));
 
-  // ---- Step 2: Create unified peak set ----
   post('Creating unified peak set...');
   const unifiedPeaks = createUnifiedPeaks(allPeakSets);
   const unifiedPeakNames = peaksToNames(unifiedPeaks);
   const nUnifiedPeaks = unifiedPeaks.length;
   post(`Unified peak set: ${nUnifiedPeaks} peaks`);
 
-  // ---- Step 3: Remap each sample to unified peaks ----
   const remappedMatrices = [];
   const allBarcodes = [];
   const batchLabels = [];
@@ -81,7 +51,6 @@ export async function runMultiSamplePipeline(samples, options = {}) {
     const remapped = remapCountMatrix(sample.countMatrix, mapping, nUnifiedPeaks);
     remappedMatrices.push(remapped);
 
-    // Prefix barcodes with sample name to avoid collisions
     const prefixedBarcodes = sample.barcodes.map((bc) => `${sample.name}_${bc}`);
     allBarcodes.push(...prefixedBarcodes);
 
@@ -90,44 +59,31 @@ export async function runMultiSamplePipeline(samples, options = {}) {
     }
   }
 
-  // ---- Step 4: Merge matrices ----
   post('Merging matrices...');
   const mergedMatrix = hconcatMatrices(remappedMatrices);
   const nCells = allBarcodes.length;
   post(`Merged: ${nUnifiedPeaks} peaks × ${nCells} cells`);
 
-  // ---- Step 5: Find top features and subset count matrix ----
-  // Uses q5 cutoff (same as Signac's default) for all sample counts.
-  // When the sparse matrix is too large for the WASM SVD module's heap, svd.js automatically
-  // falls back to pure-JS matrix multiply (kana-inspired separation: WASM for small dense
-  // kernels only, JS for large sparse×dense when WASM heap is insufficient).
   post('Finding top features...');
   const topFeatureIndices = findTopFeatures(mergedMatrix, 'q5', post);
 
-  // Subset the COUNT matrix first (Int32/Float32 sparse), then run TF-IDF on the smaller matrix.
-  // This avoids holding a full Float64/Float32 TF-IDF matrix for 180K+ peaks.
   post('Subsetting count matrix to top features...');
   const countSubset = mergedMatrix.subsetRows(topFeatureIndices);
   post(`Count subset: ${countSubset.nrows} × ${countSubset.ncols}, nnz = ${countSubset.nnz}`);
 
-  // ---- Step 6: TF-IDF normalization on the smaller subset ----
   post('Running TF-IDF normalization...');
   const tfidfSubset = runTFIDF(countSubset, 1, 1e4, post);
   post(`TF-IDF subset: ${tfidfSubset.nrows} × ${tfidfSubset.ncols}`);
 
-  // ---- Step 8: SVD (LSI) ----
   const nSVDComponents = 50;
   post('Running LSI (SVD)...');
 
-  /** Single seeded RNG for SVD, Harmony, UMAP, and clustering so results are reproducible. */
   const random = seededRandom(ATAC_INTEGRATION_RANDOM_SEED);
 
   const svdResult = await randomizedSVD(tfidfSubset, nSVDComponents, 20, 5, true, post, random);
 
-  // ---- Step 9: Harmony batch correction ----
-  // Use LSI dims 2–50 (skip first, depth-correlated)
   post('Running Harmony batch correction...');
-  const harmonyDims = svdResult.nComponents - 1; // 49
+  const harmonyDims = svdResult.nComponents - 1;
   const harmonyInput = new Float64Array(nCells * harmonyDims);
   for (let i = 0; i < nCells; i++) {
     for (let d = 0; d < harmonyDims; d++) {
@@ -146,7 +102,6 @@ export async function runMultiSamplePipeline(samples, options = {}) {
     seed: ATAC_INTEGRATION_RANDOM_SEED,
   });
 
-  // ---- Step 10: UMAP on corrected embeddings ----
   post('Running UMAP...');
   const umapInput = [];
   for (let i = 0; i < nCells; i++) {
@@ -178,7 +133,6 @@ export async function runMultiSamplePipeline(samples, options = {}) {
 
   const umapEmbedding = umap.fit(umapInput);
 
-  // ---- Step 11: Clustering on corrected embeddings ----
   post('Building KNN and clustering...');
   const k = 20;
   const knn = buildKNN(correctedEmbeddings, nCells, harmonyDims, k, post, random);
@@ -188,7 +142,6 @@ export async function runMultiSamplePipeline(samples, options = {}) {
   const nClusters = new Set(clusters).size;
   post(`Found ${nClusters} clusters`);
 
-  // ---- Step 12: Build integration views (per-sample cell indices) ----
   const integrationViews = {};
   const datasetNames = samples.map((s) => s.name);
   let cellOffset = 0;

@@ -1,8 +1,3 @@
-/**
- * Browser/worker-compatible WASM ops for SVD (QR, dense matmul, Gram, sparse-dense multiply).
- * Loads svd_core.wasm from public URL. Falls back to pure JS if WASM fails.
- */
-
 let _module = null;
 let _ready = false;
 let _initPromise = null;
@@ -14,10 +9,6 @@ function getWasmUrl() {
   return `${base || ''}/wasm/svd_core.wasm`;
 }
 
-/**
- * Initialize the WASM module. Call once before using any operations.
- * Safe to call multiple times (returns same promise).
- */
 export async function init() {
   if (_ready) return;
   if (_initPromise) return _initPromise;
@@ -71,9 +62,6 @@ function free(ptr) {
   _module._free(ptr);
 }
 
-/**
- * QR decomposition via WASM.
- */
 export function qr(A, m, n) {
   if (!_ready) throw new Error('wasmOps not initialized');
   const pQ = allocF64(A);
@@ -86,9 +74,6 @@ export function qr(A, m, n) {
   return { Q, R };
 }
 
-/**
- * Dense matrix multiply C = A × B.
- */
 export function denseMatmul(A, B, m, p, n) {
   if (!_ready) throw new Error('wasmOps not initialized');
   const pA = allocF64(A);
@@ -102,9 +87,6 @@ export function denseMatmul(A, B, m, p, n) {
   return C;
 }
 
-/**
- * Gram matrix C^T × C.
- */
 export function gramMatrix(C, nRows, l) {
   if (!_ready) throw new Error('wasmOps not initialized');
   const pC = allocF64(C);
@@ -116,9 +98,6 @@ export function gramMatrix(C, nRows, l) {
   return CTC;
 }
 
-/**
- * Create a persistent WASM-side copy of sparse matrix. Call .free() when done.
- */
 export function loadSparse(colPtr, rowIdx, values, nrows, ncols) {
   if (!_ready) throw new Error('wasmOps not initialized');
   const pColPtr = allocI32(colPtr);
@@ -139,9 +118,6 @@ export function loadSparse(colPtr, rowIdx, values, nrows, ncols) {
   };
 }
 
-/**
- * Sparse^T × Dense using a pre-loaded sparse matrix.
- */
 export function persistentSpmmTranspose(handle, B, bCols) {
   if (!_ready) throw new Error('wasmOps not initialized');
   const pB = allocF64(B);
@@ -157,9 +133,6 @@ export function persistentSpmmTranspose(handle, B, bCols) {
   return result;
 }
 
-/**
- * Sparse × Dense using a pre-loaded sparse matrix.
- */
 export function persistentSpmm(handle, B, bCols) {
   if (!_ready) throw new Error('wasmOps not initialized');
   const pB = allocF64(B);

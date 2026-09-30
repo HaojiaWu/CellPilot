@@ -116,7 +116,6 @@
   margin-bottom: 0;
 }
 
-/* Markdown styling for bot messages */
 .message-bot .message-content h1,
 .message-bot .message-content h2,
 .message-bot .message-content h3,
@@ -239,7 +238,6 @@
   box-shadow: 0 0 0 2px #2d8a6b, 0 0 16px 4px rgba(45, 138, 107, 0.6);
 }
 
-/* Custom styling for Send button */
 .chatbot-input .bp4-button.bp4-intent-primary {
   background: linear-gradient(135deg, #1a5f4a 0%, #156b52 30%, #0f4f3d 70%, #0d4434 100%);
   color: white;
@@ -270,5 +268,4 @@
   background: linear-gradient(135deg, #1a5f4a 0%, #156b52 30%, #0f4f3d 70%, #0d4434 100%);
   opacity: 0.7;
 }
-
 

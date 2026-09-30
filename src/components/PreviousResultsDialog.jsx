@@ -1,10 +1,6 @@
 import React from 'react';
 import { Button, Icon } from '@blueprintjs/core';
 
-/**
- * Dialog shown when CellPilot detects a saved analysis (cellpilot_results.json)
- * in the input folder. User can load the previous results or start a new analysis.
- */
 const PreviousResultsDialog = ({ previousResults, onChoice }) => {
   if (!previousResults) return null;
 

@@ -6,7 +6,6 @@
   width: 100%;
 }
 
-/* Section containers */
 .file-loader-section {
   display: flex;
   flex-direction: column;
@@ -57,7 +56,6 @@
   flex: 1;
 }
 
-/* File info display */
 .file-info {
   display: flex;
   flex-direction: column;
@@ -85,7 +83,6 @@
   border: 1px solid #d1fae5;
 }
 
-/* Tighter layout for scMultiome so cells, genes, and peaks stay within the box */
 .file-info--multiome {
   padding: 8px 10px;
   gap: 6px;
@@ -144,7 +141,6 @@
   font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
 }
 
-/* No data placeholder (more compact) */
 .no-data-placeholder {
   display: flex;
   flex-direction: column;
@@ -164,7 +160,6 @@
   margin-bottom: 0;
 }
 
-/* Drag-over state for drop target */
 .no-data-placeholder.drag-over {
   border-color: #1a5f4a;
   background: linear-gradient(180deg, #f0f9f6 0%, #f5fbf9 100%);
@@ -209,7 +204,6 @@
   z-index: 10;
 }
 
-/* Custom styling for Browse button */
 .file-loader-browse.bp4-button.bp4-intent-primary {
   background: linear-gradient(135deg, #1a5f4a 0%, #156b52 30%, #0f4f3d 70%, #0d4434 100%);
   color: white;
@@ -235,7 +229,6 @@
   opacity: 0.7;
 }
 
-/* Integration (2–3 datasets) */
 .file-loader-integration {
   gap: 10px;
 }

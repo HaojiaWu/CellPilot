@@ -1,15 +1,4 @@
-/**
- * CSC (Compressed Sparse Column) Sparse Matrix
- * Matches the dgCMatrix format used by R/Matrix package
- */
 export class SparseMatrixCSC {
-  /**
-   * @param {number} nrows
-   * @param {number} ncols
-   * @param {Int32Array} colPtr: column pointers, length ncols+1
-   * @param {Int32Array} rowIdx: row indices for each non-zero
-   * @param {Float64Array} values: non-zero values
-   */
   constructor(nrows, ncols, colPtr, rowIdx, values) {
     this.nrows = nrows;
     this.ncols = ncols;
@@ -19,7 +8,6 @@ export class SparseMatrixCSC {
     this.nnz = values.length;
   }
 
-  /** Column sums (sum of each column) */
   colSums() {
     const sums = new Float64Array(this.ncols);
     for (let j = 0; j < this.ncols; j++) {
@@ -32,7 +20,6 @@ export class SparseMatrixCSC {
     return sums;
   }
 
-  /** Row sums (sum of each row) */
   rowSums() {
     const sums = new Float64Array(this.nrows);
     for (let p = 0; p < this.nnz; p++) {
@@ -41,11 +28,6 @@ export class SparseMatrixCSC {
     return sums;
   }
 
-  /**
-   * Subset rows by sorted index array
-   * @param {number[]} rowIndices: sorted array of row indices to keep
-   * @returns {SparseMatrixCSC}
-   */
   subsetRows(rowIndices) {
     const newNrows = rowIndices.length;
     const rowMap = new Int32Array(this.nrows).fill(-1);
@@ -80,11 +62,6 @@ export class SparseMatrixCSC {
     return new SparseMatrixCSC(newNrows, this.ncols, newColPtr, newRowIdx, newValues);
   }
 
-  /**
-   * Subset columns by index array (e.g. to filter cells by QC).
-   * @param {number[]} colIndices: array of column indices to keep (order preserved)
-   * @returns {SparseMatrixCSC}
-   */
   subsetCols(colIndices) {
     const newNcols = colIndices.length;
     let newNnz = 0;
@@ -110,11 +87,6 @@ export class SparseMatrixCSC {
     return new SparseMatrixCSC(this.nrows, newNcols, newColPtr, newRowIdx, newValues);
   }
 
-  /**
-   * Compute this^T * B (dense)
-   * this is (nrows x ncols), B is (nrows x bCols) dense row-major Float64Array
-   * result is (ncols x bCols) dense row-major Float64Array
-   */
   transposeMultiplyDense(B, bCols) {
     const result = new Float64Array(this.ncols * bCols);
 
@@ -132,11 +104,6 @@ export class SparseMatrixCSC {
     return result;
   }
 
-  /**
-   * Compute this * B (dense)
-   * this is (nrows x ncols), B is (ncols x bCols) dense row-major Float64Array
-   * result is (nrows x bCols) dense row-major Float64Array
-   */
   multiplyDense(B, bCols) {
     const result = new Float64Array(this.nrows * bCols);
 

@@ -43,13 +43,13 @@ const AGENT_TOOL_TIMEOUT_MS = 120000;
 const SPATIAL_REGION_MARKER_TIMEOUT_MS = 10 * 60 * 1000;
 const SPATIAL_INTERACTION_TIMEOUT_MS = 10 * 60 * 1000;
 
-const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelMap, atacClusterLabelMap, wnnActive, wnnClusterLabelMap, spatialSelection, rnaClusters, atacClusters, wnnClusters, isAnalyzing, analysisStatusMessage, onAnalysisRequest, onSetColorMap, onSetClusterColor, onHighlightRnaClusterOnAtac, onHighlightAtacClusterOnRna }, ref) => {
+const ChatBot = forwardRef(({ dataLoaded, dataInfo, geneNames, selectedModel, clusterLabelMap, atacClusterLabelMap, wnnActive, wnnClusterLabelMap, spatialSelection, rnaClusters, atacClusters, wnnClusters, isAnalyzing, analysisStatusMessage, onAnalysisRequest, onSetColorMap, onSetClusterColor, onHighlightRnaClusterOnAtac, onHighlightAtacClusterOnRna }, ref) => {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [lastPlotContext, setLastPlotContext] = useState(null); // Stores info about the last plot
-  const [llmAvailable, setLlmAvailable] = useState(false); // Track embedding model availability
-  const [pendingClarificationOptions, setPendingClarificationOptions] = useState(null); // Store clarification options for user selection
+  const [lastPlotContext, setLastPlotContext] = useState(null);
+  const [llmAvailable, setLlmAvailable] = useState(false);
+  const [pendingClarificationOptions, setPendingClarificationOptions] = useState(null);
   const [agentMode, setAgentMode] = useState(false);
   const [localChatMode, setLocalChatMode] = useState(false);
   const [agentProvider, setAgentProvider] = useState(null);
@@ -62,7 +62,7 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
   const [chatModePreference, setChatModePreference] = useState(null);
   const [tissueContext, setTissueContext] = useState('');
   const messagesEndRef = useRef(null);
-  const inputRef = useRef(null); // Reference to the input field
+  const inputRef = useRef(null);
   const annotateClusterResultRef = useRef(null);
   const pendingAgentToolResultsRef = useRef([]);
   const pendingDatasetListRef = useRef(null);
@@ -85,7 +85,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
     'link_peaks',
   ]);
 
-  // Check model availability on mount and periodically
   useEffect(() => {
     const checkModels = () => {
       const embeddingAvailable = isModelLoaded();
@@ -93,10 +92,10 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       const currentChatModel = getCurrentChatModel();
       setLlmAvailable(embeddingAvailable);
       setLocalChatMode(chatLoaded && currentChatModel && !API_CHAT_MODEL_IDS.has(currentChatModel));
+      console.log('Embedding model available:', embeddingAvailable, '| Chat model available:', chatLoaded);
     };
     checkModels();
 
-    // Re-check periodically in case models load
     const interval = setInterval(checkModels, 2000);
     return () => clearInterval(interval);
   }, []);
@@ -106,7 +105,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
   );
 
   useEffect(() => {
-    // Welcome message
     addBotMessage(
       'Hey, I am CellPilot from Humphreys Lab. What can I help you today?'
     );
@@ -116,7 +114,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
     scrollToBottom();
   }, [messages]);
 
-  // Keep focus in chat input after the bot responds so the user can type the next message immediately
   useEffect(() => {
     if (!isProcessing && !isAnalyzing) {
       inputRef.current?.focus();
@@ -249,7 +246,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
     return { promise, cancel: entry.cancel };
   };
 
-  // Expose addBotMessage to parent component via ref
   useImperativeHandle(ref, () => ({
     addBotMessage,
     annotateClusterResult: (...args) => annotateClusterResultRef.current?.(...args),
@@ -257,44 +253,24 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
     handleDatasetListResult,
   }));
 
-  /**
-   * Detect and split chained commands
-   * Smart detection that only splits when "and" or ", then" clearly separates commands,
-   * not when they specify parameters (e.g., multiple genes in one plot)
-   *
-   * Examples that SHOULD be chained:
-   * "rename cluster 15 to Pod, then cluster 16 to EC"
-   * "rename cluster 1 to A and cluster 2 to B"
-   * "rerun umap, then plot gene slc5a2"
-   *
-   * Examples that should NOT be chained:
-   * "plot genes nphs2 and slc5a2" (single command with multiple genes)
-   * "dotplot for slc5a2 and nphs2" (single command with multiple genes)
-   */
   const splitChainedCommands = (text) => {
-    // First, check for patterns that should NEVER be split (parameter lists)
-    // These patterns use "and" to specify multiple parameters, not multiple commands
 
-    // Pattern: "plot genes X and Y" or "plot gene X and Y" (with optional prefix like "can you")
     const multiGenePlotPattern = /(?:^|^can\s+you\s+)(?:plot|show|display)\s+(?:genes?|gene\s+expression)\s+[A-Za-z0-9-]+\s+and\s+[A-Za-z0-9-]+/i;
     if (multiGenePlotPattern.test(text)) {
+      console.log('Detected multi-gene plot (not chaining):', text);
       return [text];
     }
 
-    // Pattern: "dotplot for X and Y" or "dot plot for X and Y"
     const multiGeneDotplotPattern = /(?:^|^can\s+you\s+)(?:dotplot|dot\s+plot)\s+(?:for|of)\s+[A-Za-z0-9-]+\s+and\s+[A-Za-z0-9-]+/i;
     if (multiGeneDotplotPattern.test(text)) {
+      console.log('Detected multi-gene dotplot (not chaining):', text);
       return [text];
     }
 
-    // Pattern: "plot X and Y" (when X and Y look like gene names)
-    // This catches "plot nphs2 and slc5a2" or "can you plot nphs2 and slc5a2"
     const plotAndMatch = text.match(/(?:^|^can\s+you\s+)(?:plot|show|display)\s+([A-Za-z0-9-]+)\s+and\s+([A-Za-z0-9-]+)/i);
     if (plotAndMatch && plotAndMatch[1] && plotAndMatch[2]) {
       const part1 = plotAndMatch[1];
       const part2 = plotAndMatch[2];
-      // Check if both parts look like gene names (alphanumeric, not just numbers, not "cluster")
-      // Gene names are typically alphanumeric and not common words
       const isGeneName = (str) => {
         return str.length >= 2 &&
                /^[A-Za-z0-9-]+$/.test(str) &&
@@ -303,70 +279,51 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       };
 
       if (isGeneName(part1) && isGeneName(part2)) {
+        console.log('Detected multi-gene plot with "and" (not chaining):', text);
         return [text];
       }
     }
 
-    // Now check for patterns that SHOULD be chained
-
-    // Pattern 1: ", then" or ", and then" is almost always chaining
-    // "rerun umap, then plot gene X" or "rerun umap, and then plot gene X"
-    // "rename X to Y, then rename Z to W" or "rename X to Y, then cluster Z to W"
-    // "rename cluster 1 and cluster 3 to PT, then cluster 4 to gEC"
-    const thenPattern = /,\s*(?:and\s+)?then\s+/i;
+    const thenPattern = /(?:,\s*|\s+)(?:and\s+)?then\s+/i;
     if (thenPattern.test(text)) {
-      // Split by ", then" or ", and then"
-      const parts = text.split(/,\s*(?:and\s+)?then\s+/i);
+      const parts = text.split(/(?:,\s*|\s+)(?:and\s+)?then\s+/i);
       if (parts.length > 1) {
-        // Extract verb from first part for reuse
         const firstPart = parts[0].trim();
         const firstVerbMatch = firstPart.match(/(?:^|^can\s+you\s+|please\s+)(rename|change|set|call|label|plot|show|run|execute|find|get|update|create|display|visualize|cluster|analyze|rerun)/i);
         const firstVerb = firstVerbMatch ? firstVerbMatch[1] : null;
 
-        // Process each part and expand multi-cluster renames
         const allCommands = [];
 
         for (let idx = 0; idx < parts.length; idx++) {
           let trimmed = parts[idx].trim();
           const cleaned = trimmed.replace(/^(?:can\s+you\s+|please\s+)/i, '');
 
-          // For parts after the first, add verb if needed
           if (idx > 0 && firstVerb) {
             if (/^cluster\s+\d+\s+(?:to|as)\s+/i.test(cleaned) && ['rename', 'change', 'set', 'call', 'label'].includes(firstVerb)) {
               trimmed = `${firstVerb} ${cleaned}`;
-            } else if (!/^(?:plot|show|rename|change|run|find|get|set|update|create|display|visualize|execute|analyze|rerun)/i.test(cleaned)) {
+            } else if (!/^(?:plot|show|rename|change|run|find|get|set|update|create|display|visualize|execute|analyze|rerun|highlight|isolate|focus|clear|remove|reset|impute|segment|filter|recluster|redo|compare|describe|tell|list|give|make)\b/i.test(cleaned)) {
               if (cleaned.length > 5) {
                 trimmed = `${firstVerb} ${cleaned}`;
               }
             }
           }
 
-          // Check if this part contains multiple clusters being renamed to the same label
-          // Pattern: "rename cluster X and cluster Y to Z" or "rename cluster X, cluster Y, and cluster Z to W"
-          // Also: "rename cluster X and Y to Z" (missing "cluster" before Y)
           const verbMatch = trimmed.match(/(?:^|^can\s+you\s+|please\s+)?(rename|change|set|call|label)/i);
           const verb = verbMatch ? verbMatch[1] : firstVerb || 'rename';
 
-          // Extract the section between verb and "to/as" to find all cluster numbers
           const sectionMatch = trimmed.match(/(?:^|^can\s+you\s+|please\s+)?(?:rename|change|set|call|label)\s+(.+?)\s+(?:to|as)\s+([^,]+?)(?:\s*,\s*then|$)/i);
 
           if (sectionMatch) {
-            const clusterSection = sectionMatch[1]; // e.g., "cluster 1 and 3" or "cluster 1 and cluster 3"
+            const clusterSection = sectionMatch[1];
             const label = sectionMatch[2].trim();
 
-            // Extract all numbers from the cluster section
-            // Handles: "cluster 1 and cluster 3", "cluster 1 and 3", "cluster 1, 2, and 3", etc.
-            // Simple approach: find all numbers in the section (they're all cluster numbers)
             const clusters = [];
 
-            // Match first cluster explicitly
             const firstMatch = clusterSection.match(/^cluster\s+(\d+)/i);
             if (firstMatch) {
               clusters.push(firstMatch[1]);
             }
 
-            // Then find all other numbers (after comma or "and")
-            // Pattern: ", 2" or "and 3" or "and cluster 3"
             const restMatches = clusterSection.matchAll(/(?:,|and)\s+(?:cluster\s+)?(\d+)/gi);
             for (const match of restMatches) {
               if (!clusters.includes(match[1])) {
@@ -374,7 +331,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
               }
             }
 
-            // Fallback: if we didn't find any, try extracting all numbers (less safe but catches edge cases)
             if (clusters.length === 0) {
               const allNumbers = clusterSection.match(/\d+/g);
               if (allNumbers) {
@@ -383,79 +339,65 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
             }
 
             if (clusters.length > 1 && label) {
-              // Expand into separate commands for each cluster
               clusters.forEach(clusterNum => {
                 allCommands.push(`${verb} cluster ${clusterNum} to ${label}`);
               });
+              console.log(`Expanded multi-cluster rename: "${trimmed}" -> ${clusters.length} commands`);
             } else {
-              // Single command
               allCommands.push(trimmed);
             }
           } else {
-            // Single command
             allCommands.push(trimmed);
           }
         }
 
-        // Filter to only valid commands
         const validParts = allCommands.filter(part => {
           const trimmed = part.trim();
           const cleaned = trimmed.replace(/^(?:can\s+you\s+|please\s+)/i, '');
-          return cleaned.length > 5 && /^(?:plot|show|rename|change|run|find|get|set|update|create|display|visualize|execute|cluster|analyze|rerun)/i.test(cleaned);
+          return cleaned.length > 5 && /^(?:plot|show|rename|change|run|find|get|set|update|create|display|visualize|execute|cluster|analyze|rerun|highlight|isolate|focus|clear|remove|reset|impute|segment|filter|recluster|redo|compare|describe|tell|list|give|make)\b/i.test(cleaned);
         });
 
         if (validParts.length > 1) {
+          console.log('Detected chained commands with ", then":', validParts);
           return validParts;
         }
       }
     }
 
-    // Pattern 2: Multiple clusters renamed to the same label (without ", then")
-    // "rename cluster 1 and cluster 3 to PT" or "rename cluster 1 and 3 to PT" or "rename cluster 1, 2, and 3 to PT"
     const multiClusterSameLabelPattern = /(?:^|^can\s+you\s+)(?:rename|change|set|call|label)\s+(?:cluster\s+\d+(?:\s*(?:,|and)\s+(?:cluster\s+)?\d+)+)\s+(?:to|as)\s+[^,]+$/i;
     if (multiClusterSameLabelPattern.test(text)) {
       const verbMatch = text.match(/(?:^|^can\s+you\s+)(rename|change|set|call|label)/i);
       const verb = verbMatch ? verbMatch[1] : 'rename';
 
-      // Extract all cluster numbers: "cluster N" or ", N" / "and N" / ", cluster N" / "and cluster N"
       const clusterMatches = Array.from(text.matchAll(/(?:cluster\s+|(?:,|and)\s+(?:cluster\s+)?)(\d+)/gi));
       const clusters = clusterMatches.map(m => m[1]);
 
-      // Extract the label
       const labelMatch = text.match(/(?:to|as)\s+([^,]+?)$/i);
       const label = labelMatch ? labelMatch[1].trim() : null;
 
       if (clusters.length > 1 && label) {
-        // Expand into separate commands
         const commands = clusters.map(clusterNum => `${verb} cluster ${clusterNum} to ${label}`);
+        console.log('Detected multi-cluster rename to same label:', commands);
         return commands;
       }
     }
 
-    // Pattern 3: Chained rename commands with "and" (different labels)
-    // "rename cluster X to Y and cluster Z to W"
-    // "rename cluster X to Y, and cluster Z to W" (with comma)
-    // "rename cluster 1 and 3 to PT, and cluster 16 to EC" (first part has multiple clusters)
     const chainedRenameAndPattern = /(?:^|^can\s+you\s+)(?:rename|change|set|call|label)\s+.*?\s+(?:to|as)\s+[^,]+?(?:,\s*)?\s+and\s+cluster\s+\d+\s+(?:to|as)\s+/i;
     if (chainedRenameAndPattern.test(text)) {
       const commands = [];
       const verbMatch = text.match(/(?:^|^can\s+you\s+)(rename|change|set|call|label)/i);
       const verb = verbMatch ? verbMatch[1] : 'rename';
 
-      // Split by ", and cluster" or " and cluster" to separate the parts
-      // This handles: "rename cluster 1 and 3 to PT, and cluster 16 to EC"
       const parts = text.split(/(?:,\s*)?\s+and\s+cluster\s+/i);
 
       if (parts.length > 1) {
-        // Process first part, which might have multiple clusters
         const firstPart = parts[0].trim();
         const firstSectionMatch = firstPart.match(/(?:^|^can\s+you\s+)?(?:rename|change|set|call|label)\s+(.+?)\s+(?:to|as)\s+([^,]+?)$/i);
 
         if (firstSectionMatch) {
-          const clusterSection = firstSectionMatch[1]; // e.g., "cluster 1 and 3"
+          const clusterSection = firstSectionMatch[1];
           const label = firstSectionMatch[2].trim();
 
-          // Extract all cluster numbers from first part
           const firstClusters = [];
           const firstMatch = clusterSection.match(/^cluster\s+(\d+)/i);
           if (firstMatch) {
@@ -468,13 +410,11 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
             }
           }
 
-          // Add commands for all clusters in first part
           firstClusters.forEach(clusterNum => {
             commands.push(`${verb} cluster ${clusterNum} to ${label}`);
           });
         }
 
-        // Process remaining parts: each should be "cluster X to Y"
         for (let i = 1; i < parts.length; i++) {
           const part = `cluster ${parts[i].trim()}`;
           const partMatch = part.match(/cluster\s+(\d+)\s+(?:to|as)\s+([^,]+?)$/i);
@@ -485,7 +425,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
           }
         }
       } else {
-        // Fallback: try the original pattern matching approach
         const clusterPattern = /cluster\s+(\d+)\s+(?:to|as)\s+([^,]+?)(?=\s*(?:,\s*)?\s+and\s+cluster|$)/gi;
         let match;
         while ((match = clusterPattern.exec(text)) !== null) {
@@ -496,16 +435,13 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       }
 
       if (commands.length > 1) {
+        console.log('Detected chained rename commands (and):', commands);
         return commands;
       }
     }
 
-    // Pattern 3: "and" between clearly different command types
-    // "rerun umap and plot gene X": these are different actions, so likely chaining.
-    // Be careful: "plot gene X and Y" should NOT be split.
     const differentActionPattern = /\b(?:rerun|run|execute|update|change|set|find|get|create|cluster|analyze)\s+[^and]+?\s+and\s+(?:plot|show|display|visualize|rename|change|set|find|get)/i;
     if (differentActionPattern.test(text) && !multiGenePlotPattern.test(text) && !multiGeneDotplotPattern.test(text)) {
-      // Split by " and " but only if it's between different action types
       const parts = text.split(/\s+and\s+(?=(?:plot|show|display|visualize|rename|change|set|find|get|run|execute|update|create|cluster|analyze))/i);
       if (parts.length > 1) {
         const validParts = parts.filter(part => {
@@ -514,24 +450,20 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         });
 
         if (validParts.length > 1) {
+          console.log('Detected chained commands with "and" (different actions):', validParts);
           return validParts;
         }
       }
     }
 
-    return [text]; // No chaining detected, return single command
+    return [text];
   };
 
-  /**
-   * Check if user input is selecting a clarification option
-   * Returns the selected option index (0-based) or null
-   */
   const parseOptionSelection = (text, options) => {
     if (!options || options.length === 0) return null;
 
     const lower = text.toLowerCase().trim();
 
-    // Patterns: "option 1", "1", "first", "first one", "the first one", etc.
     const patterns = [
       /^option\s+(\d+)$/i,
       /^(\d+)$/,
@@ -551,7 +483,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       if (match) {
         let num = null;
         if (match[1]) {
-          // Try to parse as number
           const parsed = parseInt(match[1]);
           if (!isNaN(parsed)) {
             num = parsed;
@@ -561,7 +492,7 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         }
 
         if (num !== null && num >= 1 && num <= options.length) {
-          return num - 1; // Convert to 0-based index
+          return num - 1;
         }
       }
     }
@@ -1081,7 +1012,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       'info'
     );
 
-    // Phase 1: collect marker data for every cluster (tool calls, no LLM cost)
     const markerResults = [];
     for (let i = 0; i < clusterIds.length; i++) {
       const clusterId = clusterIds[i];
@@ -1128,7 +1058,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       return;
     }
 
-    // Phase 2: single LLM call for all clusters
     addBotMessage(
       `Markers ready. Annotating all ${annotatable.length} clusters using ${AGENT_PROVIDERS[provider]}…`,
       'info'
@@ -1142,7 +1071,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       return;
     }
 
-    // Merge annotation results back onto markerResults
     const results = markerResults.map((mr, idx) => {
       if (mr.error) return { ...mr };
       const ann = annotations.find(a => {
@@ -1154,8 +1082,8 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       if (!ann) return { ...mr, error: 'No annotation returned' };
       return {
         ...mr,
-        cellType: ann.cellType || '-',
-        shortName: ann.shortName || ann.cellType || '-',
+        cellType: ann.cellType || '—',
+        shortName: ann.shortName || ann.cellType || '—',
         confidence: ann.confidence || '',
         markers: ann.markers || '',
         rationale: ann.rationale || '',
@@ -1174,7 +1102,7 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       'success'
     );
 
-    const renames = results.filter(r => !r.error && r.shortName && r.shortName !== '-');
+    const renames = results.filter(r => !r.error && r.shortName && r.shortName !== '—');
     if (renames.length > 0) {
       setPendingAgentConfirmation({ type: 'bulk_rename', renames, userMessage, dataContext });
       addBotMessage('Do you want me to rename the clusters with these cell type names?', 'warning');
@@ -1561,22 +1489,19 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       return;
     }
 
-    // Check if user is selecting a clarification option
     if (pendingClarificationOptions && pendingClarificationOptions.length > 0) {
       const selectedIndex = parseOptionSelection(userMessage, pendingClarificationOptions);
       if (selectedIndex !== null) {
-        // User selected an option; execute it
         const selectedOption = pendingClarificationOptions[selectedIndex];
-        setPendingClarificationOptions(null); // Clear pending options
+        setPendingClarificationOptions(null);
 
         addUserMessage(userMessage);
         addBotMessage(`Selected: ${selectedOption.label || selectedOption.action}`, 'info');
 
-        // Create a router result from the selected option and process it
         const routerResult = {
           action: selectedOption.action,
           params: selectedOption.params || {},
-          confidence: 0.9, // High confidence since user explicitly selected it
+          confidence: 0.9,
           source: 'user_selection',
           explanation: `User selected option ${selectedIndex + 1}`
         };
@@ -1600,7 +1525,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       }
     }
 
-    // Clear pending clarification options if user is entering a new command (not selecting an option)
     if (pendingClarificationOptions) {
       setPendingClarificationOptions(null);
     }
@@ -1676,9 +1600,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
     setIsProcessing(true);
 
     try {
-      // Build data context for routing
-      // When WNN is active, merge all three label maps so intent resolution sees renamed clusters
-      // from any view. RNA labels take lowest priority; WNN and ATAC labels override.
       const mergedClusterLabels = wnnActive
         ? { ...(clusterLabelMap || {}), ...(atacClusterLabelMap || {}), ...(wnnClusterLabelMap || {}) }
         : (clusterLabelMap || {});
@@ -1687,6 +1608,7 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         clusters: clusterContext.default_cluster_ids,
         totalCells: dataInfo?.cells || 0,
         clusterLabels: mergedClusterLabels,
+        geneNames: geneNames || null,
         clusterIdsByView: {
           rna: clusterContext.rna_cluster_ids,
           atac: clusterContext.atac_cluster_ids,
@@ -1787,19 +1709,21 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         return;
       }
 
-      // Step 0: Always check for chained commands first (e.g. "rename X to Y, and cluster Z to W")
-      // This must run before intent routing so we never parse the full string as a single rename
       const chainedCommands = splitChainedCommands(userMessage);
       if (chainedCommands.length > 1) {
-        let chainClusterLabelMap = { ...clusterLabelMap };
+        console.log(`Detected ${chainedCommands.length} chained commands, processing sequentially`);
+        let chainClusterLabelMap = wnnActive && dataInfo?.modality === 'multiome'
+          ? { ...(wnnClusterLabelMap || {}) }
+          : { ...clusterLabelMap };
         for (let i = 0; i < chainedCommands.length; i++) {
           const cmd = chainedCommands[i];
+          console.log(`Processing command ${i + 1}/${chainedCommands.length}:`, cmd);
           const chainDataContext = { ...dataContext, clusterLabels: chainClusterLabelMap, chainClusterLabelMap };
           const cmdRouterResult = await routeIntent(
             cmd,
             chainDataContext,
             {
-              ruleParser: null, // No rule-based parsing
+              ruleParser: null,
               intentClassifier: llmAvailable ? classifyIntent : null,
               minConfidence: 0.3,
               enableClarification: true
@@ -1809,8 +1733,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
           if (cmdRouterResult?.action === 'rename_cluster' && cmdRouterResult?.params?.oldLabel != null && cmdRouterResult?.params?.newLabel != null) {
             const oldKey = String(cmdRouterResult.params.oldLabel).trim();
             const newName = String(cmdRouterResult.params.newLabel).trim();
-            // Always keep the cluster entry with its new name (even if merging)
-            // This allows "find markers for PT" to find cells from ALL merged clusters
             chainClusterLabelMap[oldKey] = newName;
           }
           if (i < chainedCommands.length - 1) {
@@ -1821,8 +1743,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         return;
       }
 
-      // Step 0.5: Check for color map changes first (before intent routing)
-      // This ensures color changes work even if intent model doesn't match perfectly
       const colorDirective = extractColorDirective(userMessage);
       if (colorDirective && (userMessage.toLowerCase().includes('color') || userMessage.toLowerCase().includes('colour'))) {
         const handled = onSetColorMap(colorDirective);
@@ -1838,25 +1758,28 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         }
       }
 
-      // Step 1: Try intent model first (primary mechanism)
       let routerResult = null;
       if (llmAvailable) {
         routerResult = await routeIntent(
           userMessage,
           dataContext,
           {
-            ruleParser: null, // No rule-based parsing
+            ruleParser: null,
             intentClassifier: classifyIntent,
-            minConfidence: 0.3, // Lower threshold to handle more cases
+            minConfidence: 0.3,
             enableClarification: true
           }
         );
       }
 
-      // Step 2: If no intent model or result is NONE/unknown, use chat model
       if (!routerResult || routerResult.action === 'NONE' || routerResult.action === 'unknown') {
+        const nonCommand = routerResult?.params?.nonCommand;
+        if ((nonCommand?.startsWith('unsupported:') || nonCommand === 'offtopic') && routerResult.explanation) {
+          addBotMessage(routerResult.explanation, 'info');
+          setIsProcessing(false);
+          return;
+        }
         if (effectiveLocalChatMode && isChatModelLoaded()) {
-          // Use chat model to intelligently handle the request
           addBotMessage('_Thinking..._', 'info');
           try {
             const chatResponse = await generateChatResponse(userMessage, dataContext);
@@ -1884,7 +1807,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
             return;
           }
         } else {
-          // No chat model available; provide helpful guidance
           if (routerResult && routerResult.explanation) {
             addBotMessage(routerResult.explanation, 'info');
           } else {
@@ -1910,7 +1832,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         }
       }
 
-      // Process the command
       await processSingleCommand(routerResult, userMessage, dataContext);
 
     } catch (error) {
@@ -1920,13 +1841,10 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
     }
   };
 
-  /**
-   * Process a single command from router result
-   */
   const processSingleCommand = async (routerResult, originalMessage, dataContext) => {
     try {
+      console.log('Router result:', JSON.stringify(routerResult, null, 2));
 
-      // ATAC: answer "what genome / reference build?" with dataset genome when available
       const askedAboutGenome = /what\s+(?:genome|reference|build)|genome\s+build|reference\s+genome|which\s+genome|what\s+build|(?:genome|reference)\s+(?:is|does|used)|(?:is|does)\s+this\s+(?:use|have)\s+(?:a\s+)?(?:genome|reference)/i.test(originalMessage || '');
       if ((dataInfo?.modality === 'atac' || dataInfo?.modality === 'multiome') && askedAboutGenome) {
         const genome = dataInfo?.genome;
@@ -1941,12 +1859,10 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         return;
       }
 
-      // Handle NONE/ASK_CLARIFY results (we don't understand or need clarification)
       if (routerResult.action === 'NONE' || routerResult.action === 'ASK_CLARIFY') {
         const fallbackMessage = routerResult.explanation || getUnknownResponseMessage();
 
         if (effectiveLocalChatMode && isChatModelLoaded()) {
-          // When we don't understand: always use chat model to answer the user's question
           addBotMessage('_Thinking..._', 'info');
           try {
             const chatResponse = await generateChatResponse(originalMessage, dataContext);
@@ -1962,7 +1878,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
             addBotMessage(fallbackMessage, 'info');
           }
         } else {
-          // No chat model: show options (if any) or static guidance
           if (routerResult.action === 'ASK_CLARIFY' && routerResult.params.options?.length > 0) {
             const options = routerResult.params.options;
             setPendingClarificationOptions(options);
@@ -1981,13 +1896,11 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         return;
       }
 
-      // Convert router result to command format
       let command = {
         action: routerResult.action,
         params: routerResult.params || {}
       };
 
-      // Default gene visualization is scatter (UMAP). Only use dotplot/violin when user says so explicitly.
       const lowerMessage = (originalMessage || '').toLowerCase();
       const askedForDotplot = lowerMessage.includes('dotplot') || lowerMessage.includes('dot plot');
       const askedForViolin = lowerMessage.includes('violin');
@@ -1998,7 +1911,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         if (singleGene) {
           command = { action: 'plot_gene_expression', params: { gene: singleGene, colorMap: command.params?.colorMap, showPeakView: false } };
         }
-        // multi-gene "plot X and Y" without "dotplot" → show scatter for first gene (default)
         if (Array.isArray(genes) && genes.length > 1 && !singleGene) {
           command = { action: 'plot_gene_expression', params: { gene: genes[0], colorMap: command.params?.colorMap, showPeakView: false } };
         }
@@ -2010,10 +1922,8 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         }
       }
 
+      console.log(`Executing ${command.action} with confidence ${routerResult.confidence.toFixed(2)} (source: ${routerResult.source})`);
 
-      // Multiome modality disambiguation: for actions that apply to either RNA or ATAC,
-      // check whether the user specified which modality. If not, ask them to choose.
-      // BANKSY region segmentation: requires spatial data
       if (command.action === 'region_segmentation') {
         const isSpatial = dataInfo?.modality === 'spatial' ||
           dataInfo?.modality === 'visium' ||
@@ -2049,7 +1959,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         return;
       }
 
-      // SpaGE gene imputation: only for Xenium, MERFISH, CosMX (and their integrations)
       if (command.action === 'impute_gene') {
         const allowedFormats = ['10X Xenium', 'MERFISH', 'CosMX'];
         const allowedModalities = [
@@ -2068,7 +1977,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         }
         const geneName = command.params?.gene;
         const geneLabel = geneName ? `**${geneName}**` : 'the requested gene(s)';
-        // Add message with a button to select scRNA reference
         setMessages(prev => [...prev, {
           type: 'bot',
           text: `To impute ${geneLabel} using **SpaGE**, I need a scRNA-seq reference dataset.\n\nThis should be the same type of scRNA-seq data you would load into the scRNA module, either a **10x HDF5 (.h5)** file or a **10x folder** containing matrix.mtx + features.tsv + barcodes.tsv.\n\nPlease click the button below to select the scRNA-seq reference path:`,
@@ -2080,7 +1988,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         return;
       }
 
-      // WNN integration: no modality disambiguation needed, it always uses both
       if (command.action === 'wnn_integrate') {
         if (dataInfo?.modality !== 'multiome') {
           addBotMessage('WNN integration requires multiome (RNA + ATAC) data. Please load a multiome dataset first.', 'warning');
@@ -2111,35 +2018,35 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
           const mentionsAtac = /\batac\b|\bchromatin\b|\bpeak/.test(lowerMsg);
           const mentionsLsi = /\blsi\b/.test(lowerMsg);
 
-          // In WNN mode, rename_cluster always needs explicit disambiguation, the three cluster
-          // sets are independent so we never auto-assign even if user mentions "RNA"/"ATAC".
-          const forcePrompt = wnnActive && command.action === 'rename_cluster';
+          const renameWnn = wnnActive && command.action === 'rename_cluster';
+          const viewsExistingUmaps = command.action === 'cluster_and_visualize' &&
+            rnaClusters?.length > 0 && atacClusters?.length > 0;
 
-          if (!forcePrompt && mentionsRna && !mentionsAtac) {
+          if (renameWnn) {
+            command.params.multiomeTarget = 'wnn';
+          } else if (viewsExistingUmaps && !(mentionsAtac && !mentionsRna)) {
             command.params.multiomeTarget = 'rna';
-          } else if (!forcePrompt && mentionsAtac && !mentionsRna) {
+          } else if (mentionsRna && !mentionsAtac) {
+            command.params.multiomeTarget = 'rna';
+          } else if (mentionsAtac && !mentionsRna) {
             command.params.multiomeTarget = 'atac';
             if (mentionsLsi) command.params.atacMethod = 'lsi';
           } else {
-            // Ambiguous (or forced prompt in WNN rename) – present options to the user
             const isFullPipeline = command.action === 'force_reanalysis';
             const isClusterAction = clusterActions.includes(command.action);
             const options = [
               { label: 'RNA (Gene Expression)', action: command.action, params: { ...command.params, multiomeTarget: 'rna', ...(mentionsLsi ? { atacMethod: 'lsi' } : {}) } },
               { label: 'ATAC (Chromatin Accessibility)', action: command.action, params: { ...command.params, multiomeTarget: 'atac', ...(mentionsLsi ? { atacMethod: 'lsi' } : {}) } },
             ];
-            // Add WNN option for cluster actions (rename, find markers, etc.) when WNN 3-panel is active
             if (isClusterAction && wnnActive) {
               options.push({ label: 'WNN (Integrated)', action: command.action, params: { ...command.params, multiomeTarget: 'wnn' } });
             }
             setPendingClarificationOptions(options);
             const optionsText = options.map((opt, idx) => `${idx + 1}. ${opt.label}`).join('\n');
             const numOptions = options.length;
-            const message = forcePrompt
-              ? `Which cluster set do you want to rename? Each view has its own independent cluster labels.\n\n**Options:**\n${optionsText}\n\nPlease select an option by number (e.g., "1", "2", or "3").`
-              : isFullPipeline
-                ? `This is multiome data. Which dataset do you want to run the full analysis on (cell filtering → normalization → UMAP → clustering)?\n\nIf cells are filtered during reanalysis, the other modality will be filtered to the same cells so **both RNA and ATAC views always show the same cells**.\n\n**Options:**\n${optionsText}\n\nPlease select an option by number (e.g., "1" or "2").`
-                : `This is multiome data with separate RNA and ATAC analyses${wnnActive && isClusterAction ? ' and a WNN integrated view' : ''}. Which modality do you mean?\n\n**Options:**\n${optionsText}\n\nPlease select an option by number (e.g., "1"${numOptions > 2 ? ` or "${numOptions}"` : ' or "2"'}).`;
+            const message = isFullPipeline
+              ? `This is multiome data. Which dataset do you want to run the full analysis on (cell filtering → normalization → UMAP → clustering)?\n\nIf cells are filtered during reanalysis, the other modality will be filtered to the same cells so **both RNA and ATAC views always show the same cells**.\n\n**Options:**\n${optionsText}\n\nPlease select an option by number (e.g., "1" or "2").`
+              : `This is multiome data with separate RNA and ATAC analyses${wnnActive && isClusterAction ? ' and a WNN integrated view' : ''}. Which modality do you mean?\n\n**Options:**\n${optionsText}\n\nPlease select an option by number (e.g., "1"${numOptions > 2 ? ` or "${numOptions}"` : ' or "2"'}).`;
             addBotMessage(message, 'info');
             setIsProcessing(false);
             return;
@@ -2147,8 +2054,8 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         }
       }
 
-      // Handle chat_question: route directly to chat model
       if (command.action === 'chat_question') {
+        console.log('General question detected, routing to chat model...');
 
         if (effectiveLocalChatMode && isChatModelLoaded()) {
           addBotMessage('_Thinking..._', 'info');
@@ -2156,7 +2063,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
           try {
             const chatResponse = await generateChatResponse(command.params.query || originalMessage, dataContext);
 
-            // Remove "Thinking..." message
             setMessages(prev => prev.slice(0, -1));
 
             if (chatResponse) {
@@ -2168,7 +2074,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
             console.warn('Chat model response failed:', chatError);
             setMessages(prev => prev.slice(0, -1));
 
-            // Show user-friendly error message for API errors
             let errorMessage = getUnknownResponseMessage();
             if (chatError.message) {
               if (chatError.message.includes('quota') || chatError.message.includes('Quota exceeded')) {
@@ -2189,27 +2094,24 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
             addBotMessage(errorMessage, 'warning');
           }
         } else {
-          // No chat model available; explain this is outside CellPilot's scope
           addBotMessage(
             "That's a great question about biology, but it's outside what I can help with directly. " +
             "I'm designed for single-cell and spatial transcriptomics data analysis tasks like plotting genes, finding markers, and clustering. " +
-            "For general biology questions, I recommend checking resources like GeneCards, UniProt, or asking Claude/ChatGPT.\n\n" +
+            "For general biology questions, I recommend checking resources like GeneCards, UniProt, or asking an AI assistant.\n\n" +
             "**Tip:** Configure a Chat Model (ChatGPT/Gemini API or local model in the Model section) to get conversational responses for general questions!",
             'info'
           );
         }
 
-        return; // Don't set setIsProcessing(false) here; let caller handle it
+        return;
       }
 
-      // Step 2a: If detected as gene_info request, do BOTH: plot the gene AND get chat explanation
       if (command.action === 'gene_info') {
         const geneName = command.params.gene;
+        console.log('Gene info request - plotting gene and getting explanation for:', geneName);
 
-        // First, plot the gene expression
         addBotMessage(`Plotting expression for gene ${geneName} and getting information...`, 'info');
 
-        // Execute the plot command
         const plotCommand = {
           action: 'plot_gene_expression',
           params: { gene: geneName }
@@ -2220,14 +2122,12 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
           addBotMessage(`Error plotting gene: ${plotResult.error}`, 'danger');
         }
 
-        // Update last plot context
         setLastPlotContext({
           action: 'plot_gene_expression',
           gene: geneName,
           timestamp: new Date(),
         });
 
-        // Now get chat explanation if chat model is loaded
         if (effectiveLocalChatMode && isChatModelLoaded()) {
           try {
             const dataContext = {
@@ -2236,7 +2136,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
               clusterLabels: clusterLabelMap || {},
             };
 
-            // Ask specifically about the gene
             const geneQuery = `What is the gene ${geneName}? What is its function and what cell types typically express it?`;
             const chatResponse = await generateChatResponse(geneQuery, dataContext);
 
@@ -2245,7 +2144,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
             }
           } catch (chatError) {
             console.warn('Chat explanation failed:', chatError);
-            // Still succeeded with plot, just no explanation
             addBotMessage(
               `Gene ${geneName} plotted successfully. Configure a Chat Model (ChatGPT/Gemini API or local model) for gene function information, ` +
               `or check GeneCards (genecards.org) for details about this gene.`,
@@ -2253,7 +2151,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
             );
           }
         } else {
-          // No chat model: suggest resources
           addBotMessage(
             `Gene ${geneName} plotted on UMAP. For information about this gene's function, ` +
             `configure a Chat Model (ChatGPT/Gemini API or local model) or check resources like GeneCards (genecards.org) or NCBI Gene.`,
@@ -2261,30 +2158,29 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
           );
         }
 
-        return; // Don't set setIsProcessing(false) here; let caller handle it
+        return;
       }
 
-      // Handle cluster name resolution for router results
       const resolveLabelMap = dataContext?.chainClusterLabelMap ?? clusterLabelMap;
       if (command.params.cluster !== undefined && resolveLabelMap) {
         const clusterParam = command.params.cluster;
-        // If it's a string label, try to resolve to cluster ID(s)
         if (typeof clusterParam === 'string' && isNaN(parseInt(clusterParam))) {
-          // Find ALL cluster IDs that have been renamed to this label (for merged clusters)
           const matchingIds = Object.keys(resolveLabelMap).filter(
             key => resolveLabelMap[key].toLowerCase() === clusterParam.toLowerCase()
           );
 
           if (matchingIds.length > 1) {
-            // Multiple clusters merged to the same label: pass as array
             command.params.clusters = matchingIds.map(id => parseInt(id));
-            command.params.cluster = parseInt(matchingIds[0]); // Keep single for backward compatibility
+            command.params.cluster = parseInt(matchingIds[0]);
+            console.log(`Router: Resolved merged cluster label "${clusterParam}" to IDs [${matchingIds.join(', ')}]`);
           } else if (matchingIds.length === 1) {
             command.params.cluster = parseInt(matchingIds[0]);
+            console.log(`Router: Resolved cluster label "${clusterParam}" to ID ${matchingIds[0]}`);
           }
         }
       }
 
+      console.log('Final parsed command:', JSON.stringify(command, null, 2));
 
       if (command.action === 'set_colormap') {
         const map = command.params?.colorMap;
@@ -2295,7 +2191,7 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         } else {
           addBotMessage('I do not have a recent gene expression plot to recolor. Please plot a gene first.', 'warning');
         }
-        return; // Don't set setIsProcessing(false) here; let caller handle it
+        return;
       }
 
       if ((command.action === 'highlight_rna_cluster_on_atac' || command.action === 'clear_rna_highlight_on_atac') && dataInfo?.modality === 'multiome' && onHighlightRnaClusterOnAtac) {
@@ -2362,7 +2258,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
           ? `Plotting peak accessibility for ${command.params.gene}${suffix}…`
           : `Plotting expression for gene ${command.params.gene}${suffix}…`, 'info');
 
-        // Update last plot context
         setLastPlotContext({
           action: 'plot_gene_expression',
           gene: command.params.gene,
@@ -2396,6 +2291,9 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         }
         const peakIdRegex = /^chr\w+:\d+-\d+$/i;
         const allPeaks = Array.isArray(geneList) && geneList.length && geneList.every(g => peakIdRegex.test(g.trim()));
+        console.log('====== CHATBOT: Dot plot command ======');
+        console.log('Command:', command);
+        console.log('Genes:', geneList);
         addBotMessage(allPeaks
           ? `Generating dot plot for peaks ${label}…`
           : `Generating dot plot for ${label}…`, 'info');
@@ -2471,13 +2369,10 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         addBotMessage(`Renaming cluster ${command.params?.oldLabel} to "${command.params?.newLabel}"…`, 'info');
       }
 
-      // For chained renames, pass the accumulated cluster label map so merge detection
-      // uses it instead of App state (which may not have updated yet from the previous rename).
       if (command.action === 'rename_cluster' && dataContext?.chainClusterLabelMap) {
         command._clusterLabelMapForMerge = dataContext.chainClusterLabelMap;
       }
 
-      // Handle spatial-specific commands
       if (command.action === 'show_spatial' || command.action === 'spatial_view') {
         addBotMessage('Switching to spatial tissue view…', 'info');
       }
@@ -2504,7 +2399,6 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         }
       }
 
-      // TF motif analysis: inform user which cluster set is used (always RNA)
       if (command.action === 'tf_motif_analysis') {
         const clusterParam = command.params?.cluster;
         const displayName = clusterLabelMap?.[String(clusterParam)] ?? clusterParam;
@@ -2517,34 +2411,28 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
         );
       }
 
-      // If user said "LSI" and command targets ATAC, use TF-IDF/LSI backup pipeline
       const msgLower = (originalMessage || '').toLowerCase();
       if (/\blsi\b/.test(msgLower) && (command.params?.multiomeTarget === 'atac' || dataInfo?.modality === 'atac')) {
         if (!command.params) command.params = {};
         command.params.atacMethod = 'lsi';
       }
 
-      // Execute analysis
+      console.log('====== CHATBOT: Executing command ======');
+      console.log('Command:', JSON.stringify(command, null, 2));
       const result = onAnalysisRequest(command) || {};
 
       if (result.error) {
         addBotMessage(`Error: ${result.error}`, 'danger');
-        setIsProcessing(false); // Reset processing state on error
+        setIsProcessing(false);
         return { success: false, error: result.error, command };
       } else {
-        // For async operations (like plot_gene_expression), the worker will send results later
-        // Reset processing state immediately after sending the command
-        // The isAnalyzing state (from App.jsx) will track the actual analysis progress
         setIsProcessing(false);
 
         if (result.message) {
-          // Only add message if we didn't already show one for this action
-          // (plot_gene_expression and deg_between_samples already show a message above)
           if (command.action !== 'plot_gene_expression' && command.action !== 'deg_between_samples' && command.action !== 'plot_cell_fraction' && command.action !== 'plot_gene_dotplot' && command.action !== 'plot_gene_violin' && command.action !== 'tf_motif_analysis' && command.action !== 'spatial_region_markers' && command.action !== 'spatial_cell_interaction' && command.action !== 'cluster_info' && routerResult.source !== 'agent_silent') {
             addBotMessage(result.message || 'Analysis started...', 'success');
           }
         }
-        // Store action context for follow-up questions
         setLastActionContext(command.action, command.params);
         return { success: true, command, message: result.message || null };
       }
@@ -2552,12 +2440,9 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
     } catch (error) {
       console.error('Error processing message:', error);
       addBotMessage(`Sorry, I encountered an error: ${error.message}`, 'danger');
-      setIsProcessing(false); // Always reset processing state on error
-      throw error; // Re-throw so caller can handle it
+      setIsProcessing(false);
+      throw error;
     } finally {
-      // Ensure processing state is reset even if something goes wrong
-      // For async operations, we reset it after sending the command above
-      // This is a safety net
     }
   };
 
@@ -2605,16 +2490,12 @@ const ChatBot = forwardRef(({ dataLoaded, dataInfo, selectedModel, clusterLabelM
       }
     }
 
-    // Try multiple patterns to extract custom colors
-    // Pattern 1: "color to X Y Z" or "colors to X Y Z"
     let customMatch = text.match(/colou?rs?(?:\s?bar|\s?map)?(?:\s+use|\s+with|\s+to)?\s+([a-zA-Z,\s]+)/i);
 
-    // Pattern 2: "change color to X Y Z" or "set color to X Y Z"
     if (!customMatch) {
       customMatch = text.match(/(?:change|set|use|switch|update)\s+colou?rs?(?:\s?bar|\s?map)?\s+to\s+([a-zA-Z,\s]+)/i);
     }
 
-    // Pattern 3: "color X Y Z" (without "to")
     if (!customMatch) {
       customMatch = text.match(/colou?rs?(?:\s?bar|\s?map)?\s+([a-zA-Z,\s]+?)(?:\s+on|\s+for|\s+to|\s+with|$)/i);
     }
@@ -2647,10 +2528,6 @@ const describeColorSelection = (map) => {
   return null;
 };
 
-  /**
-   * Handle scRNA reference path selection for SpaGE imputation.
-   * Opens the Electron path selector, then fires the impute_gene analysis request.
-   */
   const handleSelectScrnaReference = async (imputeAction) => {
     if (!window.electron?.selectPath) {
       addBotMessage('File selection is not available in this environment.', 'danger');
@@ -2658,7 +2535,7 @@ const describeColorSelection = (map) => {
     }
     try {
       const scrnaPath = await window.electron.selectPath();
-      if (!scrnaPath) return; // user cancelled
+      if (!scrnaPath) return;
       addBotMessage(`scRNA-seq reference selected: \`${scrnaPath}\`\n\nRunning SpaGE imputation, this may take a minute...`, 'info');
       const result = onAnalysisRequest({
         action: 'impute_gene',

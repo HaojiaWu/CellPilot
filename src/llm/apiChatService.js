@@ -1,12 +1,3 @@
-/**
- * API Chat Service: Integration with ChatGPT, Claude, Gemini, and Groq APIs
- * 
- * This service provides chat functionality using external APIs instead of
- * local models, reducing resource requirements on the user's machine.
- */
-
-// API keys are intentionally kept in memory only.
-// Do not persist user-provided API keys in localStorage/sessionStorage.
 const API_CONFIG_KEY = 'cellpilot_api_config';
 const EMPTY_API_CONFIG = {
   chatgpt: { apiKey: '', enabled: false, model: '' },
@@ -23,7 +14,6 @@ let runtimeApiConfig = {
   openrouter: { ...EMPTY_API_CONFIG.openrouter }
 };
 
-// Default API endpoints
 const CHATGPT_API_URL = 'https://api.openai.com/v1/chat/completions';
 const CHATGPT_RESPONSES_API_URL = 'https://api.openai.com/v1/responses';
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -59,16 +49,17 @@ export const PROVIDER_MODEL_CATALOG = {
     ]
   },
   claude: {
-    defaultModel: 'claude-opus-4-1-20250805',
+    defaultModel: 'claude-opus-5-5',
     docsUrl: 'https://docs.anthropic.com/en/docs/about-claude/models/all-models',
     fallbackModels: [
-      { id: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1' },
-      { id: 'claude-opus-4-20250514', label: 'Claude Opus 4' },
-      { id: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
-      { id: 'claude-3-7-sonnet-20250219', label: 'Claude Sonnet 3.7' },
-      { id: 'claude-3-5-sonnet-20241022', label: 'Claude Sonnet 3.5 v2' },
-      { id: 'claude-3-5-haiku-20241022', label: 'Claude Haiku 3.5' },
-      { id: 'claude-3-haiku-20240307', label: 'Claude Haiku 3' }
+      { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
+      { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
+      { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+      { id: 'claude-fable-5-1', label: 'Claude Fable 5.1' },
+      { id: 'claude-opus-5', label: 'Claude Opus 5' },
+      { id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
+      { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' }
     ]
   },
   gemini: {
@@ -164,9 +155,6 @@ function filterModelsForProvider(provider, models) {
   return normalized;
 }
 
-/**
- * Get API configuration for the current app session.
- */
 export function getApiConfig() {
   try {
     localStorage.removeItem(API_CONFIG_KEY);
@@ -176,9 +164,6 @@ export function getApiConfig() {
   return runtimeApiConfig;
 }
 
-/**
- * Save API configuration for the current app session only.
- */
 export function saveApiConfig(config) {
   runtimeApiConfig = {
     chatgpt: { ...EMPTY_API_CONFIG.chatgpt, ...(config.chatgpt || {}) },
@@ -195,9 +180,6 @@ export function saveApiConfig(config) {
   return true;
 }
 
-/**
- * Set API key for a specific provider
- */
 export function setApiKey(provider, apiKey) {
   const config = getApiConfig();
   config[provider] = {
@@ -228,7 +210,7 @@ export function getFallbackProviderModels(provider) {
 }
 
 export function isOpenAINewChatModel(model) {
-  return /^(gpt-5|o[1-9])/i.test(String(model || ''));
+  return /^(gpt-([5-9]|\d{2,})|o[1-9])/i.test(String(model || ''));
 }
 
 export function isOpenAIResponsesPreferredModel(model) {
@@ -243,6 +225,16 @@ export function getOpenAITokenParams(model, maxTokens) {
 
 export function getOpenAITemperatureParams(model, temperature) {
   return isOpenAINewChatModel(model) ? {} : { temperature };
+}
+
+export function claudeAcceptsTemperature(model) {
+  const id = String(model || '').toLowerCase().trim();
+  if (/^claude-3/.test(id)) return true;
+  return /^claude-(opus|sonnet|haiku)-4(-[0-6])?(-\d{8})?$/.test(id);
+}
+
+export function getClaudeTemperatureParams(model, temperature) {
+  return claudeAcceptsTemperature(model) ? { temperature } : {};
 }
 
 export function getOpenAIReasoningEffort(model) {
@@ -338,18 +330,11 @@ export async function fetchProviderModels(provider, apiKey) {
   return formatProviderModelOptions(provider, modelOptions);
 }
 
-/**
- * Check if an API provider is configured and enabled
- */
 export function isApiConfigured(provider) {
   const config = getApiConfig();
   return config[provider]?.enabled && !!config[provider]?.apiKey;
 }
 
-/**
- * Generate chat response using ChatGPT API
- * Uses models from your pricing table: gpt-5-mini (cost-efficient) or gpt-5-nano (cheapest)
- */
 export async function generateChatGPTResponse(userMessage, context = {}) {
   const config = getApiConfig();
   const apiKey = config.chatgpt?.apiKey;
@@ -359,13 +344,8 @@ export async function generateChatGPTResponse(userMessage, context = {}) {
   }
 
   try {
-    // Build system prompt
     const systemPrompt = buildSystemPrompt(context);
 
-    // Try models from your pricing table in order of cost efficiency
-    // gpt-5-nano: $0.05/$0.40 per 1M tokens (cheapest)
-    // gpt-5-mini: $0.25/$2.00 per 1M tokens (good balance)
-    // gpt-5-chat-latest: $1.25/$10.00 per 1M tokens (better quality)
     const selectedModel = getSelectedApiModel('chatgpt');
     const modelNames = [selectedModel, 'gpt-5-nano', 'gpt-5-mini', 'gpt-5.2-chat-latest', 'gpt-4o']
       .filter(Boolean)
@@ -377,6 +357,7 @@ export async function generateChatGPTResponse(userMessage, context = {}) {
         if (isOpenAIResponsesPreferredModel(modelName)) {
           const text = await generateOpenAIResponsesText(apiKey, modelName, systemPrompt, userMessage, 500);
           if (text) {
+            console.log(`Successfully used ChatGPT model via Responses API: ${modelName}`);
             return text;
           }
           throw new Error('No response from ChatGPT API');
@@ -394,7 +375,7 @@ export async function generateChatGPTResponse(userMessage, context = {}) {
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userMessage }
             ],
-            ...getOpenAITokenParams(modelName, 500),
+            ...getOpenAITokenParams(modelName, 5000),
             ...getOpenAITemperatureParams(modelName, 0.7),
             ...getOpenAIChatReasoningParams(modelName)
           })
@@ -404,9 +385,9 @@ export async function generateChatGPTResponse(userMessage, context = {}) {
           const errorData = await response.json().catch(() => ({}));
           const errorMsg = errorData.error?.message || `API error: ${response.status}`;
           
-          // If model not found, try next model
           if ((errorMsg.includes('not found') || errorMsg.includes('does not exist') || response.status === 404) && 
               modelNames.indexOf(modelName) < modelNames.length - 1) {
+            console.log(`Model ${modelName} not found, trying next model...`);
             lastError = new Error(errorMsg);
             continue;
           }
@@ -418,22 +399,20 @@ export async function generateChatGPTResponse(userMessage, context = {}) {
         const text = data.choices[0]?.message?.content || null;
         
         if (text) {
+          console.log(`Successfully used ChatGPT model: ${modelName}`);
           return text;
         }
         
         throw new Error('No response from ChatGPT API');
       } catch (error) {
-        // If this is the last model, throw the error
         if (modelName === modelNames[modelNames.length - 1]) {
           throw error;
         }
-        // Otherwise, try next model
         lastError = error;
         continue;
       }
     }
 
-    // If we get here, all models failed
     throw lastError || new Error('All ChatGPT models failed');
 
   } catch (error) {
@@ -442,9 +421,6 @@ export async function generateChatGPTResponse(userMessage, context = {}) {
   }
 }
 
-/**
- * Generate chat response using Claude API
- */
 export async function generateClaudeResponse(userMessage, context = {}) {
   const config = getApiConfig();
   const apiKey = config.claude?.apiKey;
@@ -456,7 +432,7 @@ export async function generateClaudeResponse(userMessage, context = {}) {
   try {
     const systemPrompt = buildSystemPrompt(context);
     const selectedModel = getSelectedApiModel('claude');
-    const modelNames = [selectedModel, 'claude-sonnet-4-20250514', 'claude-3-7-sonnet-20250219', 'claude-3-5-sonnet-latest']
+    const modelNames = [selectedModel, 'claude-opus-5-5', 'claude-sonnet-5-5']
       .filter(Boolean)
       .filter((model, index, all) => all.indexOf(model) === index);
     let lastError = null;
@@ -477,8 +453,8 @@ export async function generateClaudeResponse(userMessage, context = {}) {
             messages: [
               { role: 'user', content: userMessage }
             ],
-            max_tokens: 500,
-            temperature: 0.7
+            max_tokens: 5000,
+            ...getClaudeTemperatureParams(modelName, 0.7)
           })
         });
 
@@ -501,6 +477,7 @@ export async function generateClaudeResponse(userMessage, context = {}) {
           .trim();
 
         if (text) {
+          console.log(`Successfully used Claude model: ${modelName}`);
           return text;
         }
 
@@ -520,9 +497,6 @@ export async function generateClaudeResponse(userMessage, context = {}) {
   }
 }
 
-/**
- * Generate chat response using Gemini API
- */
 export async function generateGeminiResponse(userMessage, context = {}) {
   const config = getApiConfig();
   const apiKey = config.gemini?.apiKey;
@@ -532,20 +506,17 @@ export async function generateGeminiResponse(userMessage, context = {}) {
   }
 
   try {
-    // Build system prompt
     const systemPrompt = buildSystemPrompt(context);
 
-    // Try available Gemini models in order of preference
-    // Based on available models in Google Cloud Console
     const selectedModel = getSelectedApiModel('gemini');
     const modelNames = [
       selectedModel,
-      'gemini-2.5-flash',      // Available in your project (5 RPM, 250K TPM, 20 RPD)
-      'gemini-2.5-flash-lite', // Available in your project (10 RPM, 250K TPM, 20 RPD)
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
       'gemini-3-flash-preview',
-      'gemini-1.5-flash',      // Fallback option
-      'gemini-1.5-pro',        // Fallback option
-      'gemini-pro'             // Fallback option
+      'gemini-1.5-flash',
+      'gemini-1.5-pro',
+      'gemini-pro'
     ].filter(Boolean).filter((model, index, all) => all.indexOf(model) === index);
     let lastError = null;
 
@@ -565,7 +536,7 @@ export async function generateGeminiResponse(userMessage, context = {}) {
               ]
             }],
             generationConfig: {
-              maxOutputTokens: 500,
+              maxOutputTokens: 5000,
               temperature: 0.7
             }
           })
@@ -575,12 +546,10 @@ export async function generateGeminiResponse(userMessage, context = {}) {
           const errorData = await response.json().catch(() => ({}));
           const errorMsg = errorData.error?.message || `API error: ${response.status}`;
           
-          // Handle quota exceeded: extract retry time if provided
           if (errorMsg.includes('Quota exceeded') || errorMsg.includes('quota') || errorMsg.includes('limit: 0')) {
             const retryMatch = errorMsg.match(/Please retry in ([\d.]+)s/);
-            const retrySeconds = retryMatch ? parseFloat(retryMatch[1]) : 60; // Default to 60s if not specified
+            const retrySeconds = retryMatch ? parseFloat(retryMatch[1]) : 60;
             
-            // If this is the last model, throw a user-friendly error
             if (modelName === modelNames[modelNames.length - 1]) {
               throw new Error(
                 `**Gemini API Quota Exceeded**\n\n` +
@@ -593,25 +562,24 @@ export async function generateGeminiResponse(userMessage, context = {}) {
               );
             }
             
-            // Otherwise, wait and try next model
+            console.log(`Quota exceeded for ${modelName}, waiting ${Math.ceil(retrySeconds)}s before trying next model...`);
             await new Promise(resolve => setTimeout(resolve, Math.ceil(retrySeconds * 1000)));
             lastError = new Error(`Quota exceeded on ${modelName}`);
             continue;
           }
           
-          // Handle rate limiting (429): wait a bit and retry the same model
           if (response.status === 429) {
+            console.log(`Rate limit hit for ${modelName}, waiting 2 seconds before trying next model...`);
             await new Promise(resolve => setTimeout(resolve, 2000));
-            // Try next model instead of retrying
             if (modelNames.indexOf(modelName) < modelNames.length - 1) {
               lastError = new Error(`Rate limited on ${modelName}, trying next model...`);
               continue;
             }
           }
           
-          // If model not found, try next model
           if ((errorMsg.includes('not found') || response.status === 404) && 
               modelNames.indexOf(modelName) < modelNames.length - 1) {
+            console.log(`Model ${modelName} not found, trying next model...`);
             lastError = new Error(errorMsg);
             continue;
           }
@@ -626,19 +594,17 @@ export async function generateGeminiResponse(userMessage, context = {}) {
           throw new Error('No response from Gemini API');
         }
         
+        console.log(`Successfully used Gemini model: ${modelName}`);
         return text;
       } catch (error) {
-        // If this is the last model, throw the error
         if (modelName === modelNames[modelNames.length - 1]) {
           throw error;
         }
-        // Otherwise, try next model
         lastError = error;
         continue;
       }
     }
 
-    // If we get here, all models failed
     throw lastError || new Error('All Gemini models failed');
 
   } catch (error) {
@@ -647,9 +613,6 @@ export async function generateGeminiResponse(userMessage, context = {}) {
   }
 }
 
-/**
- * Generate chat response using Groq API
- */
 export async function generateGroqResponse(userMessage, context = {}) {
   const config = getApiConfig();
   const apiKey = config.groq?.apiKey;
@@ -672,7 +635,7 @@ export async function generateGroqResponse(userMessage, context = {}) {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage }
         ],
-        max_tokens: 500,
+        max_tokens: 5000,
         temperature: 0.7
       })
     });
@@ -694,9 +657,6 @@ export async function generateGroqResponse(userMessage, context = {}) {
   }
 }
 
-/**
- * Generate chat response using OpenRouter's OpenAI-compatible API.
- */
 export async function generateOpenRouterResponse(userMessage, context = {}) {
   const config = getApiConfig();
   const apiKey = config.openrouter?.apiKey;
@@ -719,7 +679,7 @@ export async function generateOpenRouterResponse(userMessage, context = {}) {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage }
         ],
-        max_tokens: 500,
+        max_tokens: 5000,
         temperature: 0.7
       })
     });
@@ -741,10 +701,6 @@ export async function generateOpenRouterResponse(userMessage, context = {}) {
   }
 }
 
-/**
- * Build system prompt with context
- * Note: When using API models (ChatGPT/Gemini), the assistant CAN answer general biology questions
- */
 function buildSystemPrompt(context = {}) {
   let prompt = `You are CellPilot, an AI assistant specialized in single-cell RNA sequencing (scRNA-seq) analysis. You help researchers analyze their single-cell data.
 
@@ -769,7 +725,6 @@ For questions about scRNA-seq analysis tasks (plotting, clustering, finding mark
 
 Keep responses concise (2-4 sentences for simple questions, up to a paragraph for complex topics) and helpful.`;
 
-  // Add data context if available
   if (context.clusters && context.clusters.length > 0) {
     prompt += `\n\nCurrent data context: The user has ${context.totalCells || 'unknown'} cells in ${context.clusters.length} clusters.`;
     if (context.clusterLabels && Object.keys(context.clusterLabels).length > 0) {
@@ -783,9 +738,6 @@ Keep responses concise (2-4 sentences for simple questions, up to a paragraph fo
   return prompt;
 }
 
-/**
- * Generate chat response using the specified API provider
- */
 export async function generateApiChatResponse(provider, userMessage, context = {}) {
   if (provider === 'chatgpt') {
     return await generateChatGPTResponse(userMessage, context);
@@ -802,9 +754,6 @@ export async function generateApiChatResponse(provider, userMessage, context = {
   }
 }
 
-/**
- * Test API connection
- */
 export async function testApiConnection(provider) {
   try {
     const testMessage = 'Hello';

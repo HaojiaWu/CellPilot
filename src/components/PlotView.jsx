@@ -188,7 +188,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
       if (!artifact) return null;
       const viewName = activePlot.viewName;
       if (artifact.integrationViews && artifact.viewData && (artifact.type === 'gene_violin' || artifact.type === 'gene_dotplot')) {
-        // Per-sample view: return only that sample's data
         if (viewName) {
           const viewData = artifact.viewData[viewName];
           if (!viewData) return null;
@@ -218,14 +217,11 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
           }
         }
 
-        // Integrated UMAP view (no viewName): merge all samples into one combined result
         const allViewData = Object.values(artifact.viewData);
         if (artifact.type === 'gene_violin') {
-          // Collect all unique cluster IDs across all samples
           const allClusterIds = Array.from(
             new Set(allViewData.flatMap((vd) => vd.clusterIds))
           ).sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
-          // For each cluster, concatenate expression arrays from all samples
           const mergedExprByCluster = allClusterIds.map((cid) => {
             const parts = allViewData
               .map((vd) => {
@@ -267,15 +263,12 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
         }
         if (artifact.type === 'gene_dotplot') {
           const nGenes = artifact.geneNames?.length ?? 0;
-          // Collect all unique cluster IDs across all samples
           const allClusterIds = Array.from(
             new Set(allViewData.flatMap((vd) => vd.clusterIds))
           ).sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
-          // For each cluster, aggregate cell counts and weighted expression from all samples
           const mergedCellCounts = new Array(allClusterIds.length).fill(0);
           const mergedPercentExpressing = Array.from({ length: allClusterIds.length }, () => new Float32Array(nGenes));
           const mergedAverageExpression = Array.from({ length: allClusterIds.length }, () => new Float32Array(nGenes));
-          // Accumulate weighted sums for averaging
           const detectedSums = Array.from({ length: allClusterIds.length }, () => new Float32Array(nGenes));
           const expressionSums = Array.from({ length: allClusterIds.length }, () => new Float32Array(nGenes));
           for (const vd of allViewData) {
@@ -322,16 +315,29 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
 
   const resolvedGeneExpression = useMemo(() => {
     if (!geneExpression) {
+      console.log('PlotView resolvedGeneExpression: No geneExpression prop');
       return null;
     }
+    console.log('PlotView resolvedGeneExpression: Received geneExpression', { geneExpression, source: geneExpression.source });
     if (geneExpression.source === 'analysis') {
       const result = geneExpression.data || null;
+      console.log('PlotView resolvedGeneExpression: Analysis source', { hasData: !!result, type: result?.type });
       return result;
     }
     if (geneExpression.source === 'artifact') {
       const result = artifacts.find((artifact) => artifact.id === geneExpression.artifactId) || null;
+      console.log('PlotView resolvedGeneExpression: Artifact source', {
+        artifactId: geneExpression.artifactId,
+        found: !!result,
+        type: result?.type,
+        hasCoordinates: !!result?.coordinates,
+        hasExpression: !!result?.expression,
+        coordinatesLength: result?.coordinates?.length,
+        expressionLength: result?.expression?.length
+      });
       return result;
     }
+    console.log('PlotView resolvedGeneExpression: Unknown source, returning null');
     return null;
   }, [geneExpression, artifacts]);
 
@@ -435,7 +441,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     const containerWidth = container?.clientWidth || 800;
     const containerHeight = container?.clientHeight || 600;
 
-    // Base margin ensures space for legend and labels
     const margin = { top: 40, right: 160, bottom: 120, left: 60 };
     if (results.type === 'gene_expression') {
       margin.bottom = 48;
@@ -495,7 +500,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
       return;
     }
 
-    // Filter out cells with null/invalid coordinates
     const validData = [];
     for (let i = 0; i < rawCoords.length; i++) {
       const coord = rawCoords[i];
@@ -515,19 +519,16 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
       return;
     }
 
-    // Sort ascending by expression so high-expressing cells are drawn last (on top).
-    // Without this, high-expressing cells drawn early get painted over by zero-expressing
-    // cells drawn later, making the plot appear uniformly blue. Matches the reference script.
     validData.sort((a, b) => a.expr - b.expr);
 
     const coordinates = validData.map(d => d.coord);
     const expression = validData.map(d => d.expr);
 
+    console.log(`Gene expression plot: ${validData.length}/${rawCoords.length} cells have valid coordinates`);
 
     const xExtent = d3.extent(coordinates, d => d[0]);
     const yExtent = d3.extent(coordinates, d => d[1]);
 
-    // Preserve aspect ratio like UmapDeckView does
     const dataWidth = xExtent[1] - xExtent[0];
     const dataHeight = yExtent[1] - yExtent[0];
     const dataAspect = dataWidth / dataHeight;
@@ -539,11 +540,9 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     let offsetY = 0;
 
     if (dataAspect > plotAspect) {
-      // Data is wider than plot area: constrain by width
       plotHeight = width / dataAspect;
       offsetY = (height - plotHeight) / 2;
     } else {
-      // Data is taller than plot area: constrain by height
       plotWidth = height * dataAspect;
       offsetX = (width - plotWidth) / 2;
     }
@@ -552,7 +551,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
       .domain(xExtent)
       .range([offsetX, offsetX + plotWidth]);
 
-    // Match UmapDeckView's flipY: true behavior (Y increases downward)
     const yScale = d3.scaleLinear()
       .domain(yExtent)
       .range([offsetY, offsetY + plotHeight]);
@@ -662,7 +660,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
       };
     });
 
-    // Merge clusters that share the same display label (e.g. clusters 1 and 3 both renamed to "PT")
     const labelToEntries = new Map();
     for (const entry of rawViolinEntries) {
       const displayLabel = formatClusterLabel(entry.clusterId, clusterLabelMap) || String(entry.clusterId);
@@ -930,7 +927,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
       ? clusterCellCounts
       : clusterIds.map(() => 1);
 
-    // Merge clusters that share the same display label (e.g. clusters 1 and 3 both renamed to "PT")
     const labelToIndices = new Map();
     for (let i = 0; i < clusterIds.length; i++) {
       const displayLabel = formatClusterLabel(clusterIds[i], clusterLabelMap) || String(clusterIds[i]);
@@ -1061,7 +1057,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     const useGlobalRange = results.expressionRange && Array.isArray(results.expressionRange) && results.expressionRange.length >= 2 &&
       Number.isFinite(results.expressionRange[0]) && Number.isFinite(results.expressionRange[1]);
     const [rangeMin, rangeMax] = useGlobalRange ? results.expressionRange : [null, null];
-    // Use 0 as minimum for Mean legend when data are non-negative (e.g. expression) so scale starts at zero
     const displayMin = useGlobalRange && rangeMin >= 0 ? 0 : rangeMin;
     const displayMax = rangeMax;
     const safeRange = useGlobalRange && displayMax > displayMin ? displayMax - displayMin : 1;
@@ -1307,7 +1302,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
       const clipValue = sortedValues[Math.min(clipIndex, maxIndex)];
       const clippedValues = panel.values.filter(v => v <= clipValue);
 
-      // Use d3.extent instead of Math.min/max with spread to avoid stack overflow on large arrays
       const [minVal, maxVal] = d3.extent(clippedValues);
       const xScale = d3.scaleLinear()
         .domain([minVal, maxVal])
@@ -1366,7 +1360,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
 
     const markers = Array.isArray(results.markers) ? results.markers : [];
     const isPeak = results.featureType === 'peak';
-    // Use the renamed cluster label if available, otherwise show the cluster ID
     const clusterId = results.cluster;
     const clusterLabel = clusterLabelMap?.[String(clusterId)] ?? clusterId ?? 'N/A';
     const formatNumber = (value, digits = 2) => {
@@ -1516,7 +1509,7 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
                     <td className="gene-name-cell" style={{ color: '#1d4ed8' }}>{r.shortName}</td>
                     <td>{r.cellType}</td>
                     <td>{confBadge(r.confidence)}</td>
-                    <td style={{ color: '#6b7280', fontStyle: 'italic' }}>{topMarkers || '-'}</td>
+                    <td style={{ color: '#6b7280', fontStyle: 'italic' }}>{topMarkers || '—'}</td>
                   </tr>
                 );
               })}
@@ -1530,7 +1523,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     );
   };
 
-  /** DEG / differential peaks between two samples: left = table, right = volcano plot. Only genes/peaks with >20% in at least one sample. */
   const renderDegBetweenSamples = (results) => {
     if (!results || results.type !== 'deg_between_samples') return null;
     const isPeak = results.featureType === 'peak';
@@ -1552,7 +1544,7 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
         <div className="deg-between-samples-left">
           <h3 className="deg-between-samples-title">{titleLabel} between {s1} vs. {s2}</h3>
           <p className="markers-subtitle">
-            Cluster {results.cluster} · {results.clusterSizeSample1 ?? '-'} cells ({s1}) · {results.clusterSizeSample2 ?? '-'} cells ({s2}) · showing {featureLabel} with &gt;20% in either sample
+            Cluster {results.cluster} · {results.clusterSizeSample1 ?? '—'} cells ({s1}) · {results.clusterSizeSample2 ?? '—'} cells ({s2}) · showing {featureLabel} with &gt;20% in either sample
           </p>
           <div className="markers-table-scroll">
             <table className="markers-table">
@@ -1595,7 +1587,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     );
   };
 
-  // Draw volcano when deg_between_samples result is shown. Filter to >25% expression in either sample; same avg_logFC as table; label top 10 up/down.
   useEffect(() => {
     if (!resolvedResults || resolvedResults.type !== 'deg_between_samples' || !volcanoRef.current) return;
     const raw = Array.isArray(resolvedResults.allMarkers) ? resolvedResults.allMarkers : resolvedResults.markers || [];
@@ -1711,7 +1702,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     });
   }, [resolvedResults]);
 
-  /** Cell fraction: % of cells per cluster per sample. Two panels (one bar chart per sample), bar colors match UMAP cluster colors. */
   const renderCellFraction = (results) => {
     if (!results || results.type !== 'cell_fraction') return null;
     const names = Array.isArray(results.datasetNames) ? results.datasetNames : [];
@@ -1731,7 +1721,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     );
   };
 
-  // Draw cell fraction bar charts when cell_fraction result is shown (colors match UMAP cluster colors)
   useEffect(() => {
     if (!resolvedResults || resolvedResults.type !== 'cell_fraction') return;
     const perSample = resolvedResults.perSample || {};
@@ -1802,7 +1791,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     });
   }, [resolvedResults, clusterLabelMap, clusterColorOverrides]);
 
-  /** Region composition: horizontal bar chart showing cluster fractions within a BANKSY spatial region */
   const renderRegionComposition = (results) => {
     if (!results || results.type !== 'region_composition') return null;
     return (
@@ -1886,7 +1874,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
       .text('% of cells in region');
   }, [resolvedResults, clusterLabelMap, clusterColorOverrides]);
 
-  /** Signac-style CoveragePlot for ATAC peak clusters. Never show the chromosome bar alone; show full plot or loading. */
   const renderPeaksOnGeneTrack = (results) => {
     const coverageByCluster = Array.isArray(results.coverageByCluster) ? results.coverageByCluster : [];
     const hasCoverage = coverageByCluster.length > 0 && results.region;
@@ -1910,7 +1897,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     const geneName = formatGeneNameForDisplay(results.geneName || 'gene', results.genome);
     if (peaks.length === 0) return null;
 
-    // Peaks available but coverage still computing, show loading state instead of the chromosome bar.
     if (results.region) {
       return (
         <div className="peaks-on-gene-wrapper peaks-on-gene-loading">
@@ -1928,7 +1914,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
       );
     }
 
-    // No region (unusual): show minimal placeholder so we still don't show the old chromosome bar
     const geneNameNoRegion = formatGeneNameForDisplay(results.geneName || 'gene', results.genome);
     return (
       <div className="peaks-on-gene-wrapper peaks-on-gene-loading">
@@ -2268,8 +2253,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     Array.isArray(resolvedResults.peaksOnGene) &&
     resolvedResults.peaksOnGene.length > 0;
 
-  // Only show "No peaks linked" when this is ATAC/multiome (peak view is relevant). For scRNA-seq
-  // single sample there are no peaks, show UMAP with gene expression instead.
   const isAtacOrMultiomeGene =
     resolvedResults?.type === 'gene_expression' &&
     (resolvedResults.isAtac === true || resolvedResults.multiomeModality === 'atac');
@@ -2277,7 +2260,6 @@ const PlotView = ({ activePlot, geneExpression = null, artifacts, dataInfo, sele
     isAtacOrMultiomeGene &&
     (!Array.isArray(resolvedResults.peaksOnGene) || resolvedResults.peaksOnGene.length === 0);
 
-  // scRNA-seq (and RNA view): gene_expression with coordinates, no peak view, show UMAP with gene overlay.
   const isRnaGeneExpression =
     resolvedResults?.type === 'gene_expression' &&
     Array.isArray(resolvedResults.coordinates) &&

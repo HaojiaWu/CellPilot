@@ -43,5 +43,7 @@ Thumbs.db
 # Backup files
 *.bak
 
-# Claude Code memory (local dev only)
 .claude/
+
+# Release build output
+/app-electron

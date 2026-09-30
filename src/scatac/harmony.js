@@ -1,39 +1,3 @@
-/**
- * Harmony batch effect correction for scATAC-seq data integration.
- *
- * ES module port of node_df_idf/src/harmony.js (harmonypy, Korsunsky et al. 2019).
- *
- * Algorithm:
- *   1. L2-normalize input embeddings -> Z_cos (for cosine-distance clustering)
- *   2. KMeans++ initialization -> K cluster centroids Y
- *   3. Soft cluster assignments R via scaled Gaussian kernel
- *   4. Iteratively:
- *      a. Cluster step: update Y, distances, R (with batch diversity penalty)
- *      b. Correct step: ridge regression to remove batch effects from embeddings
- *   5. Output: batch-corrected embeddings
- */
-
-/**
- * Run Harmony batch effect correction.
- *
- * @param {Float64Array} embeddings: Cell embeddings, row-major (nCells x nDims)
- * @param {number} nCells
- * @param {number} nDims
- * @param {Int32Array|number[]} batchLabels: Batch index for each cell (0, 1, 2, ...)
- * @param {object} [options]
- * @param {number} [options.theta=2]: Diversity penalty (higher = more mixing)
- * @param {number} [options.sigma=0.1]: Clustering kernel bandwidth
- * @param {number} [options.nclust=null]: Number of clusters (default: min(N/30, 100))
- * @param {number} [options.tau=0]: Protection against overcorrection
- * @param {number} [options.blockSize=0.05]: Proportion of cells per update block
- * @param {number} [options.maxIterHarmony=20]: Max harmony iterations
- * @param {number} [options.maxIterKmeans=20]: Max k-means iterations per harmony step
- * @param {number} [options.epsilonCluster=1e-5]: K-means convergence threshold
- * @param {number} [options.epsilonHarmony=1e-6]: Harmony convergence threshold (smaller = more iterations)
- * @param {boolean} [options.verbose=true]
- * @param {number} [options.seed=0]: Random seed
- * @returns {Float64Array} Corrected embeddings, row-major (nCells x nDims)
- */
 export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {}) {
   const {
     theta = 2,
@@ -51,32 +15,30 @@ export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {})
 
   const tTotal = Date.now();
 
-  // ---- Determine batches ----
   const batchSet = new Set(batchLabels);
   const batchIds = Array.from(batchSet).sort((a, b) => a - b);
   const B = batchIds.length;
   const batchMap = new Map();
   batchIds.forEach((id, idx) => batchMap.set(id, idx));
 
-  // batchOfCell[i] = batch index (0..B-1) for cell i
   const batchOfCell = new Int32Array(nCells);
   for (let i = 0; i < nCells; i++) {
     batchOfCell[i] = batchMap.get(batchLabels[i]);
   }
 
-  // Number of clusters
   const K = nclust || Math.min(Math.round(nCells / 30), 100);
 
   if (verbose) {
+    console.log('Running Harmony integration:');
+    console.log(`  ${nCells} cells, ${nDims} dims, ${B} batches, ${K} clusters`);
+    console.log(`  theta=${theta}, sigma=${sigma}, maxIterHarmony=${maxIterHarmony}`);
   }
 
-  // ---- Batch statistics ----
   const N_b = new Float64Array(B);
   for (let i = 0; i < nCells; i++) N_b[batchOfCell[i]]++;
   const Pr_b = new Float64Array(B);
   for (let b = 0; b < B; b++) Pr_b[b] = N_b[b] / nCells;
 
-  // Theta per batch (with tau correction if needed)
   const thetaArr = new Float64Array(B);
   for (let b = 0; b < B; b++) {
     thetaArr[b] = typeof theta === 'number' ? theta : theta[b];
@@ -85,25 +47,21 @@ export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {})
     }
   }
 
-  // Sigma per cluster
   const sigmaArr = new Float64Array(K);
   for (let k = 0; k < K; k++) {
     sigmaArr[k] = typeof sigma === 'number' ? sigma : sigma[k];
   }
 
-  // Lambda: [0, 1, 1, ...] (B+1 elements, first is intercept = 0)
   const lamb = new Float64Array(B + 1);
   for (let b = 0; b < B; b++) lamb[b + 1] = 1;
 
-  // Phi_moe: (B+1) x N, row 0 = intercept (all 1s), rows 1..B = batch indicators
   const Bp1 = B + 1;
   const Phi_moe = new Float64Array(Bp1 * nCells);
-  for (let i = 0; i < nCells; i++) Phi_moe[i] = 1; // intercept
+  for (let i = 0; i < nCells; i++) Phi_moe[i] = 1;
   for (let i = 0; i < nCells; i++) {
     Phi_moe[(batchOfCell[i] + 1) * nCells + i] = 1;
   }
 
-  // Batch cell indices (for ridge regression)
   const batchIndex = [];
   for (let b = 0; b < B; b++) {
     const idx = [];
@@ -113,7 +71,6 @@ export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {})
     batchIndex.push(idx);
   }
 
-  // ---- Transpose embeddings to column-major: d x N ----
   const Z_orig = new Float64Array(nDims * nCells);
   for (let i = 0; i < nCells; i++) {
     for (let d = 0; d < nDims; d++) {
@@ -125,11 +82,10 @@ export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {})
   const Z_cos = new Float64Array(nDims * nCells);
   l2Normalize(Z_orig, nDims, nCells, Z_cos);
 
-  // ---- KMeans++ initialization ----
+  if (verbose) console.log('  Initializing clusters with KMeans++...');
   const tKmeans = Date.now();
   const centroids = kmeanspp(Z_cos, nDims, nCells, K, 25, seed);
 
-  // Y: d x K column-major (cluster centroids, L2-normalized)
   const Y = new Float64Array(nDims * K);
   for (let k = 0; k < K; k++) {
     let norm = 0;
@@ -141,19 +97,17 @@ export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {})
       Y[d * K + k] = centroids[k * nDims + d] / norm;
     }
   }
+  if (verbose) console.log(`  KMeans++ initialized in ${((Date.now() - tKmeans) / 1000).toFixed(1)}s`);
 
-  // ---- Allocate buffers ----
   const R = new Float64Array(K * nCells);
   const dist_mat = new Float64Array(K * nCells);
   const O = new Float64Array(K * B);
   const E = new Float64Array(K * B);
 
-  // ---- Initial assignments ----
   computeDistances(Y, Z_cos, nDims, nCells, K, dist_mat);
   computeSoftAssignments(dist_mat, sigmaArr, K, nCells, R);
   computeOE(R, batchOfCell, Pr_b, K, B, nCells, O, E);
 
-  // Objective tracking
   const objectiveHarmony = [];
   const objectiveKmeans = [];
   const windowSize = 3;
@@ -161,12 +115,11 @@ export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {})
   objectiveKmeans.push(obj0);
   objectiveHarmony.push(obj0);
 
-  // ---- Main Harmony loop ----
   let converged = false;
   for (let iter = 1; iter <= maxIterHarmony; iter++) {
+    if (verbose) console.log(`  Harmony iteration ${iter}/${maxIterHarmony}...`);
     const tIter = Date.now();
 
-    // ---- Cluster step ----
     let kmeansRounds = 0;
     for (let ki = 0; ki < maxIterKmeans; ki++) {
       updateCentroids(Z_cos, R, nDims, nCells, K, Y);
@@ -191,18 +144,24 @@ export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {})
     }
 
     objectiveHarmony.push(objectiveKmeans[objectiveKmeans.length - 1]);
+    if (verbose) console.log(`    Clustering: ${kmeansRounds} rounds`);
 
-    // ---- Ridge regression correction ----
     moeCorrectRidge(Z_orig, Z_corr, Z_cos, R, Phi_moe, batchIndex,
                     lamb, nDims, nCells, K, B);
 
+    if (verbose) {
+      console.log(`    Iteration completed in ${((Date.now() - tIter) / 1000).toFixed(1)}s`);
+    }
 
-    // Check harmony convergence (compare last two Harmony objectives; same as R)
     if (objectiveHarmony.length >= 2) {
       const objOld = objectiveHarmony[objectiveHarmony.length - 2];
       const objNew = objectiveHarmony[objectiveHarmony.length - 1];
       const relChange = Math.abs(objOld) > 1e-300 ? (objOld - objNew) / Math.abs(objOld) : 0;
+      if (verbose) {
+        console.log(`    Objective: prev=${objOld.toFixed(4)} curr=${objNew.toFixed(4)} relChange=${(relChange * 100).toFixed(6)}% (epsilon=${epsilonHarmony})`);
+      }
       if (relChange >= 0 && relChange < epsilonHarmony) {
+        if (verbose) console.log(`  Converged after ${iter} iteration${iter > 1 ? 's' : ''}`);
         converged = true;
         break;
       }
@@ -210,9 +169,9 @@ export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {})
   }
 
   if (verbose && !converged) {
+    console.log('  Stopped before convergence (max iterations reached)');
   }
 
-  // ---- Convert Z_corr back to row-major (N x d) ----
   const result = new Float64Array(nCells * nDims);
   for (let i = 0; i < nCells; i++) {
     for (let d = 0; d < nDims; d++) {
@@ -221,13 +180,11 @@ export function runHarmony(embeddings, nCells, nDims, batchLabels, options = {})
   }
 
   if (verbose) {
+    console.log(`  Harmony completed in ${((Date.now() - tTotal) / 1000).toFixed(1)}s`);
   }
 
   return result;
 }
-
-
-// ============= Internal helper functions =============
 
 function l2Normalize(Z, d, N, out) {
   for (let i = 0; i < N; i++) {

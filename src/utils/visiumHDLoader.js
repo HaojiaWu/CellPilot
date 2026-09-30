@@ -1,12 +1,5 @@
-/**
- * Utility functions for loading Visium HD spatial transcriptomics data
- */
-
 import { buildSpatialIndex } from './spatialIndex';
 
-/**
- * Parse CSV data into structured format
- */
 const parseCSV = (text) => {
   const lines = text.trim().split('\n');
   if (lines.length === 0) {
@@ -42,21 +35,11 @@ const parseCSV = (text) => {
   return { headers, rows };
 };
 
-/**
- * Convert numeric cell ID to Visium HD barcode format
- * Input: 2 (from GeoJSON)
- * Output: "cellid_000000002-1" (to match other files)
- */
 export const numericToBarcodeId = (numericId) => {
   const padded = String(numericId).padStart(9, '0');
   return `cellid_${padded}-1`;
 };
 
-/**
- * Convert Visium HD barcode format to numeric cell ID
- * Input: "cellid_000000002-1"
- * Output: 2
- */
 export const barcodeToNumericId = (barcodeId) => {
   if (!barcodeId) return null;
   const match = barcodeId.match(/cellid_0*(\d+)-\d+/);
@@ -66,12 +49,6 @@ export const barcodeToNumericId = (barcodeId) => {
   return null;
 };
 
-/**
- * Parse Visium HD cell segmentation GeoJSON
- * Extracts cell polygons and centroids
- * @param {Object} geojson: Parsed GeoJSON object
- * @returns {Object}: Cell data with polygons and centroids
- */
 export const parseVisiumHDCellSegmentation = (geojson) => {
   if (!geojson || !geojson.features) {
     throw new Error('Invalid GeoJSON: missing features array');
@@ -93,16 +70,13 @@ export const parseVisiumHDCellSegmentation = (geojson) => {
       continue;
     }
 
-    // Convert to barcode format for matching with other data
     const cellId = numericToBarcodeId(numericId);
 
-    // Get polygon coordinates (first ring, outer boundary)
     const coordinates = feature.geometry.coordinates[0];
     if (!Array.isArray(coordinates) || coordinates.length < 3) {
       continue;
     }
 
-    // Calculate centroid from polygon
     let sumX = 0;
     let sumY = 0;
     for (const [x, y] of coordinates) {
@@ -145,10 +119,6 @@ export const parseVisiumHDCellSegmentation = (geojson) => {
   };
 };
 
-/**
- * Parse UMAP coordinates from Visium HD analysis output
- * Expected CSV format: Barcode, UMAP-1, UMAP-2
- */
 export const parseVisiumHDUMAP = (data, filename) => {
   const text = new TextDecoder().decode(data);
   const parsed = parseCSV(text);
@@ -170,10 +140,6 @@ export const parseVisiumHDUMAP = (data, filename) => {
   };
 };
 
-/**
- * Parse clustering results from Visium HD analysis output
- * Expected CSV format: Barcode, Cluster
- */
 export const parseVisiumHDClusters = (data, filename) => {
   const text = new TextDecoder().decode(data);
   const parsed = parseCSV(text);
@@ -193,14 +159,10 @@ export const parseVisiumHDClusters = (data, filename) => {
   };
 };
 
-/**
- * Load complete Visium HD dataset (segmented outputs)
- * @param {Object} files: Object containing all Visium HD files
- * @param {Object} metadata: Metadata about file formats
- * @returns {Promise<Object>}: Complete Visium HD dataset
- */
 export async function loadVisiumHDData(files, metadata) {
   try {
+    console.log('Loading Visium HD data...', metadata);
+
     const result = {
       format: '10X Visium HD',
       modality: 'spatial',
@@ -214,7 +176,6 @@ export async function loadVisiumHDData(files, metadata) {
       hasPolygons: false,
     };
 
-    // Load cell segmentation (GeoJSON with polygons)
     if (files.cellSegmentation) {
       const text = new TextDecoder().decode(files.cellSegmentation.data);
       const geojson = JSON.parse(text);
@@ -224,14 +185,12 @@ export async function loadVisiumHDData(files, metadata) {
       result.spatialExtent = cellsData.spatialExtent;
       result.hasPolygons = true;
 
-      // Create polygon lookup by cell ID for efficient access
       const polygonMap = new Map();
       for (const cell of cellsData.cells) {
         polygonMap.set(cell.cellId, cell.polygon);
       }
       result.polygons = polygonMap;
 
-      // Extract spatial coordinates (centroids) for plotting
       result.spatialCoordinates = cellsData.cells.map(cell => [cell.x, cell.y]);
 
       if (Array.isArray(result.spatialCoordinates) && result.spatialCoordinates.length) {
@@ -243,9 +202,9 @@ export async function loadVisiumHDData(files, metadata) {
         });
       }
 
+      console.log(`Loaded ${cellsData.count} cells with polygon boundaries`);
     }
 
-    // Load UMAP coordinates from analysis
     if (files.analysis && files.analysis.umap) {
       try {
         const umapKeys = Object.keys(files.analysis.umap);
@@ -253,13 +212,13 @@ export async function loadVisiumHDData(files, metadata) {
           const umapFile = files.analysis.umap[umapKeys[0]];
           const umapData = parseVisiumHDUMAP(umapFile.data, umapFile.name);
           result.umap = umapData.coordinates;
+          console.log(`Loaded UMAP coordinates for ${umapData.count} cells`);
         }
       } catch (error) {
         console.warn('Could not load UMAP data:', error.message);
       }
     }
 
-    // Load clustering results
     if (files.analysis && files.analysis.clusters) {
       try {
         const clusterData = parseVisiumHDClusters(
@@ -268,14 +227,15 @@ export async function loadVisiumHDData(files, metadata) {
         );
         result.clusters = clusterData.clusters;
         result.uniqueClusters = clusterData.uniqueClusters;
+        console.log(`Loaded clustering info for ${clusterData.count} cells with ${clusterData.uniqueClusters.length} clusters`);
       } catch (error) {
         console.warn('Could not load clustering data:', error.message);
       }
     }
 
-    // Store cell feature matrix files for later processing by bakana
     if (files.cellFeatureMatrix) {
       result.cellFeatureMatrix = files.cellFeatureMatrix;
+      console.log('Cell feature matrix files loaded');
     }
 
     return result;
@@ -286,9 +246,6 @@ export async function loadVisiumHDData(files, metadata) {
   }
 }
 
-/**
- * Detect if a path contains Visium HD data
- */
 export async function isVisiumHDData(path) {
   if (!window.electron) {
     return false;
@@ -302,8 +259,6 @@ export async function isVisiumHDData(path) {
 
     const files = result.files.map(f => f.toLowerCase());
 
-    // Check for Visium HD-specific markers
-    // Look for outs directory with segmented_outputs or binned_outputs
     return files.includes('outs') ||
            files.includes('segmented_outputs') ||
            files.includes('binned_outputs');

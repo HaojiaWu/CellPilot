@@ -1,13 +1,3 @@
-/**
- * OpenSeadragon WebGL Overlay
- *
- * Renders WebGL content (scatter plots) directly on the OpenSeadragon canvas
- * by hooking into OSD's rendering pipeline. This ensures perfect coordinate
- * alignment between the image and overlaid content.
- *
- * Inspired by openSeadragonGL but adapted for overlay rendering instead of tile processing.
- */
-
 import OpenSeadragon from 'openseadragon';
 
 export class OSDWebGLOverlay {
@@ -24,39 +14,29 @@ export class OSDWebGLOverlay {
     this.pointData = null;
     this.pointsNeedUpdate = false;
 
-    // Note: scaleFactor is unused, coordinate scaling is handled in SpatialPlotView.jsx
     this.transformMatrix = null;
     this.scaleFactor = 1.0;
   }
 
-  /**
-   * Initialize the WebGL overlay system
-   */
   async init() {
     if (this.isInitialized) return;
 
-    // Wait for OpenSeadragon to be ready
     await this._waitForViewer();
 
-    // Get the canvas that OpenSeadragon uses
     const osdCanvas = this.viewer.drawer.canvas;
 
-    // Create an overlay canvas positioned exactly on top
     this.canvas = document.createElement('canvas');
     this.canvas.style.position = 'absolute';
     this.canvas.style.top = '0';
     this.canvas.style.left = '0';
     this.canvas.style.width = '100%';
     this.canvas.style.height = '100%';
-    this.canvas.style.pointerEvents = 'none'; // Let OSD handle all interaction
+    this.canvas.style.pointerEvents = 'none';
 
-    // Insert overlay canvas right after OSD canvas
     osdCanvas.parentNode.insertBefore(this.canvas, osdCanvas.nextSibling);
 
-    // Match canvas size
     this._resizeCanvas();
 
-    // Initialize WebGL context
     this.gl = this.canvas.getContext('webgl2', {
       alpha: true,
       premultipliedAlpha: true,
@@ -69,40 +49,47 @@ export class OSDWebGLOverlay {
       throw new Error('WebGL2 not supported');
     }
 
-    // Compile shaders and create program
     await this._initShaders();
 
-    // Create buffers
     this._initBuffers();
 
-    // Hook into OpenSeadragon's animation loop
     this.viewer.addHandler('animation', this._onViewerUpdate.bind(this));
     this.viewer.addHandler('resize', this._onViewerResize.bind(this));
-    // Re-render when image opens (important for custom tile sources)
     this.viewer.addHandler('open', this._onViewerOpen.bind(this));
 
     this.isInitialized = true;
+    console.log('OSD WebGL Overlay initialized');
   }
 
-  /**
-   * Wait for OpenSeadragon viewer to be fully ready
-   */
   _waitForViewer() {
     return new Promise((resolve) => {
       const itemCount = this.viewer.world.getItemCount();
       const hasDrawer = !!(this.viewer.drawer && this.viewer.drawer.canvas);
 
-      if (itemCount > 0 || hasDrawer) {
+      console.log('WebGL _waitForViewer: Checking viewer state', {
+        itemCount,
+        hasDrawer,
+        hasWorld: !!this.viewer.world,
+      });
+
+      if (itemCount > 0) {
+        console.log('WebGL _waitForViewer: Viewer already has items, resolving immediately');
         resolve();
       } else {
-        this.viewer.addOnceHandler('open', () => resolve());
+        if (hasDrawer) {
+          console.log('WebGL _waitForViewer: Viewer has drawer, resolving immediately');
+          resolve();
+        } else {
+          console.log('WebGL _waitForViewer: Waiting for "open" event');
+          this.viewer.addOnceHandler('open', () => {
+            console.log('WebGL _waitForViewer: "open" event fired, resolving');
+            resolve();
+          });
+        }
       }
     });
   }
 
-  /**
-   * Resize overlay canvas to match OSD canvas
-   */
   _resizeCanvas() {
     const osdCanvas = this.viewer.drawer.canvas;
     const rect = osdCanvas.getBoundingClientRect();
@@ -115,35 +102,30 @@ export class OSDWebGLOverlay {
     this.canvas.height = rect.height * dpr;
 
     if (this.gl) {
-      // Set viewport to match canvas size in physical pixels
       this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
   }
 
-  /**
-   * Handle viewer resize events
-   */
   _onViewerResize() {
     this._resizeCanvas();
   }
 
-  /**
-   * Handle viewer open events, re-render once the tiled image is available
-   * so the viewport matrix can be computed correctly.
-   */
   _onViewerOpen() {
+    console.log('WebGL _onViewerOpen: Viewer opened, checking if we should render', {
+      isEnabled: this.isEnabled,
+      isInitialized: this.isInitialized,
+      hasPointData: !!this.pointData,
+      pointCount: this.pointData?.count,
+    });
     if (this.isEnabled && this.isInitialized && this.pointData && this.pointData.count > 0) {
+      console.log('WebGL _onViewerOpen: Triggering render now that viewer is ready');
       this._render();
     }
   }
 
-  /**
-   * Initialize WebGL shaders for scatter plot rendering
-   */
   async _initShaders() {
     const gl = this.gl;
 
-    // Vertex shader: transforms points from image coords to clip space
     const vertexShaderSource = `#version 300 es
       precision highp float;
 
@@ -171,7 +153,6 @@ export class OSDWebGLOverlay {
       }
     `;
 
-    // Fragment shader: renders colored points
     const fragmentShaderSource = `#version 300 es
       precision mediump float;
 
@@ -189,11 +170,9 @@ export class OSDWebGLOverlay {
       }
     `;
 
-    // Compile shaders
     const vertexShader = this._compileShader(gl.VERTEX_SHADER, vertexShaderSource);
     const fragmentShader = this._compileShader(gl.FRAGMENT_SHADER, fragmentShaderSource);
 
-    // Link program
     this.program = gl.createProgram();
     gl.attachShader(this.program, vertexShader);
     gl.attachShader(this.program, fragmentShader);
@@ -204,7 +183,6 @@ export class OSDWebGLOverlay {
       throw new Error('Failed to link shader program: ' + info);
     }
 
-    // Get attribute and uniform locations
     this.locations = {
       position: gl.getAttribLocation(this.program, 'a_position'),
       color: gl.getAttribLocation(this.program, 'a_color'),
@@ -213,9 +191,6 @@ export class OSDWebGLOverlay {
     };
   }
 
-  /**
-   * Compile a WebGL shader
-   */
   _compileShader(type, source) {
     const gl = this.gl;
     const shader = gl.createShader(type);
@@ -231,28 +206,15 @@ export class OSDWebGLOverlay {
     return shader;
   }
 
-  /**
-   * Initialize WebGL buffers
-   */
   _initBuffers() {
     const gl = this.gl;
 
-    // Create buffers for positions and colors
     this.buffers.position = gl.createBuffer();
     this.buffers.color = gl.createBuffer();
 
-    // Create VAO for efficient rendering
     this.vao = gl.createVertexArray();
   }
 
-  /**
-   * Update scatter plot data
-   *
-   * @param {Object} data: Point data
-   * @param {Float32Array} data.positions: Point positions [x1, y1, x2, y2, ...]
-   * @param {Uint8Array} data.colors: Point colors [r1, g1, b1, a1, r2, g2, b2, a2, ...]
-   * @param {number} data.count: Number of points
-   */
   setPointData(data) {
     this.pointData = data;
     this.pointsNeedUpdate = true;
@@ -262,99 +224,64 @@ export class OSDWebGLOverlay {
     }
   }
 
-  /**
-   * Set transformation matrix for coordinate mapping
-   *
-   * @param {Object} transform: Transformation object with functions
-   */
   setTransform(transform) {
     this.transformMatrix = transform;
   }
 
-  /**
-   * Set custom image size (for custom tile sources)
-   *
-   * @param {Object} size: Image size {x: width, y: height}
-   */
   setImageSize(size) {
     if (!this.options.imageSize) {
       this.options.imageSize = {};
     }
     this.options.imageSize.x = size.x;
     this.options.imageSize.y = size.y;
+    console.log('WebGL Overlay - Image size updated:', size);
   }
 
-  /**
-   * Update point buffers with new data
-   */
   _updatePointBuffers() {
     if (!this.pointData || !this.pointsNeedUpdate) return;
 
     const gl = this.gl;
     const { positions, colors } = this.pointData;
 
-    // Upload position data
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
 
-    // Upload color data
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.color);
     gl.bufferData(gl.ARRAY_BUFFER, colors, gl.DYNAMIC_DRAW);
 
     this.pointsNeedUpdate = false;
   }
 
-  /**
-   * Called on every OpenSeadragon animation frame
-   */
   _onViewerUpdate() {
     if (!this.isEnabled || !this.isInitialized || !this.pointData) return;
 
     this._render();
   }
 
-  /**
-   * Convert OSD viewport to WebGL transformation matrix.
-   * Transforms from image pixel coordinates to clip space.
-   */
   _getViewportMatrix() {
     const viewer = this.viewer;
     const viewport = viewer.viewport;
 
-    // Get image size in pixels
     const tiledImage = viewer.world.getItemAt(0);
     if (!tiledImage) {
       console.warn('OSDWebGLOverlay: No tiled image available yet');
-      return new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]); // Identity matrix
+      return new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
     }
     const imageSize = tiledImage.getContentSize();
 
-    // Use custom image size if provided (for custom tile sources where getContentSize returns 1x1)
-    // Otherwise use the content size from OpenSeadragon
     const imgW = (this.options.imageSize?.x) || imageSize.x;
     const imgH = (this.options.imageSize?.y) || imageSize.y;
 
-    // Get device pixel ratio and canvas physical size
     const dpr = window.devicePixelRatio || 1;
-    const canvasWidth = this.canvas.width;  // Physical pixels
-    const canvasHeight = this.canvas.height;  // Physical pixels
+    const canvasWidth = this.canvas.width;
+    const canvasHeight = this.canvas.height;
 
-    // Use OpenSeadragon's coordinate conversion functions
-    // These account for zoom, pan, rotation, aspect ratio fitting, etc.
-
-    // Sample two points to determine the transformation:
-    // Point 1: top-left of image (0, 0) in image pixels
-    // Point 2: bottom-right of image (imgW, imgH) in image pixels
-
-    // Convert image pixel coordinates to viewport coordinates (normalized [0,1])
     const topLeft = tiledImage.imageToViewportCoordinates(0, 0);
     const bottomRight = tiledImage.imageToViewportCoordinates(imgW, imgH);
 
-    // Convert viewport coordinates to viewer element coordinates (CSS pixels)
     const topLeftScreen = viewport.viewportToViewerElementCoordinates(topLeft);
     const bottomRightScreen = viewport.viewportToViewerElementCoordinates(bottomRight);
 
-    // Convert to physical pixels
     const topLeftPhys = {
       x: topLeftScreen.x * dpr,
       y: topLeftScreen.y * dpr
@@ -364,29 +291,53 @@ export class OSDWebGLOverlay {
       y: bottomRightScreen.y * dpr
     };
 
-    // Calculate scale: how many clip-space units per image pixel
-    // The image spans from topLeftPhys to bottomRightPhys on screen (in physical pixels)
-    // Map image pixels [0, imgW] x [0, imgH] to this screen region
-    // Then convert screen region to clip space [-1, 1]
-
-    // Scale factor: image pixels → screen physical pixels → clip space
-    const pixelsToScreenX = (bottomRightPhys.x - topLeftPhys.x) / imgW;  // pixels/image-pixel
+    const pixelsToScreenX = (bottomRightPhys.x - topLeftPhys.x) / imgW;
     const pixelsToScreenY = (bottomRightPhys.y - topLeftPhys.y) / imgH;
 
-    const scaleX = (pixelsToScreenX / canvasWidth) * 2.0;   // Convert to clip space units
-    const scaleY = -(pixelsToScreenY / canvasHeight) * 2.0;  // Negative for Y-flip
+    const scaleX = (pixelsToScreenX / canvasWidth) * 2.0;
+    const scaleY = -(pixelsToScreenY / canvasHeight) * 2.0;
 
-    // Calculate translate: where image pixel (0, 0) maps to in clip space
-    // For X: screen coords [0, canvasWidth] → clip space [-1, 1]
-    //   clipX = (screenX / canvasWidth) * 2.0: 1.0
     const translateX = (topLeftPhys.x / canvasWidth) * 2.0 - 1.0;
 
-    // For Y: screen coords [0, canvasHeight] → clip space [1, -1] (flipped!)
-    //   clipY = 1.0: (screenY / canvasHeight) * 2.0
-    // This is equivalent to: -(screenY / canvasHeight * 2.0: 1.0)
     const translateY = 1.0 - (topLeftPhys.y / canvasHeight) * 2.0;
 
-    // Return as column-major 3x3 matrix (WebGL format)
+    if (!this._lastMatrixCalcLog || Date.now() - this._lastMatrixCalcLog > 2000) {
+      const zoom = viewport.getZoom(true);
+
+      const test00_clipX = scaleX * 0 + translateX;
+      const test00_clipY = scaleY * 0 + translateY;
+
+      const testWH_clipX = scaleX * imgW + translateX;
+      const testWH_clipY = scaleY * imgH + translateY;
+
+      console.log('WebGL Matrix Calculation (Y-FIX):', {
+        zoom: zoom.toFixed(3),
+        imgW, imgH,
+        canvasWidth, canvasHeight,
+        dpr: dpr.toFixed(2),
+        topLeft: {
+          viewport: `(${topLeft.x.toFixed(3)}, ${topLeft.y.toFixed(3)})`,
+          screen: `(${topLeftScreen.x.toFixed(1)}, ${topLeftScreen.y.toFixed(1)})`,
+          phys: `(${topLeftPhys.x.toFixed(1)}, ${topLeftPhys.y.toFixed(1)})`
+        },
+        bottomRight: {
+          viewport: `(${bottomRight.x.toFixed(3)}, ${bottomRight.y.toFixed(3)})`,
+          screen: `(${bottomRightScreen.x.toFixed(1)}, ${bottomRightScreen.y.toFixed(1)})`,
+          phys: `(${bottomRightPhys.x.toFixed(1)}, ${bottomRightPhys.y.toFixed(1)})`
+        },
+        pixelsToScreenX: pixelsToScreenX.toFixed(6),
+        pixelsToScreenY: pixelsToScreenY.toFixed(6),
+        scaleX: scaleX.toExponential(3),
+        scaleY: scaleY.toExponential(3),
+        translateX: translateX.toFixed(6),
+        translateY: translateY.toFixed(6),
+        test_imgPixel_0_0_to_clip: `(${test00_clipX.toFixed(3)}, ${test00_clipY.toFixed(3)})`,
+        test_imgPixel_W_H_to_clip: `(${testWH_clipX.toFixed(3)}, ${testWH_clipY.toFixed(3)})`,
+        note: 'Fixed Y translation - (0,0) and (W,H) should map to visible clip space when in view',
+      });
+      this._lastMatrixCalcLog = Date.now();
+    }
+
     return new Float32Array([
       scaleX, 0, 0,
       0, scaleY, 0,
@@ -394,48 +345,117 @@ export class OSDWebGLOverlay {
     ]);
   }
 
-  /**
-   * Render the scatter plot
-   */
   _render() {
     const gl = this.gl;
 
-    // Check if tiled image is available (required for viewport matrix calculation)
     const tiledImage = this.viewer?.world?.getItemAt(0);
     if (!tiledImage) {
-      // Skip rendering until the tiled image is available; re-triggered by the "open" event handler
+      console.log('WebGL _render: No tiled image available, skipping render. Viewer state:', {
+        hasViewer: !!this.viewer,
+        hasWorld: !!this.viewer?.world,
+        worldItemCount: this.viewer?.world?.getItemCount(),
+        viewerId: this.viewer?.id,
+        hasCanvas: !!this.viewer?.canvas,
+        isViewerDestroyed: !this.viewer?.drawer,
+      });
       return;
     }
 
-    // Update buffers if needed
     this._updatePointBuffers();
 
     if (!this.pointData || this.pointData.count === 0) {
+      console.log('WebGL _render: No point data, clearing canvas');
       gl.clear(gl.COLOR_BUFFER_BIT);
       return;
     }
 
-    // Clear with transparent background
+    if (!this._hasLoggedRender) {
+      console.log('WebGL _render: Rendering points', {
+        pointCount: this.pointData.count,
+        hasPositions: !!this.pointData.positions,
+        hasColors: !!this.pointData.colors,
+      });
+      this._hasLoggedRender = true;
+    }
+
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    // Enable blending for transparency
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-    // Use shader program
     gl.useProgram(this.program);
 
-    // Get viewport transformation matrix
     const matrix = this._getViewportMatrix();
+    
+    if (!this._lastMatrixDebugLog || Date.now() - this._lastMatrixDebugLog > 2000) {
+      console.log('WebGL Matrix Values (CRITICAL DEBUG):', {
+        scaleX: matrix[0].toFixed(6),
+        scaleY: matrix[4].toFixed(6),
+        translateX: matrix[6].toFixed(6),
+        translateY: matrix[7].toFixed(6),
+        matrix: Array.from(matrix).map(v => v.toFixed(4)),
+        note: 'If translateY is wrong or scaleY is wrong, scatter plot will be compressed!',
+      });
+      this._lastMatrixDebugLog = Date.now();
+    }
+    
     gl.uniformMatrix3fv(this.locations.matrix, false, matrix);
 
-    // Set point size with zoom scaling, same gradient as Xenium single-sample view (SpatialPlotView):
-    // smaller points when zoomed out, gradiently bigger when user zooms in (radiusScale = 1.5^zoomDelta, cap 12x).
+    if (!this._lastMatrixLog || Date.now() - this._lastMatrixLog > 2000) {
+      const tiledImage = this.viewer.world.getItemAt(0);
+      if (!tiledImage) {
+        return;
+      }
+      const imageSize = tiledImage.getContentSize();
+      const viewport = this.viewer.viewport;
+
+      const containerSize = viewport.getContainerSize();
+
+      const imgTopLeft = new OpenSeadragon.Point(0, 0);
+      const imgBottomRight = new OpenSeadragon.Point(1, 1);
+      const imgTopLeftPixel = viewport.viewportToViewerElementCoordinates(imgTopLeft);
+      const imgBottomRightPixel = viewport.viewportToViewerElementCoordinates(imgBottomRight);
+
+      const imgScreenWidth = imgBottomRightPixel.x - imgTopLeftPixel.x;
+      const imgScreenHeight = imgBottomRightPixel.y - imgTopLeftPixel.y;
+      const imgScreenOffsetX = imgTopLeftPixel.x;
+      const imgScreenOffsetY = imgTopLeftPixel.y;
+
+      console.log('WebGL Overlay - Debug Info:', {
+        canvasSize: { w: this.canvas.width, h: this.canvas.height },
+        canvasCSS: { w: this.canvas.clientWidth, h: this.canvas.clientHeight },
+        imageSize: { w: imageSize.x, h: imageSize.y },
+        imageAspect: (imageSize.x / imageSize.y).toFixed(3),
+        containerSize: { w: containerSize.x, h: containerSize.y },
+        containerAspect: (containerSize.x / containerSize.y).toFixed(3),
+        imageScreenBounds: {
+          width: imgScreenWidth.toFixed(1),
+          height: imgScreenHeight.toFixed(1),
+          offsetX: imgScreenOffsetX.toFixed(1),
+          offsetY: imgScreenOffsetY.toFixed(1),
+          note: 'Where the full image [0,1]x[0,1] appears on screen (from OSD)',
+        },
+        ratios: {
+          screenWidth_vs_container: (imgScreenWidth / containerSize.x).toFixed(3),
+          screenHeight_vs_container: (imgScreenHeight / containerSize.y).toFixed(3),
+          note: 'These show how much of container is filled by image',
+        },
+        transformation: {
+          scaleX: matrix[0].toExponential(3),
+          scaleY: matrix[4].toExponential(3),
+          translateX: matrix[6].toFixed(3),
+          translateY: matrix[7].toFixed(3),
+          note: 'Matrix transforms image pixels → clip space',
+        },
+        pointCount: this.pointData?.count || 0,
+      });
+      this._lastMatrixLog = Date.now();
+    }
+
     const zoom = this.viewer.viewport.getZoom(true);
     const basePointSize = this.options.pointSize || 1.5;
 
-    // OSD zoom: 1 = image fits viewport. Use baseZoom so fit-to-view is "zoomed out" (smaller points).
     const INITIAL_ZOOM_OFFSET = 2.0;
     const baseZoom = INITIAL_ZOOM_OFFSET;
     const zoomDelta = zoom - baseZoom;
@@ -453,30 +473,22 @@ export class OSDWebGLOverlay {
 
     gl.uniform1f(this.locations.pointSize, pointSize);
 
-    // Bind VAO
     gl.bindVertexArray(this.vao);
 
-    // Set up position attribute
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
     gl.enableVertexAttribArray(this.locations.position);
     gl.vertexAttribPointer(this.locations.position, 2, gl.FLOAT, false, 0, 0);
 
-    // Set up color attribute (normalized unsigned bytes)
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.color);
     gl.enableVertexAttribArray(this.locations.color);
     gl.vertexAttribPointer(this.locations.color, 4, gl.UNSIGNED_BYTE, true, 0, 0);
 
-    // Draw points
     gl.drawArrays(gl.POINTS, 0, this.pointData.count);
 
-    // Cleanup
     gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
   }
 
-  /**
-   * Enable/disable rendering
-   */
   setEnabled(enabled) {
     this.isEnabled = enabled;
     if (!enabled && this.gl) {
@@ -484,21 +496,16 @@ export class OSDWebGLOverlay {
     }
   }
 
-  /**
-   * Destroy the overlay and clean up resources
-   */
   destroy() {
     if (!this.isInitialized) return;
 
     const gl = this.gl;
 
-    // Delete WebGL resources
     if (this.vao) gl.deleteVertexArray(this.vao);
     if (this.buffers.position) gl.deleteBuffer(this.buffers.position);
     if (this.buffers.color) gl.deleteBuffer(this.buffers.color);
     if (this.program) gl.deleteProgram(this.program);
 
-    // Remove canvas
     if (this.canvas && this.canvas.parentNode) {
       this.canvas.parentNode.removeChild(this.canvas);
     }
@@ -506,6 +513,7 @@ export class OSDWebGLOverlay {
     this.isInitialized = false;
     this.gl = null;
 
+    console.log('OSD WebGL Overlay destroyed');
   }
 }
 

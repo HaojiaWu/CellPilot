@@ -3,11 +3,6 @@ import * as d3 from 'd3';
 import { formatGeneNameForDisplay } from '../utils/geneNameFormat';
 import './CoveragePlot.css';
 
-/**
- * Signac-style CoveragePlot for scATAC-seq data.
- * Shows individual peak bars per cell cluster forming visual "peak clusters".
- */
-
 const basePalette = [
   ...d3.schemeCategory10,
   ...(d3.schemeSet3 || []),
@@ -41,20 +36,15 @@ const CoveragePlot = ({
   clusterColorOverrides = {},
   clusterLabelMap = {},
   maxClusters = 20,
-  /** When set (e.g. multi-sample integration), use this as shared y-axis max so all samples use the same scale. */
   globalYMax: externalGlobalYMax = null,
-  /** When false (e.g. multi-sample integration), sort by clusterId so order is consistent across samples; when true, sort by peak abundance. */
   sortClustersByAbundance = true,
-  /** Optional: ref to { containers: Record<number, HTMLElement>, syncing: boolean } to sync horizontal/vertical scroll across multiple CoveragePlots (e.g. atac-integration). */
   scrollSyncGroupRef = null,
-  /** Index of this plot in the sync group (0, 1, 2, ...). Required when scrollSyncGroupRef is set. */
   scrollSyncIndex = null,
 }) => {
   const wrapperRef = useRef(null);
   const headerRef = useRef(null);
   const bodyRef = useRef(null);
 
-  // Sync scroll with other CoveragePlots in the same group (e.g. multi-sample atac-integration)
   useEffect(() => {
     if (scrollSyncGroupRef == null || scrollSyncIndex == null) return;
     const el = bodyRef.current;
@@ -67,7 +57,6 @@ const CoveragePlot = ({
       group.syncing = true;
       const left = el.scrollLeft;
       const top = el.scrollTop;
-      // Use rAF so programmatic scroll doesn't fight with the same tick
       requestAnimationFrame(() => {
         for (const key of Object.keys(group.containers)) {
           if (Number(key) !== scrollSyncIndex) {
@@ -88,16 +77,10 @@ const CoveragePlot = ({
     };
   }, [scrollSyncGroupRef, scrollSyncIndex, coverageByCluster?.length]);
 
-  // Sort clusters by total signal (per-cell activity): highest first
-  // Signal values are Signac-style normalized by the backend (depth + cell-count corrected).
-  // Global max across all tracks gives a shared y-axis with hard clipping, matching Signac behavior.
   const { sortedClusters, globalMax } = useMemo(() => {
     if (!coverageByCluster?.length) return { sortedClusters: [], globalMax: 1 };
 
-    // Merge clusters that share the same display label:
-    // When the user renames two clusters to the same name, combine their
-    // signal tracks (weighted average by cell count) so one track is shown.
-    const labelGroups = new Map(); // displayLabel → [cluster, ...]
+    const labelGroups = new Map();
     for (const cluster of coverageByCluster) {
       const displayLabel = formatLabel(cluster.label, cluster.clusterId, clusterLabelMap);
       if (!labelGroups.has(displayLabel)) labelGroups.set(displayLabel, []);
@@ -109,7 +92,6 @@ const CoveragePlot = ({
       if (group.length === 1) {
         baseClusters.push(group[0]);
       } else {
-        // Weighted-average signal by cell count; keep first cluster's ID for color lookup
         const totalCells = group.reduce((sum, c) => sum + (c.cellCount || 0), 0);
         const signalLength = group[0].signal?.length || 0;
         const mergedSignal = [];
@@ -133,21 +115,17 @@ const CoveragePlot = ({
         });
       }
     }
-    //
 
-    // Calculate total signal for each cluster
     const clustersWithTotal = baseClusters.map(cluster => {
       const signal = cluster.signal || [];
       const totalSignal = signal.reduce((sum, s) => sum + (Number(s.value) || 0), 0);
       return { ...cluster, totalSignal };
     });
 
-    // Use external global y-max when provided (e.g. atac-integration: same scale across all samples)
     let yMax = 1;
     if (externalGlobalYMax != null && Number(externalGlobalYMax) > 0) {
       yMax = Number(externalGlobalYMax);
     } else {
-      // Collect all signal values to compute robust yMax from this track only
       const allValues = [];
       for (const cluster of clustersWithTotal) {
         for (const s of cluster.signal || []) {
@@ -160,7 +138,6 @@ const CoveragePlot = ({
       yMax = rawMax > 0 ? parseFloat(rawMax.toPrecision(2)) : 1;
     }
 
-    // Hard-clip signal values above yMax (Signac clips at ymax before plotting)
     for (const cluster of clustersWithTotal) {
       for (const s of cluster.signal || []) {
         const v = Number(s.value) || 0;
@@ -168,7 +145,6 @@ const CoveragePlot = ({
       }
     }
 
-    // Sort: by abundance (single-sample) or by clusterId (multi-sample) for consistent order across samples
     const sorted = [...clustersWithTotal]
       .sort((a, b) => {
         if (sortClustersByAbundance) return b.totalSignal - a.totalSignal;
@@ -187,7 +163,6 @@ const CoveragePlot = ({
     };
   }, [coverageByCluster, maxClusters, clusterLabelMap, externalGlobalYMax, sortClustersByAbundance]);
 
-  // Create color scale based on cluster IDs (sorted numerically for consistent colors)
   const colorScale = useMemo(() => {
     if (!sortedClusters.length) return null;
     const allClusterIds = coverageByCluster.map(c => c.clusterId);
@@ -238,7 +213,6 @@ const CoveragePlot = ({
       .domain([regionStart, regionEnd])
       .range([margin.left, width - margin.right]);
 
-    // ---- Fixed header: chromosome coords, PEAKS track, Gene track (ref-style, always visible) ----
     const trackLabelWidth = 52;
     const headerTop = 8;
     const xAxisY = headerTop + 18;
@@ -265,7 +239,6 @@ const CoveragePlot = ({
       .attr('font-size', '9px')
       .attr('fill', '#555');
 
-    // ---- PEAKS track (top, like reference) ----
     headerSvg.append('rect')
       .attr('x', 4)
       .attr('y', peakTrackY - 2)
@@ -309,7 +282,6 @@ const CoveragePlot = ({
       });
     }
 
-    // ---- Gene track (Refseq-style: label in box, gene name + gene body) ----
     headerSvg.append('rect')
       .attr('x', 4)
       .attr('y', geneTrackY - 2)
@@ -347,7 +319,6 @@ const CoveragePlot = ({
       .attr('fill', '#1e3a5f')
       .text(`${displayGeneName}  ${coordLabel}`);
 
-    // ---- Scrollable body: cluster tracks only ----
     const bodyMarginTop = 0;
     const bodyHeight = bodyMarginTop + totalTrackHeight + margin.bottom;
     const bodySvg = d3.select(bodyEl)
@@ -380,16 +351,13 @@ const CoveragePlot = ({
         .attr('stroke', '#e5e7eb')
         .attr('stroke-width', 0.5);
 
-      // Render as filled area curve (like Signac's geom_area)
       const sortedSignal = [...(cluster.signal || [])].sort((a, b) => a.start - b.start);
       if (sortedSignal.length > 0) {
-        // Build data points for d3.area: use midpoint of each bin as x
         const areaData = sortedSignal.map((d) => ({
           x: (d.start + d.end) / 2,
           y: Math.min(Number(d.value) || 0, yMax),
         }));
 
-        // SVG clipPath to keep area within the track bounds
         const clipId = `clip-track-${idx}`;
         bodySvg.append('defs').append('clipPath')
           .attr('id', clipId)
@@ -403,7 +371,7 @@ const CoveragePlot = ({
           .x((d) => xScale(d.x))
           .y0(trackY + trackHeight)
           .y1((d) => yScale(Math.max(d.y, 0)))
-          .curve(d3.curveBasis);       // smooth B-spline like Signac
+          .curve(d3.curveBasis);
 
         bodySvg.append('path')
           .datum(areaData)
@@ -470,7 +438,7 @@ const CoveragePlot = ({
     const totalH = titleBlockH + headerH + bodyH;
 
     const canvas = document.createElement('canvas');
-    const scale = 2; // retina
+    const scale = 2;
     canvas.width = totalW * scale;
     canvas.height = totalH * scale;
     const ctx = canvas.getContext('2d');
@@ -478,7 +446,6 @@ const CoveragePlot = ({
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, totalW, totalH);
 
-    // Draw title + subtitle
     const gLabel = (genome && String(genome).trim()) || 'hg38';
     ctx.fillStyle = '#333';
     ctx.font = 'bold 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
@@ -490,7 +457,6 @@ const CoveragePlot = ({
       12, 44
     );
 
-    // Helper to render an SVG element onto canvas at a given y offset
     const drawSvg = (svgEl, yOffset) => new Promise((resolve) => {
       const clone = svgEl.cloneNode(true);
       clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
@@ -547,9 +513,7 @@ const CoveragePlot = ({
           {genomeLabel} · {sortedClusters.length} clusters · normalized per cell · sorted by specificity · range 0–{globalMax >= 1 ? Math.round(globalMax) : globalMax.toFixed(2)}
         </p>
       </div>
-      {/* Fixed header: chromosome, gene track, peak track, always visible */}
       <div ref={headerRef} className="coverage-plot-header-tracks" />
-      {/* Scrollable cluster coverage tracks */}
       <div ref={bodyRef} className="coverage-plot-container" />
     </div>
   );

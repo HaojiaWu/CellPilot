@@ -1,11 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { Button, Dialog, FormGroup, Callout, Spinner } from '@blueprintjs/core';
 
-/**
- * Dialog component for managing histology image overlay
- * Handles image selection, transformation matrix loading, and DZI conversion
- * UI design borrowed from earlier version
- */
 const HistologyImageDialog = ({ onImageLoaded, onClose, isOpen, onLoadingChange }) => {
   const [imagePath, setImagePath] = useState(null);
   const [matrixPath, setMatrixPath] = useState(null);
@@ -64,13 +59,13 @@ const HistologyImageDialog = ({ onImageLoaded, onClose, isOpen, onLoadingChange 
     setLoading(true);
     setError(null);
     
-    // Notify parent that loading has started
     if (onLoadingChange) {
       onLoadingChange(true);
     }
 
     try {
-      // Load transformation matrix if provided
+      console.log('Loading histology image with transformation matrix...');
+      
       let transformMatrix = null;
       if (matrixPath) {
         const matrixResult = await window.electron.loadTransformationMatrix(matrixPath);
@@ -78,17 +73,18 @@ const HistologyImageDialog = ({ onImageLoaded, onClose, isOpen, onLoadingChange 
           throw new Error(`Failed to load transformation matrix: ${matrixResult.error}`);
         }
         transformMatrix = matrixResult.matrix;
+        console.log('Loaded transformation matrix:', transformMatrix);
       }
 
-      // Convert image to DZI with transformation matrix
-      // This will apply the transformation to the image before creating the DZI file
+      console.log('Converting image to DZI format with transformation...');
       const dziResult = await window.electron.convertTiffToDzi(imagePath, transformMatrix);
 
       if (!dziResult || !dziResult.success) {
         throw new Error(dziResult?.error || 'Failed to convert image to DZI');
       }
 
-      // Pass the loaded image data to parent component
+      console.log('Histology image loaded successfully:', dziResult);
+
       if (onImageLoaded) {
         onImageLoaded({
           dziUrl: dziResult.dziUrl,
@@ -100,7 +96,6 @@ const HistologyImageDialog = ({ onImageLoaded, onClose, isOpen, onLoadingChange 
         });
       }
 
-      // Close dialog on success
       if (onClose) {
         onClose();
       }
@@ -109,7 +104,6 @@ const HistologyImageDialog = ({ onImageLoaded, onClose, isOpen, onLoadingChange 
       setError(`Failed to load image: ${err.message}`);
     } finally {
       setLoading(false);
-      // Notify parent that loading has finished
       if (onLoadingChange) {
         onLoadingChange(false);
       }

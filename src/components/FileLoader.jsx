@@ -13,7 +13,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
   const [dataModality, setDataModality] = useState('single-cell');
   const [spatialModality, setSpatialModality] = useState('xenium');
   const [dragActive, setDragActive] = useState(false);
-  // scRNA-seq: single sample (h5/folder) vs multiple samples (integration)
   const [scRnaSampleMode, setScRnaSampleMode] = useState('single');
   const [integrationDatasets, setIntegrationDatasets] = useState([
     { name: '', path: '' },
@@ -21,7 +20,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
   ]);
   const [integrationCount, setIntegrationCount] = useState(2);
 
-  // scATAC-seq: single sample vs multiple samples (integration)
   const [atacSampleMode, setAtacSampleMode] = useState('single');
   const [atacIntegrationDatasets, setAtacIntegrationDatasets] = useState([
     { name: '', path: '' },
@@ -29,21 +27,18 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
   ]);
   const [atacIntegrationCount, setAtacIntegrationCount] = useState(2);
 
-  // Xenium spatial: single sample vs 2-sample integration
   const [xeniumSampleMode, setXeniumSampleMode] = useState('single');
   const [xeniumIntegrationDatasets, setXeniumIntegrationDatasets] = useState([
     { name: '', path: '' },
     { name: '', path: '' },
   ]);
 
-  // Visium HD spatial: single sample vs 2-sample integration
   const [visiumHDSampleMode, setVisiumHDSampleMode] = useState('single');
   const [visiumHDIntegrationDatasets, setVisiumHDIntegrationDatasets] = useState([
     { name: '', path: '' },
     { name: '', path: '' },
   ]);
 
-  // MERFISH spatial: single sample vs 2-sample integration
   const [merfishSampleMode, setMerfishSampleMode] = useState('single');
   const [merfishIntegrationDatasets, setMerfishIntegrationDatasets] = useState([
     { name: '', path: '' },
@@ -86,7 +81,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
     return lower.endsWith('.h5') || lower.endsWith('.hdf5');
   };
 
-  // central handler for a selected or dropped path
   const processSelectedPath = async (selectedPath, overrideModality) => {
     if (!selectedPath) return;
     setLoading(true);
@@ -100,7 +94,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         return;
       }
 
-      // Handle Xenium data
       if (effectiveModality === 'xenium') {
         if (!window.electron) {
           setError('Xenium import requires the desktop app.');
@@ -115,9 +108,8 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
             isValid: true,
             files: result.files,
             metadata: result.metadata,
-            // Xenium-specific: coordinates need to be divided by 0.2125 for histology alignment
             spatialScaleFactor: 0.2125,
-            histologyPrealigned: false, // Xenium requires transformation matrix for histology
+            histologyPrealigned: false,
           };
           onDataLoaded(result.regionPath || selectedPath, info);
           return;
@@ -126,7 +118,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         return;
       }
 
-      // Handle Visium HD data
       if (effectiveModality === 'visium-hd') {
         if (!window.electron) {
           setError('Visium HD import requires the desktop app.');
@@ -142,9 +133,8 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
             isValid: true,
             files: result.files,
             metadata: result.metadata,
-            // Visium HD: coordinates are already in pixel space, no scaling needed
             spatialScaleFactor: 1.0,
-            histologyPrealigned: true, // Visium HD histology images are pre-aligned
+            histologyPrealigned: true,
           };
           onDataLoaded(result.regionPath || selectedPath, info);
           return;
@@ -153,7 +143,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         return;
       }
 
-      // Handle MERFISH data
       if (effectiveModality === 'merfish') {
         if (!window.electron) {
           setError('MERFISH import requires the desktop app.');
@@ -168,9 +157,8 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
             isValid: true,
             files: result.files,
             metadata: result.metadata,
-            // MERFISH: coordinates are in physical space (microns), no scaling needed
             spatialScaleFactor: 1.0,
-            histologyPrealigned: false, // MERFISH typically has no histology image
+            histologyPrealigned: false,
           };
           onDataLoaded(result.regionPath || selectedPath, info);
           return;
@@ -179,7 +167,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         return;
       }
 
-      // Handle CosMX data
       if (effectiveModality === 'cosmx') {
         if (!window.electron) {
           setError('CosMX import requires the desktop app.');
@@ -194,9 +181,8 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
             isValid: true,
             files: result.files,
             metadata: result.metadata,
-            // CosMX: coordinates are in pixel space, no scaling needed
             spatialScaleFactor: 1.0,
-            histologyPrealigned: false, // CosMX typically has no histology image
+            histologyPrealigned: false,
           };
           onDataLoaded(result.regionPath || selectedPath, info);
           return;
@@ -205,7 +191,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         return;
       }
 
-      // scMultiome: 10x Cell Ranger ARC folder (filtered_feature_bc_matrix.h5 + analysis/ + atac_peak_annotation.tsv)
       if (effectiveModality === 'multiome') {
         if (!window.electron) {
           setError('scMultiome import requires the desktop app.');
@@ -230,16 +215,18 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         return;
       }
 
-      // scATAC-seq: 10x Cell Ranger ATAC folder (filtered_peak_bc_matrix.h5 + peak_annotation.tsv)
       if (effectiveModality === 'atac') {
         if (!window.electron) {
           setError('scATAC-seq import requires the desktop app.');
           return;
         }
         const result = await window.electron.read10xAtacFiles(selectedPath);
+        console.log('[FileLoader] ATAC result - barcodes debug:', JSON.stringify(result._barcodesDebug, null, 2));
+        console.log('[FileLoader] ATAC cellBarcodes:',
+          result.cellBarcodes ? `Array of ${result.cellBarcodes.length} - first 3: ${result.cellBarcodes.slice(0, 3).join(', ')}` : 'UNDEFINED/NULL'
+        );
         if (result.success) {
           let files = result.files;
-          // Large matrix: pass chunk key/size so App can stream to worker (never hold full 1.4GB in renderer)
           if (result._matrixChunkKey != null && result._matrixSize != null) {
             files = {
               ...result.files,
@@ -259,6 +246,9 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
             ...(result.genome && { genome: result.genome }),
             ...(result.cellBarcodes && { cellBarcodes: result.cellBarcodes }),
           };
+          console.log('[FileLoader] ATAC info.cellBarcodes:',
+            info.cellBarcodes ? `Array of ${info.cellBarcodes.length}` : 'UNDEFINED/NULL'
+          );
           onDataLoaded(result.regionPath || selectedPath, info);
           return;
         }
@@ -266,7 +256,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         return;
       }
 
-      // Single-cell H5 direct path
       if (isH5Path(selectedPath)) {
         const fileName = extractFileName(selectedPath);
         const info = {
@@ -285,7 +274,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         return;
       }
 
-      // List files in the directory
       const result = await window.electron.listDirectory(selectedPath);
       if (!result.success) {
         setError(result.error || 'Failed to read directory');
@@ -336,7 +324,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
       let effectiveModality = getEffectiveModality();
 
       if (dataModality === 'spatial') {
-        // Spatial platform is already selected via the Platform dropdown
         effectiveModality = spatialModality;
         selectedPath = await window.electron.selectFolder();
       } else if (effectiveModality === 'atac') {
@@ -360,7 +347,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
 
   return (
     <div className="file-loader">
-      {/* Data Type Selection */}
       <div className="file-loader-section">
         <div className="file-loader-row">
           <label className="file-loader-label">
@@ -373,7 +359,7 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
               onChange={(e) => {
                 const nextValue = e.target.value;
                 setDataModality(nextValue);
-                setError(null);  // Clear error when changing data type so user can retry
+                setError(null);
                 if (nextValue !== 'spatial') {
                   setSpatialModality('xenium');
                 }
@@ -409,7 +395,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       </div>
 
-      {/* Spatial: Platform selector (Xenium, Visium HD, MERFISH, CosMX) */}
       {dataModality === 'spatial' && (
         <div className="file-loader-section">
           <div className="file-loader-row">
@@ -441,7 +426,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* scRNA-seq: Single sample vs Multiple samples */}
       {dataModality === 'single-cell' && (
         <div className="file-loader-section">
           <div className="file-loader-row">
@@ -468,7 +452,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* scATAC-seq: Single sample vs Multiple samples */}
       {dataModality === 'atac' && (
         <div className="file-loader-section">
           <div className="file-loader-row">
@@ -495,7 +478,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Visium HD: Single sample vs 2-sample integration */}
       {dataModality === 'spatial' && spatialModality === 'visium-hd' && (
         <div className="file-loader-section">
           <div className="file-loader-row">
@@ -522,7 +504,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Xenium: Single sample vs 2-sample integration */}
       {dataModality === 'spatial' && spatialModality === 'xenium' && (
         <div className="file-loader-section">
           <div className="file-loader-row">
@@ -549,7 +530,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* MERFISH: Single sample vs 2-sample integration */}
       {dataModality === 'spatial' && spatialModality === 'merfish' && (
         <div className="file-loader-section">
           <div className="file-loader-row">
@@ -576,7 +556,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* ATAC multiple samples: name + path for each (2–3) */}
       {dataModality === 'atac' && atacSampleMode === 'multiple' && (
         <div className="file-loader-section file-loader-integration">
           <label className="file-loader-section-label">
@@ -675,7 +654,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Multiple samples: name + path for each (2–3) */}
       {dataModality === 'single-cell' && scRnaSampleMode === 'multiple' && (
         <div className="file-loader-section file-loader-integration">
           <label className="file-loader-section-label">
@@ -779,7 +757,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Xenium 2-sample integration: name + path for each */}
       {dataModality === 'spatial' && spatialModality === 'xenium' && xeniumSampleMode === 'multiple' && (
         <div className="file-loader-section file-loader-integration">
           <label className="file-loader-section-label">
@@ -848,7 +825,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Visium HD 2-sample integration: name + path for each */}
       {dataModality === 'spatial' && spatialModality === 'visium-hd' && visiumHDSampleMode === 'multiple' && (
         <div className="file-loader-section file-loader-integration">
           <label className="file-loader-section-label">
@@ -917,7 +893,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* MERFISH 2-sample integration: name + path for each */}
       {dataModality === 'spatial' && spatialModality === 'merfish' && merfishSampleMode === 'multiple' && (
         <div className="file-loader-section file-loader-integration">
           <label className="file-loader-section-label">
@@ -986,7 +961,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Load Visium HD integration button */}
       {dataModality === 'spatial' && spatialModality === 'visium-hd' && visiumHDSampleMode === 'multiple' && !(dataInfo?.modality === 'visium-hd-integration') && (
         <div className="file-loader-section">
           <Button
@@ -1052,7 +1026,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Load Xenium integration button */}
       {dataModality === 'spatial' && spatialModality === 'xenium' && xeniumSampleMode === 'multiple' && !(dataInfo?.modality === 'xenium-integration') && (
         <div className="file-loader-section">
           <Button
@@ -1117,7 +1090,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Load MERFISH integration button */}
       {dataModality === 'spatial' && spatialModality === 'merfish' && merfishSampleMode === 'multiple' && !(dataInfo?.modality === 'merfish-integration') && (
         <div className="file-loader-section">
           <Button
@@ -1182,7 +1154,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Data Folder Section (single path) – for single sample or non–scRNA/ATAC types */}
       {(dataModality !== 'single-cell' || scRnaSampleMode === 'single') && (dataModality !== 'atac' || atacSampleMode === 'single') && !(dataModality === 'spatial' && spatialModality === 'xenium' && xeniumSampleMode === 'multiple') && !(dataModality === 'spatial' && spatialModality === 'visium-hd' && visiumHDSampleMode === 'multiple') && !(dataModality === 'spatial' && spatialModality === 'merfish' && merfishSampleMode === 'multiple') && (
       <div className="file-loader-section">
         <label className="file-loader-section-label">
@@ -1250,7 +1221,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
               className={`no-data-placeholder${dragActive ? ' drag-over' : ''}`}
               onDragOver={(e) => {
                 e.preventDefault();
-                // Hint copy action to the OS
                 if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
                 setDragActive(true);
               }}
@@ -1263,27 +1233,27 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
                 setDragActive(false);
                 const dt = e.dataTransfer;
                 if (!dt) return;
-                // Debug context for tricky drag sources (Finder, aliases, etc.)
                 try {
                   // eslint-disable-next-line no-console
+                  console.debug('[Drop] types:', dt.types);
                   // eslint-disable-next-line no-console
+                  console.debug('[Drop] files:', Array.from(dt.files || []).map(f => ({ name: f.name, path: f.path, size: f.size, type: f.type })));
                 } catch (_) {}
                 const looksLikeAbsolute = (p) => typeof p === 'string' && (
-                  p.startsWith('/') || // macOS / Linux
-                  /^[a-zA-Z]:\\/.test(p) // Windows C:\
+                  p.startsWith('/') ||
+                  /^[a-zA-Z]:\\/.test(p)
                 );
 
                 const files = Array.from(dt.files || []);
-                // 1) Try paths from File objects (Electron exposes absolute paths here)
                 let candidate = files.map(f => f.path).find(p => looksLikeAbsolute(p));
 
-                // 2) Try text/uri-list
                 if (!candidate && dt.getData) {
                   try {
                     const uriList = dt.getData('text/uri-list');
                     try {
                       if (uriList) {
                         // eslint-disable-next-line no-console
+                        console.debug('[Drop] text/uri-list:', uriList);
                       }
                     } catch (_) {}
                     if (uriList) {
@@ -1294,22 +1264,22 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
                           const parsed = new URL(fileUri.trim());
                           if (parsed.protocol === 'file:') {
                             let p = decodeURIComponent(parsed.pathname || parsed.href.replace('file://', ''));
-                            if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1); // Windows /C:/...
+                            if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1);
                             if (looksLikeAbsolute(p)) candidate = p;
                           }
-                        } catch (_) { /* ignore */ }
+                        } catch (_) {  }
                       }
                     }
-                  } catch (_) { /* ignore */ }
+                  } catch (_) {  }
                 }
 
-                // 3) Try plain text (some apps put the absolute path here)
                 if (!candidate && dt.getData) {
                   try {
                     const txt = dt.getData('text/plain') || dt.getData('text');
                     try {
                       if (txt) {
                         // eslint-disable-next-line no-console
+                        console.debug('[Drop] text/plain:', txt);
                       }
                     } catch (_) {}
                     if (txt) {
@@ -1322,18 +1292,18 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
                             if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1);
                             if (looksLikeAbsolute(p)) candidate = p;
                           }
-                        } catch (_) { /* ignore */ }
+                        } catch (_) {  }
                       } else if (looksLikeAbsolute(firstLine.trim())) {
                         candidate = firstLine.trim();
                       }
                     }
-                  } catch (_) { /* ignore */ }
+                  } catch (_) {  }
                 }
 
-                // 4) As a last resort, inspect string DataTransferItem entries
                 if (!candidate && dt.items && dt.items.length) {
                   try {
                     // eslint-disable-next-line no-console
+                    console.debug('[Drop] items:', Array.from(dt.items).map(it => ({ kind: it.kind, type: it.type })));
                   } catch (_) {}
                   const stringReads = await Promise.all(Array.from(dt.items).map(item => new Promise(resolve => {
                     try {
@@ -1355,7 +1325,7 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
                           if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1);
                           if (looksLikeAbsolute(p)) { candidate = p; break; }
                         }
-                      } catch (_) { /* ignore */ }
+                      } catch (_) {  }
                     } else if (looksLikeAbsolute(line.trim())) {
                       candidate = line.trim();
                       break;
@@ -1368,6 +1338,7 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
                 } else {
                   try {
                     // eslint-disable-next-line no-console
+                    console.debug('[Drop] No absolute path resolved. dt snapshot above. Electron?', !!window.electron);
                   } catch (_) {}
                   setError('Unable to determine full filesystem path from drop. Please use Browse... or drop the folder directly from Finder/Explorer.');
                 }
@@ -1390,7 +1361,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
       </div>
       )}
 
-      {/* Load ATAC integration button */}
       {dataModality === 'atac' && atacSampleMode === 'multiple' && (
         <div className="file-loader-section">
           <Button
@@ -1423,26 +1393,26 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
                     setError(`Failed to read ATAC sample "${name}": ${result.error || 'Unknown error'}`);
                     return;
                   }
-                  // Large matrix: fetch all chunks NOW before the next read10xAtacFiles call
-                  // clears the electron cache (atacMatrixChunkCache.clear() in electron.js).
                   let atacFiles = result.files;
                   if (result._matrixChunkKey != null && result._matrixSize != null) {
                     const INT_CHUNK = 80 * 1024 * 1024;
                     const ck = result._matrixChunkKey;
                     const sz = result._matrixSize;
+                    console.log(`[FileLoader] Fetching ATAC matrix for "${name}": ${(sz / 1024 / 1024).toFixed(0)} MB`);
                     const parts = [];
                     for (let off = 0; off < sz; off += INT_CHUNK) {
                       const len = Math.min(INT_CHUNK, sz - off);
                       const chunk = await window.electron.getAtacMatrixChunk(ck, off, len);
                       if (!chunk || (chunk.byteLength ?? chunk.length ?? 0) === 0) break;
-                      parts.push(chunk.slice()); // slice() gives independent buffer
+                      parts.push(chunk.slice());
                     }
-                    try { window.electron.releaseAtacMatrixBuffer(ck); } catch (e) { /* ignore */ }
+                    try { window.electron.releaseAtacMatrixBuffer(ck); } catch (e) {  }
                     const totalLen = parts.reduce((s, c) => s + c.byteLength, 0);
                     const merged = new Uint8Array(totalLen);
                     let pos = 0;
                     for (const p of parts) { merged.set(p, pos); pos += p.byteLength; }
                     atacFiles = { ...result.files, matrix: { name: result.files.matrix?.name || 'matrix.mtx', data: merged } };
+                    console.log(`[FileLoader] ATAC matrix "${name}": ${(totalLen / 1024 / 1024).toFixed(0)} MB assembled`);
                   }
                   atacIntegrationPayloads.push({
                     name,
@@ -1475,7 +1445,6 @@ const FileLoader = ({ onDataLoaded, dataInfo }) => {
         </div>
       )}
 
-      {/* Load integration button (only when Multiple samples and 2–3 datasets filled) */}
       {dataModality === 'single-cell' && scRnaSampleMode === 'multiple' && (
         <div className="file-loader-section">
           <Button

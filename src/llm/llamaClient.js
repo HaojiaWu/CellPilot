@@ -1,12 +1,3 @@
-/**
- * LlamaClient: Wrapper for llama.cpp integration
- * 
- * This client handles:
- * 1. Loading and managing llama.cpp models
- * 2. Parsing user commands into structured analysis requests
- * 3. Generating responses for analysis results
- */
-
 export class LlamaClient {
   constructor(modelId) {
     this.modelId = modelId;
@@ -14,11 +5,12 @@ export class LlamaClient {
     this.context = null;
   }
 
-  /**
-   * Initialize the llama.cpp model
-   */
   async initialize() {
     try {
+      
+      console.log(`Initializing model: ${this.modelId}`);
+      
+      
       return true;
     } catch (error) {
       console.error('Failed to initialize llama model:', error);
@@ -26,18 +18,10 @@ export class LlamaClient {
     }
   }
 
-  /**
-   * Parse a user command into a structured analysis request
-   * @param {string} userMessage: The user's natural language command
-   * @param {object} dataInfo: Information about the loaded dataset
-   * @param {array} conversationHistory: Previous commands and context
-   * @param {object} lastPlotContext: Information about the last plot created
-   * @returns {Promise<object>}: Structured command object
-   */
   async parseCommand(userMessage, dataInfo, conversationHistory = [], lastPlotContext = null) {
+    
     const lower = userMessage.toLowerCase();
     
-    // Check if user is referring to the previous plot
     const isReferencingPrevious = (
       lower.includes('it') || 
       lower.includes('that') || 
@@ -48,11 +32,10 @@ export class LlamaClient {
       (lower.includes('update') && !lower.includes('gene'))
     );
     
-    // Extract colormap directive
     const colorDirective = this.extractColorDirective(userMessage);
     
-    // If referencing previous plot and asking for color change
     if (isReferencingPrevious && colorDirective && lastPlotContext?.action === 'plot_gene_expression') {
+      console.log('LLM: Detected context-aware colormap change for gene:', lastPlotContext.gene);
       return {
         action: 'plot_gene_expression',
         params: { 
@@ -62,10 +45,8 @@ export class LlamaClient {
       };
     }
     
-    // Detect violin intent early
     const wantsViolin = lower.includes('violin');
 
-    // Try to extract gene names (robust patterns + avoid common stopwords)
     const stopwords = new Set(['gene','expression','cells','umap','please','show','plot','me','the','for','of','color','colour','to','violin']);
     const genePatterns = [
       /gene\s+expression\s+(?:of|for)\s+([A-Za-z0-9-]+)/i,
@@ -85,7 +66,6 @@ export class LlamaClient {
       }
     }
 
-    // If violin requested but no gene yet, try violin-specific patterns
     if (wantsViolin && !geneMatch) {
       const violinPatterns = [
         /violin\s+plot\s+(?:for\s+)?([A-Za-z0-9-]+)/i,
@@ -101,8 +81,6 @@ export class LlamaClient {
       }
     }
     
-    // Explicit rerun/recluster/reanalyze: user wants to force a full analysis
-    // This should trigger full pipeline even if precomputed data exists
     if (lower.includes('rerun') || lower.includes('re-run') ||
         lower.includes('recluster') || lower.includes('re-cluster') ||
         lower.includes('reanalyze') || lower.includes('re-analyze') ||
@@ -115,7 +93,6 @@ export class LlamaClient {
       };
     }
 
-    // Clustering + Visualization (use precomputed if available)
     if (lower.includes('cluster') && (lower.includes('umap') || lower.includes('visualize'))) {
       return {
         action: 'cluster_and_visualize',
@@ -123,7 +100,6 @@ export class LlamaClient {
       };
     }
     
-    // UMAP only
     if (lower.includes('umap') || lower.includes('dimension reduction') || lower.includes('embedding')) {
       return {
         action: 'run_umap',
@@ -131,7 +107,6 @@ export class LlamaClient {
       };
     }
     
-    // Violin plot intent
     if (wantsViolin && geneMatch) {
       return {
         action: 'plot_gene_violin',
@@ -139,7 +114,6 @@ export class LlamaClient {
       };
     }
 
-    // Gene expression
     if (geneMatch || lower.includes('expression') || lower.includes('plot gene')) {
       return {
         action: 'plot_gene_expression',
@@ -150,7 +124,6 @@ export class LlamaClient {
       };
     }
     
-    // Marker genes
     if (lower.includes('marker')) {
       const clusterMatch = userMessage.match(/cluster\s+(\d+)/i);
       return {
@@ -159,7 +132,6 @@ export class LlamaClient {
       };
     }
     
-    // Quality control
     if (lower.includes('qc') || lower.includes('quality') || lower.includes('filter')) {
       return {
         action: 'run_qc',
@@ -167,7 +139,6 @@ export class LlamaClient {
       };
     }
     
-    // PCA
     if (lower.includes('pca') || lower.includes('principal component')) {
       return {
         action: 'run_pca',
@@ -175,7 +146,6 @@ export class LlamaClient {
       };
     }
 
-    // Normalize
     if (lower.includes('normalize') || lower.includes('normalization')) {
       return {
         action: 'normalize',
@@ -183,30 +153,22 @@ export class LlamaClient {
       };
     }
 
-    // Default: general analysis
     return {
       action: 'general_analysis',
       params: { query: userMessage }
     };
   }
 
-  /**
-   * Extract color directive from user message
-   * @param {string} text: User message
-   * @returns {object|null}: Color directive object or null
-   */
   extractColorDirective(text) {
     const lower = text.toLowerCase();
     const knownColorSchemes = ['viridis', 'magma', 'inferno', 'plasma', 'cividis', 'turbo', 'cubehelix'];
 
-    // Check for known color schemes
     for (const scheme of knownColorSchemes) {
       if (lower.includes(scheme)) {
         return { type: 'scheme', name: scheme };
       }
     }
 
-    // Check for custom color patterns
     const customMatch = text.match(/color(?:\s?bar|\s?map)?(?:\s+use|\s+with|\s+to)?\s+([a-zA-Z,\s]+)/i);
     if (customMatch && customMatch[1]) {
       const colors = customMatch[1]
@@ -218,7 +180,6 @@ export class LlamaClient {
       }
     }
 
-    // Check for blue-white-red pattern
     if (lower.includes('blue') && lower.includes('white') && lower.includes('red')) {
       return { type: 'custom', colors: ['lightgray', 'orange', 'red'] };
     }
@@ -226,12 +187,8 @@ export class LlamaClient {
     return null;
   }
 
-  /**
-   * Generate a response for analysis results
-   * @param {object} results: Analysis results
-   * @returns {Promise<string>}: Natural language response
-   */
   async generateResponse(results) {
+    
     if (results.type === 'umap') {
       if (results.clusters) {
         const nClusters = new Set(results.clusters).size;
@@ -262,12 +219,10 @@ export class LlamaClient {
     return 'Analysis complete!';
   }
 
-  /**
-   * Download a model from Hugging Face or other source
-   * @param {string} modelId: Model identifier
-   * @param {function} progressCallback: Callback for progress updates
-   */
   static async downloadModel(modelId, progressCallback) {
+    
+    console.log(`Downloading model: ${modelId}`);
+    
     for (let i = 0; i <= 100; i += 10) {
       await new Promise(resolve => setTimeout(resolve, 500));
       if (progressCallback) {
@@ -278,9 +233,6 @@ export class LlamaClient {
     return true;
   }
 
-  /**
-   * List available models
-   */
   static getAvailableModels() {
     return [
       {

@@ -1,9 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Expose protected methods that allow the renderer process to use
-// the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electron', {
-  // File system operations
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   selectPath: () => ipcRenderer.invoke('select-path'),
   selectSpatialType: () => ipcRenderer.invoke('select-spatial-type'),
@@ -27,28 +24,21 @@ contextBridge.exposeInMainWorld('electron', {
   selectHistologyImage: () => ipcRenderer.invoke('select-histology-image'),
   selectTransformationMatrix: () => ipcRenderer.invoke('select-transformation-matrix'),
 
-  // ATAC-seq fragment queries
   queryAtacFragments: (options) => ipcRenderer.invoke('query-atac-fragments', options),
 
-  // CellPilot results persistence (save/load UMAP + clusters to input folder)
   saveCellpilotResults: (folderPath, results) => ipcRenderer.invoke('save-cellpilot-results', folderPath, results),
   saveCellpilotResultsSync: (folderPath, results) => ipcRenderer.sendSync('save-cellpilot-results-sync', folderPath, results),
   checkCellpilotResults: (folderPath) => ipcRenderer.invoke('check-cellpilot-results', folderPath),
 
-  // High-resolution screenshot capture
   captureScreenshot: (options) => ipcRenderer.invoke('capture-screenshot', options),
 
-  // Screen recording
   saveRecording: (buffer, ext) => ipcRenderer.invoke('save-recording', buffer, ext),
 
-  // Session tracking (optional: for UI display)
   getSessionInfo: () => ipcRenderer.invoke('get-session-info'),
 
-  // Platform info
   platform: process.platform,
 
-  // Check if running in Electron
   isElectron: true,
 });
 
-
+console.log('Preload script loaded');

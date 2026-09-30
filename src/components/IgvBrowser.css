@@ -57,12 +57,10 @@
   color: #64748b;
 }
 
-/* Override IGV default min-height so it fits our container */
 .igv-browser-container .igv-root-container {
   min-height: 0;
 }
 
-/* Hide IGV branding text (e.g. "Powered by IGV" link) inside the browser */
 .igv-browser-container a[href*="igv.org"],
 .igv-browser-container .igv-navbar-div a[href*="igv"] {
   display: none !important;

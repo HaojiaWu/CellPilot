@@ -1,17 +1,7 @@
-/**
- * OllamaService: Local Ollama integration for intent classification
- *
- * This service is used as a FALLBACK when keyword matching doesn't find a match.
- * It uses a local Ollama instance to classify user intent into predefined actions.
- */
-
-// Default Ollama endpoint
 const OLLAMA_BASE_URL = 'http://localhost:11434';
 
-// Default model: small and fast
 const DEFAULT_MODEL = 'llama3.2:3b';
 
-// Available actions that CellPilot can perform
 const AVAILABLE_ACTIONS = [
   { action: 'find_markers', description: 'Find marker genes for a cluster', examples: ['top genes for cluster 1', 'what genes define cluster 3', 'show markers', 'differentially expressed genes'] },
   { action: 'cluster_info', description: 'Get information about a cluster', examples: ['tell me about cluster 1', 'what is cluster 2', 'describe cluster 5', 'cluster 3 info'] },
@@ -29,7 +19,6 @@ const AVAILABLE_ACTIONS = [
   { action: 'unknown', description: 'Cannot understand or not related to single-cell analysis', examples: [] },
 ];
 
-// Build the system prompt
 function buildSystemPrompt(dataContext = {}) {
   const actionsDescription = AVAILABLE_ACTIONS
     .filter(a => a.action !== 'unknown')
@@ -78,24 +67,19 @@ User: "hello how are you"
 {"action": "unknown"}`;
 }
 
-/**
- * Check if Ollama is available
- */
 export async function checkOllamaAvailable() {
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
       method: 'GET',
-      signal: AbortSignal.timeout(2000), // 2 second timeout
+      signal: AbortSignal.timeout(2000),
     });
     return response.ok;
   } catch (error) {
+    console.log('Ollama not available:', error.message);
     return false;
   }
 }
 
-/**
- * Get list of available models from Ollama
- */
 export async function getAvailableModels() {
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`);
@@ -108,13 +92,6 @@ export async function getAvailableModels() {
   }
 }
 
-/**
- * Classify user intent using Ollama
- * @param {string} userMessage: The user's message
- * @param {object} dataContext: Current data context (clusters, etc.)
- * @param {string} model: Model to use (default: llama3.2:3b)
- * @returns {Promise<object|null>}: Parsed command or null if failed
- */
 export async function classifyIntent(userMessage, dataContext = {}, model = DEFAULT_MODEL) {
   try {
     const systemPrompt = buildSystemPrompt(dataContext);
@@ -129,11 +106,11 @@ export async function classifyIntent(userMessage, dataContext = {}, model = DEFA
         prompt: `${systemPrompt}\n\nUser: "${userMessage}"\n`,
         stream: false,
         options: {
-          temperature: 0.1, // Low temperature for consistent classification
-          num_predict: 100, // Short response expected
+          temperature: 0.1,
+          num_predict: 100,
         },
       }),
-      signal: AbortSignal.timeout(10000), // 10 second timeout
+      signal: AbortSignal.timeout(10000),
     });
 
     if (!response.ok) {
@@ -144,9 +121,8 @@ export async function classifyIntent(userMessage, dataContext = {}, model = DEFA
     const data = await response.json();
     const responseText = data.response?.trim();
 
+    console.log('Ollama raw response:', responseText);
 
-    // Try to parse JSON from response
-    // Sometimes LLMs add extra text, so we try to extract JSON
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       console.warn('No JSON found in Ollama response');
@@ -155,19 +131,18 @@ export async function classifyIntent(userMessage, dataContext = {}, model = DEFA
 
     const parsed = JSON.parse(jsonMatch[0]);
 
-    // Validate the response
     if (!parsed.action) {
       console.warn('Invalid response - no action field');
       return null;
     }
 
-    // Check if action is valid
     const validActions = AVAILABLE_ACTIONS.map(a => a.action);
     if (!validActions.includes(parsed.action)) {
       console.warn('Invalid action:', parsed.action);
       return { action: 'unknown' };
     }
 
+    console.log('Ollama classified intent:', parsed);
     return parsed;
 
   } catch (error) {
@@ -176,9 +151,6 @@ export async function classifyIntent(userMessage, dataContext = {}, model = DEFA
   }
 }
 
-/**
- * Format a friendly "I don't understand" message with suggestions
- */
 export function getUnknownResponseMessage() {
   return `I'm not sure what you're asking for. Here are some things I can help with:
 

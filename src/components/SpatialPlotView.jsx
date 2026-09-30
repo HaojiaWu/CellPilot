@@ -19,14 +19,14 @@ import './PlotView.css';
 
 const BASE_COLOR = [102, 126, 234, 200];
 const MAX_SAMPLE_POINTS = 200_000;
-const VISIUM_HD_SEGMENTED_MAX_SAMPLE_POINTS = 400_000;  // 2x for segmented
-const VISIUM_HD_BINNED_MAX_SAMPLE_POINTS = 800_000;     // 4x for binned (sparser bins)
+const VISIUM_HD_SEGMENTED_MAX_SAMPLE_POINTS = 400_000;
+const VISIUM_HD_BINNED_MAX_SAMPLE_POINTS = 800_000;
 const DENSITY_THRESHOLD = 2_500_000;
 const INITIAL_MIN_ZOOM_PAD = 20;
 const INITIAL_MAX_ZOOM_PAD = 24;
-const ZOOM_SCALE_PER_LEVEL = 1.5;  // Match UMAP view for consistent zoom scaling
+const ZOOM_SCALE_PER_LEVEL = 1.5;
 const MIN_ZOOM_SCALE = 0.3;
-const MAX_ZOOM_SCALE = 12;  // Match UMAP view max zoom scale
+const MAX_ZOOM_SCALE = 12;
 const XENIUM_ZOOM_SCALE_PER_LEVEL = 1.25;
 const XENIUM_MAX_ZOOM_SCALE = 6;
 
@@ -112,7 +112,6 @@ const createColorFunction = (colorDef, minExp, maxExp) => {
     return (value) => interpolator(clamp01((value - minExp) / safeRange));
   }
 
-  // Default: lightgray-orange-red (same as other modalities)
   const defaultColors = ['lightgray', 'orange', 'red'];
   const steps = defaultColors.length - 1;
   const domain = defaultColors.map((_, idx) => minExp + (safeRange * idx) / steps);
@@ -130,7 +129,6 @@ const colorToRgba = (value, fallback = BASE_COLOR) => {
     return [value[0], value[1], value[2], alpha];
   }
 
-  // Handle "transparent" as a special case (d3.color doesn't parse it)
   if (typeof value === 'string' && value.toLowerCase().trim() === 'transparent') {
     return [0, 0, 0, 0];
   }
@@ -153,7 +151,6 @@ const formatClusterLabel = (label, labelMap = {}) => {
   }
   const key = String(label).trim();
   
-  // Check if there's a custom label in the label map
   if (labelMap && labelMap[key]) {
     return labelMap[key];
   }
@@ -197,7 +194,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
   const [loadingHistology, setLoadingHistology] = useState(false);
   const [showHistologyDialog, setShowHistologyDialog] = useState(false);
 
-  // OpenSeadragon refs and state
   const osdContainerRef = useRef(null);
   const osdViewerRef = useRef(null);
   const osdSizeRef = useRef(null);
@@ -207,7 +203,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
   const [osdViewerReady, setOsdViewerReady] = useState(false);
   const [overlayReady, setOverlayReady] = useState(false);
 
-  // DeckGL viewState synced to OpenSeadragon viewport
   const [osdViewState, setOsdViewState] = useState(null);
   const osdViewStateRef = useRef(null);
   const isUpdatingFromOsdRef = useRef(false);
@@ -217,21 +212,24 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
   const totalCells = spatialIndex?.pointCount || 0;
   const hasCoordinates = Boolean(spatialReady && spatialIndex && totalCells > 0);
 
-  // Spatial coordinate scaling configuration, extensible for different modalities
-  // Each modality can define its own scale factor and whether histology is pre-aligned
-  // Xenium: spatialScaleFactor=0.2125, histologyPrealigned=false
-  // Visium HD: spatialScaleFactor=1.0, histologyPrealigned=true
-  // Future modalities (CosMx, MERFISH, etc.) can define their own values
-  const spatialScaleFactor = dataInfo?.spatialScaleFactor ?? 0.2125; // Default to Xenium behavior for backwards compatibility
+  const spatialScaleFactor = dataInfo?.spatialScaleFactor ?? 0.2125;
   const histologyPrealigned = dataInfo?.histologyPrealigned ?? false;
-  const needsScaling = spatialScaleFactor !== 1.0; // Only apply scaling if factor is not 1.0
+  const needsScaling = spatialScaleFactor !== 1.0;
 
-  // Keep isVisiumHD for specific Visium HD features (like polygon rendering, sample point limits)
   const isVisiumHD = dataInfo?.format === '10X Visium HD';
 
-  // Visium HD polygon data
   const hasPolygons = dataInfo?.hasPolygons || false;
   const polygonData = hasPolygons ? dataInfo?.polygons : null;
+
+  useEffect(() => {
+    if (hasPolygons && polygonData) {
+      console.log('SpatialPlotView: Visium HD polygon data available', {
+        hasPolygons,
+        polygonCount: polygonData?.length || 0,
+        samplePolygon: polygonData?.[0] || null,
+      });
+    }
+  }, [hasPolygons, polygonData]);
 
   const [baseZoom, setBaseZoom] = useState(null);
   const [samplingViewState, setSamplingViewState] = useState(null);
@@ -242,7 +240,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
   const [selectedRegions, setSelectedRegions] = useState([]);
   const selectionDragRef = useRef(null);
 
-  // Reset hover state when selection is cleared
   useEffect(() => {
     if (selectedClusters.size === 0) {
       setIsHovering(false);
@@ -250,42 +247,49 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
   }, [selectedClusters.size]);
 
   const resolvedResults = useMemo(() => {
-    // Priority 1: If activePlot is set and it's a gene expression or other artifact, use it
     if (activePlot) {
-      // Special handling for violin plots in spatial mode: use the spatial artifact for scatter plot
       if (activePlot.source === 'analysis' && activePlot.data?.type === 'gene_violin' && activePlot.spatialArtifactId) {
         const artifact = artifacts.find((artifact) => artifact.id === activePlot.spatialArtifactId) || null;
+        console.log('SpatialPlotView resolvedResults: Using spatial artifact for violin plot', artifact?.type);
         return artifact;
       }
-      // Special handling for dotplots in spatial mode: use the spatial artifact for scatter plot
       if (activePlot.source === 'artifact' && activePlot.spatialArtifactId) {
         const artifact = artifacts.find((artifact) => artifact.id === activePlot.spatialArtifactId) || null;
+        console.log('SpatialPlotView resolvedResults: Using spatial artifact for dotplot', artifact?.type);
         return artifact;
       }
       if (activePlot.source === 'artifact') {
         const artifact = artifacts.find((artifact) => artifact.id === activePlot.artifactId) || null;
+        console.log('SpatialPlotView resolvedResults: Using artifact', {
+          type: artifact?.type,
+          geneName: artifact?.geneName,
+          hasColorMap: !!artifact?.colorMap,
+          colorMap: artifact?.colorMap,
+        });
         return artifact;
       }
       if (activePlot.source === 'analysis' && activePlot.data) {
-        // Only use activePlot for types that make sense in spatial view
         const spatialCompatibleTypes = ['gene_expression', 'gene_violin'];
         if (spatialCompatibleTypes.includes(activePlot.data.type)) {
+          console.log('SpatialPlotView resolvedResults: Using activePlot (spatial-compatible)', activePlot.data.type);
           return activePlot.data;
         }
+        console.log('SpatialPlotView resolvedResults: Ignoring non-spatial activePlot type', activePlot.data.type);
       }
     }
 
-    // Priority 2: Use regionPlot (BANKSY) only when the active plot is region-focused;
-    // otherwise mirror the UMAP view and show transcriptomic clusters.
     const isRegionFocused = activePlot?.data?.source === 'banksy' || activePlot?.data?.type === 'region_composition';
     if (isRegionFocused && regionPlot && regionPlot.source === 'analysis') {
+      console.log('SpatialPlotView resolvedResults: Using regionPlot (BANKSY)', regionPlot.data?.type, 'regions:', regionPlot.data?.nClusters);
       return regionPlot.data || null;
     }
 
     if (clusterPlot && clusterPlot.source === 'analysis') {
+      console.log('SpatialPlotView resolvedResults: Using clusterPlot', clusterPlot.data?.type, 'clusters:', clusterPlot.data?.clusters?.length);
       return clusterPlot.data || null;
     }
 
+    console.log('SpatialPlotView resolvedResults: No plot data, returning null');
     return null;
   }, [activePlot, clusterPlot, regionPlot, artifacts]);
 
@@ -380,7 +384,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     const zoom = Math.log2(scale);
 
     setViewState((prev) => {
-      // Only initialize if viewState doesn't exist or doesn't have a zoom value
       if (!prev || typeof prev.zoom !== 'number') {
         return {
           ...prev,
@@ -392,7 +395,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
           maxZoom: zoom + INITIAL_MAX_ZOOM_PAD,
         };
       }
-      // Otherwise, just update dimensions and keep existing zoom and limits
       return {
         ...prev,
         width: dimensions.width,
@@ -432,7 +434,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     };
   }, [viewState]);
 
-
   const downloadCanvasImage = useCallback((name = 'spatial') => {
     try {
       const container = containerRef.current;
@@ -469,6 +470,8 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
   }, []);
 
   const handleHistologyImageLoaded = useCallback((imageData) => {
+    console.log('Histology image loaded from dialog:', imageData);
+    
     const fileName = imageData.imagePath ? imageData.imagePath.split(/[/\\]/).pop() : 'histology_image';
     setHistologyImage({
       dziUrl: imageData.dziUrl,
@@ -479,6 +482,7 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
 
     if (imageData.transformMatrix) {
       setTransformationMatrix(imageData.transformMatrix);
+      console.log('Transformation matrix set:', imageData.transformMatrix);
     } else {
       setTransformationMatrix(null);
     }
@@ -492,7 +496,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     setLoadingHistology(false);
   }, []);
 
-  // Normalize cluster ids so special values map to "0"; keep consistent with UMAP view
   const normalizeCluster = useCallback((c) => {
     if (c == null) return '0';
     const s = String(c).trim().toLowerCase();
@@ -500,13 +503,13 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     return String(c);
   }, []);
 
-  // When a region_composition query is active, highlight only that region on the spatial view
   const highlightedRegionId = activePlot?.data?.type === 'region_composition'
     ? String(activePlot.data.regionId)
     : null;
 
   const colorState = useMemo(() => {
     if (!resolvedResults) {
+      console.log('SpatialPlotView colorState: No resolvedResults, using constant color');
       return {
         mode: 'constant',
         getColor: () => BASE_COLOR,
@@ -514,6 +517,15 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         trigger: 'constant',
       };
     }
+
+    console.log('SpatialPlotView colorState: Checking resolvedResults', {
+      type: resolvedResults.type,
+      hasExpression: !!resolvedResults.expression,
+      expressionLength: resolvedResults.expression?.length,
+      expressionType: resolvedResults.expression?.constructor?.name,
+      isArray: Array.isArray(resolvedResults.expression),
+      isTypedArray: ArrayBuffer.isView(resolvedResults.expression),
+    });
 
     if (resolvedResults.type === 'umap' && Array.isArray(resolvedResults.clusters)) {
       const clustersRaw = resolvedResults.clusters;
@@ -525,11 +537,16 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       const uniqueClusters = useGlobalDomain
         ? Array.from(new Set([...(clusterColorDomain || []), ...clusters]))
         : Array.from(new Set(clusters));
-      // When showing regions, use regionLabelMap for labels; otherwise use clusterLabelMap
+      console.log('SpatialPlotView colorState: Processing UMAP clusters', {
+        totalCells: clusters.length,
+        uniqueClusters: uniqueClusters.length,
+        useGlobalDomain,
+        clusterIds: uniqueClusters.slice(0, 10),
+      });
+
       const isRegionData = resolvedResults?.source === 'banksy';
       const effectiveLabelMap = isRegionData && Object.keys(regionLabelMap).length > 0 ? regionLabelMap : clusterLabelMap;
 
-      // Build mapping: clusterID -> renamed label (for merged clusters, multiple IDs share one label)
       const clusterIdToLabel = {};
       uniqueClusters.forEach((clusterId) => {
         const key = String(clusterId);
@@ -543,7 +560,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         labelToClusterIds[label].push(clusterId);
       });
 
-      // When integration (clusterColorDomain): color by unique label so merged clusters share one color and match UMAP legend
       const uniqueLabelsInOrder = useGlobalDomain
         ? (() => {
             const seen = new Set();
@@ -561,6 +577,7 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       const scaleDomain = useGlobalDomain ? uniqueLabelsInOrder : Array.from(new Set(Object.values(clusterIdToLabel)));
       const scale = createClusterColorScale(scaleDomain);
       if (!scale) {
+        console.log('SpatialPlotView colorState: Failed to create cluster color scale');
         return {
           mode: 'constant',
           getColor: () => BASE_COLOR,
@@ -569,7 +586,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         };
       }
 
-      // Legend: one entry per unique label when integration (merged clusters share one color); otherwise one per cluster ID
       const sorted = useGlobalDomain ? uniqueLabelsInOrder : sortClusterIds(uniqueClusters);
       const entries = [];
       const seenLabels = new Set();
@@ -583,6 +599,13 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         entries.push({ id: firstClusterId, label, color: colorToRgba(baseColor) });
       });
 
+      console.log('SpatialPlotView colorState: Created cluster colors', {
+        mode: 'clusters',
+        numEntries: entries.length,
+        useGlobalDomain,
+        firstFewEntries: entries.slice(0, 5),
+      });
+
       const DIMMED_COLOR = [160, 174, 192, 180];
 
       const getColor = (index) => {
@@ -591,7 +614,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         const override = clusterColorOverrides?.[clusterValue];
         const colorValue = override || scale(label);
 
-        // Legend highlight selection (from clicking cluster in integrated UMAP legend)
         if (legendHighlightSelection && legendHighlightSelection.clusterIds) {
           if (legendHighlightSelection.clusterIds.has(clusterValue)) {
             return colorToRgba(colorValue);
@@ -599,7 +621,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
           return isHovering ? [0, 0, 0, 0] : DIMMED_COLOR;
         }
 
-        // Region composition highlight: dim all regions except the queried one
         if (highlightedRegionId != null) {
           return clusterValue === highlightedRegionId
             ? colorToRgba(colorValue)
@@ -628,7 +649,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       };
     }
 
-    // Check for both regular arrays and typed arrays (Float32Array from worker)
     const hasExpressionArray = resolvedResults.type === 'gene_expression' &&
                                (Array.isArray(resolvedResults.expression) || ArrayBuffer.isView(resolvedResults.expression));
 
@@ -645,12 +665,9 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         };
       }
       
-      // Note: Expression array may be shorter than spatial index due to QC filtering
-      // This is expected and handled gracefully: filtered cells will use default color
       
       const expressionExtent = d3.extent(expression);
       let [minExp, maxExp] = expressionExtent;
-      // Use percentile-based range when available for better color spread on skewed data
       if (resolvedResults.expressionRange && Array.isArray(resolvedResults.expressionRange) &&
           resolvedResults.expressionRange.length >= 2 &&
           Number.isFinite(resolvedResults.expressionRange[0]) && Number.isFinite(resolvedResults.expressionRange[1])) {
@@ -666,10 +683,17 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       }
       const colorFn = createColorFunction(resolvedResults.colorMap, minExp, maxExp);
 
+      console.log('SpatialPlotView colorState: Created gene expression color function', {
+        minExp,
+        maxExp,
+        expressionSample: expression.slice(0, 5),
+        colorMap: resolvedResults.colorMap,
+        geneName: resolvedResults.geneName,
+      });
+
       return {
         mode: 'expression',
         getColor: (index) => {
-          // Handle out-of-bounds access (e.g., expression array shorter than spatial index after QC filtering)
           if (index < 0 || index >= expression.length) {
             return BASE_COLOR;
           }
@@ -695,34 +719,34 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       legend: null,
       trigger: 'constant',
     };
-    // spatialIndex?.pointCount is covered by spatialIndex dependency
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedResults, selectedClusters, legendHighlightSelection, highlightedRegionId, clusterColorOverrides, clusterLabelMap, regionLabelMap, isHovering, normalizeCluster]);
 
   const isMERFISH = dataInfo?.format === 'MERFISH';
   const isXenium = dataInfo?.format === '10X Xenium' || dataInfo?.modality === 'xenium-integration';
   const radiusPixels = useMemo(() => {
-    // MERFISH: larger points since datasets are typically smaller and more spread out
     if (isMERFISH) {
       if (totalCells > 200000) return 4.0;
       if (totalCells > 100000) return 5.0;
       if (totalCells > 50000)  return 6.0;
       return 7.0;
     }
-    // Base point size by cell count; gradient zoom in overlay scales down when zoomed out (initial view)
     if (totalCells > 500000) {
-      return 2.0; // Very large (e.g. Visium HD): small base, gradient zoom keeps initial view clean
+      return 2.0;
     } else if (totalCells > 200000) {
-      return 2.5; // Large (e.g. Xenium): moderate base
+      return 2.5;
     } else if (totalCells > 50000) {
-      return 3.0; // Medium datasets
+      return 3.0;
     } else {
-      return 3.5; // Small datasets: larger points
+      return 3.5;
     }
   }, [totalCells, isMERFISH]);
 
   const colorBuffer = useMemo(() => {
-    if (!spatialIndex) return null;
+    if (!spatialIndex) {
+      console.log('SpatialPlotView colorBuffer: No spatialIndex, returning null');
+      return null;
+    }
     const { pointCount } = spatialIndex;
     const palette = new Uint8Array(pointCount * 4);
     for (let i = 0; i < pointCount; i += 1) {
@@ -732,6 +756,12 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       palette[i * 4 + 2] = rgba[2];
       palette[i * 4 + 3] = rgba[3];
     }
+    console.log('SpatialPlotView colorBuffer: Created color buffer', {
+      pointCount,
+      colorMode: colorState.mode,
+      firstColor: [palette[0], palette[1], palette[2], palette[3]],
+      lastColor: [palette[(pointCount-1)*4], palette[(pointCount-1)*4+1], palette[(pointCount-1)*4+2], palette[(pointCount-1)*4+3]],
+    });
     return palette;
   }, [spatialIndex, colorState]);
 
@@ -741,25 +771,19 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     tileCacheRef.current.clear();
   }, [spatialIndex, colorBuffer]);
 
-  // Transform spatial coordinates to image pixel coordinates when image is loaded
-  // ALSO create for blank tile source (no histology image) to use same code path
-  // MUST be defined before currentViewBounds which uses it
   const transformedSpatialData = useMemo(() => {
     if (!spatialIndex) {
       return null;
     }
 
-    // Get image size: from histology image OR from blank tile source (osdSizeRef)
     const imgW = histologyImage?.width || osdSizeRef.current?.x;
     const imgH = histologyImage?.height || osdSizeRef.current?.y;
 
-    // If we don't have image size yet, return null (will use spatial coords)
     if (!imgW || !imgH || imgW <= 0 || imgH <= 0) {
+      console.log('transformedSpatialData: Image size not available yet', { imgW, imgH, hasHistologyImage: !!histologyImage?.dziUrl });
       return null;
     }
 
-    // For blank tile source (no histology image), create identity transformation
-    // This makes the code follow the same path as when there's a histology image
     const isBlankTileSource = !histologyImage?.dziUrl;
 
     const { xMin: spatialXMin, xMax: spatialXMax, yMin: spatialYMin, yMax: spatialYMax } = spatialIndex.bounds;
@@ -769,7 +793,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       return null;
     }
 
-    // Helper to build forward/backward transforms from 2x3 matrix components
     const buildAffine = (A, B, TX, C, D, TY, label) => {
       const det = A * D - B * C;
       if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
@@ -781,15 +804,12 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       const invTy = -(invC * TX + invD * TY);
       return {
         label,
-        // histology -> spatial (forward)
         toSpatialFromImage: (ix, iy) => [A * ix + B * iy + TX, C * ix + D * iy + TY],
-        // spatial -> histology (inverse)
         toImageFromSpatial: (sx, sy) => [invA * sx + invB * sy + invTx, invC * sx + invD * sy + invTy],
         params: { A, B, TX, C, D, TY, invA, invB, invC, invD, invTx, invTy },
       };
     };
 
-    // Evaluate candidates based on how many mapped points land inside image bounds
     const evaluateCandidate = (cand) => {
       if (!cand) return { score: 0 };
       const xs = spatialIndex.xs;
@@ -798,8 +818,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       let inside = 0;
       const step = Math.max(1, Math.floor(xs.length / n));
       for (let i = 0; i < xs.length && inside < n; i += step) {
-        // Apply scaling before transformation using modality-specific scale factor
-        // Scale factor is defined per modality (Xenium: 0.2125, Visium HD: 1.0, etc.)
         const scaledX = needsScaling ? xs[i] / spatialScaleFactor : xs[i];
         const scaledY = needsScaling ? ys[i] / spatialScaleFactor : ys[i];
         const [ix, iy] = cand.toImageFromSpatial(scaledX, scaledY);
@@ -812,11 +830,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
 
     let solution = null;
     
-    // For blank tile source, create transformation with Y-flip
-    // Spatial data uses image-pixel Y-down convention, but biology convention (and ggplot default)
-    // is Y-up. Flip Y so the spatial plot matches ggplot output:
-    //   imgX = spatialX: xMin  (X unchanged)
-    //   imgY = yMax: spatialY  (Y flipped: large spatial Y → top of image)
     if (isBlankTileSource) {
       const toImageFromSpatial = (sx, sy) => {
         return [sx - spatialXMin, spatialYMax - sy];
@@ -836,8 +849,8 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
           invC: 0, invD: -1, invTy: spatialYMax,
         },
       };
+      console.log('Created Y-flip transformation for blank tile source');
     } else if (histologyPrealigned && !transformationMatrix) {
-      // Pre-aligned histology image (e.g., Visium HD): identity transformation, already aligned to spatial coords
       const toImageFromSpatial = (sx, sy) => {
         return [sx, sy];
       };
@@ -856,6 +869,7 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
           invC: 0, invD: 1, invTy: 0,
         },
       };
+      console.log('Created identity transformation for pre-aligned histology (format:', dataInfo?.format, ')');
     } else if (transformationMatrix && Array.isArray(transformationMatrix) && transformationMatrix.length >= 2) {
       const a = Number(transformationMatrix[0][0]);
       const b = Number(transformationMatrix[0][1]);
@@ -864,27 +878,20 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       const d = Number(transformationMatrix[1][1]);
       const ty = Number(transformationMatrix[1][2] || 0);
 
-      // Candidates:
-      // 1) Given as histology -> spatial (row-major)
       const candRowHistToSpatial = buildAffine(a, b, tx, c, d, ty, 'row-major hist->spatial');
-      // 2) Given as histology -> spatial (column-major swap b<->c)
       const candColHistToSpatial = buildAffine(a, c, tx, b, d, ty, 'col-major hist->spatial');
-      // 3) Given as spatial -> histology (row-major), invert role
       const candRowSpatialToHist = candRowHistToSpatial
         ? {
             label: 'row-major spatial->hist',
             toSpatialFromImage: (ix, iy) => {
-              // use inverse of row hist->spatial
               const p = candRowHistToSpatial.params;
               const A2 = p.invA, B2 = p.invB, TX2 = p.invTx, C2 = p.invC, D2 = p.invD, TY2 = p.invTy;
-              // these map hist->spatial, but we want spatial from image if matrix was spatial->hist; use inverse of that matrix
               return [A2 * ix + B2 * iy + TX2, C2 * ix + D2 * iy + TY2];
             },
             toImageFromSpatial: (sx, sy) => [a * sx + b * sy + tx, c * sx + d * sy + ty],
             params: candRowHistToSpatial.params,
           }
         : null;
-      // 4) Given as spatial -> histology (column-major swap)
       const candColSpatialToHist = candColHistToSpatial
         ? {
             label: 'col-major spatial->hist',
@@ -903,6 +910,7 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       const scored = candidates.map(evaluateCandidate);
       scored.sort((u, v) => v.score - u.score);
       solution = scored[0]?.cand || null;
+      console.log('Transform selection scores:', scored.map(s => ({ label: s.cand.label, score: s.score })));
     }
 
     if (solution) {
@@ -911,18 +919,26 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       const scaleY = Math.hypot(p.B, p.D);
       const scaleU = (scaleX + scaleY) / 2;
       const angleDeg = (Math.atan2(p.C, p.A) * 180) / Math.PI;
-
+      console.log('Selected transform:', solution.label, solution.params);
+      
       const xs = spatialIndex.xs;
       const ys = spatialIndex.ys;
-
+      
+      console.log('=== BEFORE Transformation - Spatial Coordinates ===');
+      console.log('Format:', dataInfo?.format, '| Scale factor:', spatialScaleFactor, '| Needs scaling:', needsScaling);
+      console.log('xMin:', spatialXMin, 'xMax:', spatialXMax, 'xRange:', spatialXMax - spatialXMin);
+      console.log('yMin:', spatialYMin, 'yMax:', spatialYMax, 'yRange:', spatialYMax - spatialYMin);
+      if (needsScaling) {
+        console.log('Scaled xMin:', spatialXMin / spatialScaleFactor, 'Scaled xMax:', spatialXMax / spatialScaleFactor);
+        console.log('Scaled yMin:', spatialYMin / spatialScaleFactor, 'Scaled yMax:', spatialYMax / spatialScaleFactor);
+      }
+      console.log('Point count:', xs.length);
+      
       let imageXMin = Number.POSITIVE_INFINITY;
       let imageXMax = Number.NEGATIVE_INFINITY;
       let imageYMin = Number.POSITIVE_INFINITY;
       let imageYMax = Number.NEGATIVE_INFINITY;
       
-      // Transform all points to compute bounds
-      // Apply modality-specific scale factor before transformation
-      // Blank tile source or pre-aligned histology: no scaling needed
       for (let i = 0; i < xs.length; i++) {
         let scaledX, scaledY;
         if (isBlankTileSource || !needsScaling) {
@@ -940,7 +956,20 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
           imageYMax = Math.max(imageYMax, imgY);
         }
       }
-
+      
+      console.log('=== AFTER Transformation - Image Pixel Coordinates ===');
+      console.log('xMin:', imageXMin, 'xMax:', imageXMax, 'xRange:', imageXMax - imageXMin);
+      console.log('yMin:', imageYMin, 'yMax:', imageYMax, 'yRange:', imageYMax - imageYMin);
+      console.log('Image size: width =', imgW, 'height =', imgH);
+      console.log('Point count:', xs.length);
+      console.log('Transformed coordinates within image bounds?', 
+        imageXMin >= 0 && imageXMax <= imgW && imageYMin >= 0 && imageYMax <= imgH);
+      console.log('Transformed coordinate offset from origin:', {
+        offsetX: imageXMin,
+        offsetY: imageYMin,
+        note: 'These offsets show how far the transformed coordinates are from (0,0)'
+      });
+      
       return {
         hasMatrix: true,
         imgW,
@@ -961,11 +990,27 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       };
     }
 
-    // Fallback: Simple proportional mapping (spatial coords → image pixel coords)
+    console.log('Using simple bounding box fit for spatial-to-image mapping');
     const scaleX = imgW / spatialWidth;
     const scaleY = imgH / spatialHeight;
     const offsetX = -spatialXMin * scaleX;
     const offsetY = -spatialYMin * scaleY;
+
+    console.log('=== BEFORE Transformation - Spatial Coordinates (Proportional Mapping) ===');
+    console.log('xMin:', spatialXMin, 'xMax:', spatialXMax, 'xRange:', spatialWidth);
+    console.log('yMin:', spatialYMin, 'yMax:', spatialYMax, 'yRange:', spatialHeight);
+    console.log('Point count:', spatialIndex.pointCount);
+
+    const imageXMin = 0;
+    const imageXMax = imgW;
+    const imageYMin = 0;
+    const imageYMax = imgH;
+
+    console.log('=== AFTER Transformation - Image Pixel Coordinates (Proportional Mapping) ===');
+    console.log('xMin:', imageXMin, 'xMax:', imageXMax, 'xRange:', imageXMax - imageXMin);
+    console.log('yMin:', imageYMin, 'yMax:', imageYMax, 'yRange:', imageYMax - imageYMin);
+    console.log('Image size: width =', imgW, 'height =', imgH);
+    console.log('Point count:', spatialIndex.pointCount);
 
     return {
       hasMatrix: false,
@@ -981,14 +1026,8 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spatialIndex, histologyImage?.dziUrl, histologyImage?.width, histologyImage?.height, transformationMatrix]);
 
-  // Use osdViewState when image is loaded, otherwise use viewState
-  // Always use osdViewState when available for consistent OpenSeadragon behavior
   const activeViewForSampling = osdViewState ?? viewState ?? samplingViewState;
 
-  // Transform viewState bounds to spatial coordinates if needed
-  // When image is loaded WITH transformation matrix, osdViewState is in image pixel coords
-  // But for sampling, we need bounds in spatial coordinates (the spatial index uses spatial coords)
-  // WITHOUT transformation matrix, keep using spatial coordinates for everything
   const currentViewBounds = useMemo(() => {
     if (!activeViewForSampling) {
       return null;
@@ -996,15 +1035,7 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     
     let bounds = computeViewBounds(activeViewForSampling, dimensions.width, dimensions.height);
     
-    // When transformedSpatialData is present (histology image OR blank tile source),
-    // the viewport is in image pixel coordinates but we need to sample the spatial index
-    // which uses spatial coordinates. Convert image-coordinate bounds back to spatial coordinates for sampling
     if (transformedSpatialData && bounds && spatialIndex) {
-      // The viewport bounds are in image pixel coordinates (from osdViewState)
-      // For blank tile source, Y is flipped in the toImageFromSpatial/toSpatialFromImage transforms
-      // so the corner transformation below automatically handles Y-flip
-      // DON'T clamp to image bounds; allow viewing outside the image
-      // Points outside will be filtered naturally during transformation
       const imageBounds = {
         xMin: bounds.xMin,
         xMax: bounds.xMax,
@@ -1012,17 +1043,12 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         yMax: bounds.yMax,
       };
 
-      // Transform the four image-rectangle corners to spatial via resolved FORWARD transform
-      // This maps image pixel coordinates -> spatial coordinates
-      // Apply inverse of modality-specific scale factor to convert back to original spatial coords
       const isBlankTileSource = !histologyImage?.dziUrl;
       const toSpatial = (x, y) => {
         const [sx, sy] = transformedSpatialData.toSpatialFromImage(x, y);
         if (isBlankTileSource || !needsScaling) {
-          // Blank tile source or no scaling needed: coordinates are already in spatial space
           return [sx, sy];
         } else {
-          // Apply inverse scaling to convert back to original spatial coordinates
           return [sx * spatialScaleFactor, sy * spatialScaleFactor];
         }
       };
@@ -1047,9 +1073,7 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
 
       const { xMin: spatialXMin, xMax: spatialXMax, yMin: spatialYMin, yMax: spatialYMax } = spatialIndex.bounds;
 
-      // Check if transformation produced valid bounds
       if (!Number.isFinite(xMinS) || !Number.isFinite(xMaxS) || !Number.isFinite(yMinS) || !Number.isFinite(yMaxS)) {
-        // Transformation failed, fall back to full spatial bounds
         console.warn('Viewport bounds transformation produced invalid values, using full spatial bounds');
         bounds = {
           xMin: spatialXMin,
@@ -1058,18 +1082,14 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
           yMax: spatialYMax,
         };
       } else if (xMaxS < spatialXMin || xMinS > spatialXMax || yMaxS < spatialYMin || yMinS > spatialYMax) {
-        // Viewport is completely outside spatial data bounds: no points to show
         console.warn('Viewport is outside spatial data bounds, returning empty bounds');
         bounds = {
           xMin: spatialXMin,
-          xMax: spatialXMin, // Empty range
+          xMax: spatialXMin,
           yMin: spatialYMin,
-          yMax: spatialYMin, // Empty range
+          yMax: spatialYMin,
         };
       } else {
-        // Expand bounds significantly (30%) to account for rotation/non-uniform scaling
-        // A rectangular viewport in image space might map to a rotated/parallelogram shape in spatial space
-        // The bounding box of that shape needs to be larger to include all visible points
         const widthS = xMaxS - xMinS || (spatialXMax - spatialXMin);
         const heightS = yMaxS - yMinS || (spatialYMax - spatialYMin);
         const bufferX = Math.max(widthS * 0.3, (spatialXMax - spatialXMin) * 0.1);
@@ -1083,14 +1103,48 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         };
       }
 
+      console.log('=== Converted viewport bounds (image coords) to spatial bounds for sampling ===');
+      console.log('Image viewport bounds:', {
+        xMin: imageBounds.xMin,
+        xMax: imageBounds.xMax,
+        yMin: imageBounds.yMin,
+        yMax: imageBounds.yMax,
+        width: imageBounds.xMax - imageBounds.xMin,
+        height: imageBounds.yMax - imageBounds.yMin,
+      });
+      console.log('Computed spatial bounds for sampling:', {
+        xMin: bounds.xMin,
+        xMax: bounds.xMax,
+        yMin: bounds.yMin,
+        yMax: bounds.yMax,
+        width: bounds.xMax - bounds.xMin,
+        height: bounds.yMax - bounds.yMin,
+      });
+      console.log('Spatial domain (full data bounds):', {
+        xMin: spatialXMin,
+        xMax: spatialXMax,
+        yMin: spatialYMin,
+        yMax: spatialYMax,
+        width: spatialXMax - spatialXMin,
+        height: spatialYMax - spatialYMin,
+      });
+      console.log('Bounds overlap?', {
+        xOverlap: !(bounds.xMax < spatialXMin || bounds.xMin > spatialXMax),
+        yOverlap: !(bounds.yMax < spatialYMin || bounds.yMin > spatialYMax),
+      });
     }
-    // When no transformation matrix, bounds are already in spatial coordinates (from viewState)
 
     return bounds;
   }, [activeViewForSampling, dimensions.width, dimensions.height, histologyImage?.dziUrl, histologyImage?.width, histologyImage?.height, transformedSpatialData, spatialIndex, needsScaling, spatialScaleFactor]);
 
   const renderState = useMemo(() => {
     if (!spatialIndex || !currentViewBounds) {
+      console.log('renderState: Missing dependencies', {
+        hasSpatialIndex: !!spatialIndex,
+        hasCurrentViewBounds: !!currentViewBounds,
+        currentViewBounds,
+        activeViewForSampling,
+      });
       return {
         mode: 'idle',
         tiles: [],
@@ -1100,13 +1154,20 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         level: null,
       };
     }
+    
+    console.log('renderState: Computing with bounds', {
+      currentViewBounds,
+      activeViewForSampling,
+      spatialBounds: spatialIndex.bounds,
+      hasImage: !!histologyImage?.dziUrl,
+      hasTransformation: !!transformationMatrix,
+    });
 
-    // currentViewBounds has already been converted to spatial coordinates if needed.
-    // With histology image + WebGL overlay, always sample ALL points, WebGL handles GPU-side
-    // clipping, and viewport transitions can make currentViewBounds stale, causing cells to vanish.
     let samplingBounds = currentViewBounds;
+
     if (histologyImage?.dziUrl && transformedSpatialData) {
       samplingBounds = spatialIndex.bounds;
+      console.log('renderState: Using FULL spatial bounds for WebGL overlay (no viewport culling)');
     }
 
     const maxSamples = maxSamplePoints != null
@@ -1119,7 +1180,20 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       merge: false,
     });
 
+    console.log('renderState: Sample info', {
+      sampleCount: sampleInfo?.sampleCount,
+      totalCount: sampleInfo?.totalCount,
+      level: sampleInfo?.level,
+      bounds: samplingBounds,
+      usedFullBounds: histologyImage?.dziUrl && !transformationMatrix,
+    });
+
     if (!sampleInfo || sampleInfo.sampleCount === 0) {
+      console.warn('renderState: No points found in viewport', {
+        samplingBounds,
+        spatialBounds: spatialIndex.bounds,
+        hasImage: !!histologyImage?.dziUrl,
+      });
       return {
         mode: 'idle',
         tiles: [],
@@ -1196,13 +1270,11 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     const combinedColors = new Uint8Array(sampleVisible * 4);
     const indexArray = new Uint32Array(sampleVisible);
     let writeOffset = 0;
-    // Build arrays by iterating through tiles and their indices
     for (let tileIdx = 0; tileIdx < tiles.length; tileIdx++) {
       const entry = tiles[tileIdx];
       const tile = matches[tileIdx];
       combinedPositions.set(entry.positions, writeOffset * 2);
       combinedColors.set(entry.colors, writeOffset * 4);
-      // Store actual spatial indices (from tile.indices) so we can look them up later
       const tileIndices = tile.indices;
       for (let i = 0; i < entry.length; i += 1) {
         indexArray[writeOffset + i] = tileIndices[i];
@@ -1226,27 +1298,38 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     };
   }, [spatialIndex, currentViewBounds, colorBuffer, histologyImage?.dziUrl, transformationMatrix, transformedSpatialData, activeViewForSampling, dataInfo?.format, dataInfo?.dataType, isVisiumHD, maxSamplePoints]);
 
-  // Update WebGL overlay with point data when renderState or transformation changes
   useEffect(() => {
-    if (!osdWebGLOverlayRef.current) return;
+    console.log('WebGL overlay update effect triggered:', {
+      hasOverlay: !!osdWebGLOverlayRef.current,
+      renderMode: renderState?.mode,
+      hasPoints: !!renderState?.points,
+      hasSpatialIndex: !!spatialIndex,
+    });
+
+    if (!osdWebGLOverlayRef.current) {
+      console.log('WebGL overlay update: No overlay ref, skipping');
+      return;
+    }
 
     if (renderState.mode !== 'points' || !renderState.points || !spatialIndex) {
+      console.log('WebGL overlay update: Clearing points (mode=' + renderState?.mode + ')');
       osdWebGLOverlayRef.current.setPointData(null);
       return;
     }
 
-    // Build point data for WebGL overlay, transform spatial → image pixel coordinates
+    console.log('WebGL overlay update: Processing points', {
+      pointCount: renderState.points.length,
+      mode: renderState.mode,
+    });
+
     const pointCount = renderState.points.length;
     
-    // Get image bounds for filtering and normalization
     const imgW = transformedSpatialData?.imgW || histologyImage?.width || osdSizeRef.current?.x;
     const imgH = transformedSpatialData?.imgH || histologyImage?.height || osdSizeRef.current?.y;
     
-    // Filter points to only include those within image bounds
     const validPoints = [];
     const validColors = [];
     
-    // First pass: transform all points and find actual min/max bounds
     let rawMinX = Infinity, rawMaxX = -Infinity, rawMinY = Infinity, rawMaxY = -Infinity;
     let pointsOutsideBounds = 0;
     const rawPoints = [];
@@ -1259,8 +1342,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       let imgX, imgY;
 
       if (transformedSpatialData) {
-        // WITH transformation data: transform spatial → image coords
-        // Apply modality-specific scale factor before transformation
         const isBlankTileSource = !histologyImage?.dziUrl;
         let scaledX, scaledY;
         if (isBlankTileSource || !needsScaling) {
@@ -1272,17 +1353,12 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         }
         [imgX, imgY] = transformedSpatialData.toImageFromSpatial(scaledX, scaledY);
 
-        // Filter points to only include those within image bounds
-        // Add a small margin to account for rounding errors
         const margin = 10;
         if (imgW && imgH && (imgX < -margin || imgX > imgW + margin || imgY < -margin || imgY > imgH + margin)) {
           pointsOutsideBounds++;
-          continue; // Skip points outside image bounds
+          continue;
         }
       } else {
-        // WITHOUT transformation matrix: map spatial coords directly to blank tile source image coords
-        // Blank tile source has dimensions matching spatial bounds exactly: width = bounds.xMax: bounds.xMin, height = bounds.yMax: bounds.yMin
-        // So spatial bounds [xMin, xMax] x [yMin, yMax] map directly to image pixel coords [0, width] x [0, height]
         const { xMin, yMin } = spatialIndex.bounds;
         imgX = spatialX - xMin;
         imgY = spatialY - yMin;
@@ -1295,15 +1371,14 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       rawMaxY = Math.max(rawMaxY, imgY);
     }
     
-    // Pass image pixel coordinates directly to WebGL; the overlay matrix transforms to clip space.
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     let pointsInTopHalf = 0;
     let pointsInBottomHalf = 0;
 
     for (const { imgX, imgY, colorOffset, spatialIdx } of rawPoints) {
+      
       validPoints.push(imgX, imgY);
-
-      // Read colors from colorBuffer for immediate updates on selection changes
+      
       if (colorBuffer && spatialIdx !== undefined) {
         const bufferOffset = spatialIdx * 4;
         validColors.push(
@@ -1326,7 +1401,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       minY = Math.min(minY, imgY);
       maxY = Math.max(maxY, imgY);
       
-      // Track which half of the image points are in (based on image pixel Y)
       if (imgY < imgH / 2) {
         pointsInTopHalf++;
       } else {
@@ -1338,11 +1412,76 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     const positions = new Float32Array(validPoints);
     const colors = new Uint8Array(validColors);
 
+    const imageAspectRatio = imgW && imgH ? imgW / imgH : null;
+    const scatterPlotAspectRatio = (maxX - minX) > 0 && (maxY - minY) > 0 
+      ? (maxX - minX) / (maxY - minY) 
+      : null;
+    
+    console.log('WebGL Overlay - Transformed point bounds (image pixel coordinates):', {
+      imagePixelBounds: {
+        minX: minX.toFixed(2), maxX: maxX.toFixed(2), 
+        minY: minY.toFixed(2), maxY: maxY.toFixed(2),
+        rangeX: (maxX - minX).toFixed(2),
+        rangeY: (maxY - minY).toFixed(2),
+        note: 'Using image pixel coordinates directly (not normalized). Matrix will transform to clip space.',
+      },
+      rawImageBounds: {
+        minX: rawMinX.toFixed(2), maxX: rawMaxX.toFixed(2),
+        minY: rawMinY.toFixed(2), maxY: rawMaxY.toFixed(2),
+        width: (rawMaxX - rawMinX).toFixed(2),
+        height: (rawMaxY - rawMinY).toFixed(2),
+        aspectRatio: ((rawMaxX - rawMinX) / (rawMaxY - rawMinY)).toFixed(4),
+        note: 'Raw transformed coordinates in image pixel space',
+      },
+      coordinateSystem: {
+        method: 'Image pixel coordinates (NOT normalized)',
+        imageWidth: imgW.toFixed(0),
+        imageHeight: imgH.toFixed(0),
+        imageAspectRatio: imageAspectRatio ? imageAspectRatio.toFixed(4) : 'N/A',
+        dataWidth: (rawMaxX - rawMinX).toFixed(2),
+        dataHeight: (rawMaxY - rawMinY).toFixed(2),
+        dataAspectRatio: ((rawMaxX - rawMinX) / (rawMaxY - rawMinY)).toFixed(4),
+        dataCoverageX: ((rawMaxX - rawMinX) / imgW * 100).toFixed(1) + '%',
+        dataCoverageY: ((rawMaxY - rawMinY) / imgH * 100).toFixed(1) + '%',
+        note: 'Using image pixel coordinates directly. WebGL matrix transforms from image pixels to clip space (like working version).',
+      },
+      imageSize: transformedSpatialData ? [transformedSpatialData.imgW, transformedSpatialData.imgH] : 'N/A',
+      imageAspectRatio: imageAspectRatio ? imageAspectRatio.toFixed(4) : 'N/A',
+      scatterPlotAspectRatio: scatterPlotAspectRatio ? scatterPlotAspectRatio.toFixed(4) : 'N/A',
+      aspectRatioMatch: imageAspectRatio && scatterPlotAspectRatio 
+        ? (Math.abs(imageAspectRatio - scatterPlotAspectRatio) < 0.01 ? '✓ MATCH' : '✗ MISMATCH')
+        : 'N/A',
+      centerX: ((minX + maxX) / 2).toFixed(4),
+      centerY: ((minY + maxY) / 2).toFixed(4),
+      originalPointCount: pointCount,
+      validPointCount: validPointCount,
+      filteredOut: pointsOutsideBounds,
+      distribution: {
+        topHalf: pointsInTopHalf,
+        bottomHalf: pointsInBottomHalf,
+        ratio: validPointCount > 0 ? (pointsInTopHalf / validPointCount).toFixed(3) : 'N/A',
+        note: 'If ratio is close to 1.0, all points are in top half (this is the bug!)',
+      },
+      coverage: {
+        xCoverage: ((maxX - minX) * 100).toFixed(1) + '%',
+        yCoverage: ((maxY - minY) * 100).toFixed(1) + '%',
+        note: 'Should be close to 100% for full coverage. Values are in normalized [0,1] coordinates.',
+      },
+      note: 'Using image pixel coordinates directly (NOT normalized). This matches the working implementation.',
+    });
+
+    console.log('First 5 points (image pixel coords):', Array.from({length: Math.min(5, validPointCount)}, (_, i) => ({
+      x: positions[i * 2],
+      y: positions[i * 2 + 1],
+    })));
+
     osdWebGLOverlayRef.current.setPointData({
       positions,
       colors,
       count: validPointCount,
     });
+
+    console.log('WebGL overlay updated with', validPointCount, 'points (filtered from', pointCount, 'total)');
   }, [renderState, spatialIndex, transformedSpatialData, histologyImage?.dziUrl, histologyImage?.width, histologyImage?.height, colorBuffer, overlayReady, needsScaling, spatialScaleFactor]);
 
   const zoom = viewState?.zoom;
@@ -1363,11 +1502,18 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     }
   }, [zoom, baseZoom]);
 
-  // Initialize OpenSeadragon viewer (with or without histology image)
   useEffect(() => {
+    console.log('OpenSeadragon initialization effect triggered:', {
+      hasContainer: !!osdContainerRef.current,
+      hasSpatialIndex: !!spatialIndex,
+      hasBounds: !!bounds,
+      hasHistologyImage: !!histologyImage?.dziUrl
+    });
+
     if (!osdContainerRef.current || !spatialIndex || !bounds ||
         !Number.isFinite(bounds.xMin) || !Number.isFinite(bounds.xMax) ||
         !Number.isFinite(bounds.yMin) || !Number.isFinite(bounds.yMax)) {
+      console.log('OpenSeadragon initialization skipped - prerequisites not met');
       setOsdViewerReady(false);
       if (osdViewerRef.current) {
         try {
@@ -1380,33 +1526,32 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       return;
     }
 
-    // Destroy existing viewer if any
     if (osdViewerRef.current) {
       try {
         osdViewerRef.current.destroy();
       } catch (e) {
-        // Ignore errors during cleanup
       }
       osdViewerRef.current = null;
     }
 
     try {
-      // Determine tile source: use histology image if available, otherwise create blank tile source
-      // Use exact spatial bounds dimensions (no padding) so spatial coords map directly to image pixel coords
       const width = Math.max(100, Math.ceil(bounds.xMax - bounds.xMin));
       const height = Math.max(100, Math.ceil(bounds.yMax - bounds.yMin));
       const tileSource = histologyImage?.dziUrl || createBlankTileSource(width, height);
 
-      // Store tile source reference for later use
       const tileSourceRef = tileSource;
 
+      console.log('Initializing OpenSeadragon viewer with', histologyImage?.dziUrl ? 'DZI URL:' : 'blank tile source', histologyImage?.dziUrl || 'custom');
+      console.log('Tile source:', tileSource);
+      if (!histologyImage?.dziUrl && tileSource) {
+        console.log('Blank tile source dimensions:', { width: tileSource.width, height: tileSource.height });
+      }
       const viewer = OpenSeadragon({
         element: osdContainerRef.current,
         tileSources: tileSource,
         prefixUrl: 'https://openseadragon.github.io/openseadragon/images/',
         showNavigator: false,
-        showNavigationControl: !histologyImage?.dziUrl, // Show navigation controls only when no image (replaces zoom buttons)
-        // Enable gestures for user interaction
+        showNavigationControl: !histologyImage?.dziUrl,
         gestureSettingsMouse: {
           clickToZoom: true,
           dblClickToZoom: true,
@@ -1430,50 +1575,44 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         },
         animationTime: 0.2,
         immediateRender: true,
-        // Fit image to viewport initially
         defaultZoomLevel: 0,
-        // Allow viewing outside image bounds to prevent clipping (same as when histology image is present)
-        // The coordinate mapping fix ensures points are correctly positioned even when viewport extends beyond bounds
         constrainDuringPan: false,
-        visibilityRatio: 0, // Allow image to move completely out of viewport
+        visibilityRatio: 0,
         wrapHorizontal: false,
         wrapVertical: false,
-        // Disable pan and zoom constraints to allow full movement
         minZoomLevel: null,
         maxZoomLevel: null,
         minZoomImageRatio: 0,
         maxZoomPixelRatio: 10,
-        // Prevent OSD from constraining viewport bounds
         homeFillsViewer: false,
       });
 
       osdViewerRef.current = viewer;
 
-      // For custom tile sources (blank canvas), set size immediately before 'open' event
-      // This ensures osdSizeRef is available even if getContentSize() returns 1x1
       if (!histologyImage?.dziUrl && tileSourceRef && typeof tileSourceRef === 'object' && tileSourceRef.width && tileSourceRef.height) {
         osdSizeRef.current = { x: tileSourceRef.width, y: tileSourceRef.height };
+        console.log('Pre-initializing OSD size for custom tile source:', tileSourceRef.width, tileSourceRef.height);
       }
 
-      // Read content size when opened
       viewer.addHandler('open', () => {
+        console.log('OpenSeadragon "open" event fired');
         try {
           const item = viewer.world.getItemAt(0);
           let sizeSet = false;
 
           if (item) {
             const size = item.getContentSize();
+            console.log('OpenSeadragon getContentSize() returned:', size);
 
-            // Only use getContentSize() if it returns valid dimensions (not 1x1)
             if (size?.x && size?.y && size.x > 1 && size.y > 1) {
               osdSizeRef.current = { x: size.x, y: size.y };
+              console.log('OpenSeadragon content size from item:', size.x, size.y);
               sizeSet = true;
 
               if (osdWebGLOverlayRef.current) {
                 osdWebGLOverlayRef.current.setImageSize({ x: size.x, y: size.y });
               }
 
-              // Trigger re-initialization of osdViewState with correct image size
               if (spatialIndex) {
                 osdViewStateRef.current = null;
                 setOsdViewState(null);
@@ -1481,20 +1620,24 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
             }
           }
 
-          // Fallback for custom tile source (blank canvas): use tile source dimensions directly
           if (!sizeSet && !histologyImage?.dziUrl && tileSourceRef && typeof tileSourceRef === 'object' && tileSourceRef.width && tileSourceRef.height) {
             osdSizeRef.current = { x: tileSourceRef.width, y: tileSourceRef.height };
+            console.log('OpenSeadragon using custom tile source size (fallback):', tileSourceRef.width, tileSourceRef.height);
             sizeSet = true;
+
             if (osdWebGLOverlayRef.current) {
               osdWebGLOverlayRef.current.setImageSize({ x: tileSourceRef.width, y: tileSourceRef.height });
             }
           }
 
+          console.log('OpenSeadragon viewer ready. Final osdSizeRef:', osdSizeRef.current);
           setOsdViewerReady(true);
         } catch (e) {
           console.error('Failed to read OpenSeadragon content size:', e);
         }
       });
+
+      console.log('OpenSeadragon viewer initialized successfully');
     } catch (error) {
       console.error('Error initializing OpenSeadragon:', error);
     }
@@ -1512,10 +1655,8 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     };
   }, [histologyImage?.dziUrl, spatialIndex, bounds]);
 
-  // Initialize WebGL overlay for rendering scatter plot on OSD canvas
   useEffect(() => {
     if (!osdViewerReady) {
-      // Clean up overlay if viewer not ready
       if (osdWebGLOverlayRef.current) {
         osdWebGLOverlayRef.current.destroy();
         osdWebGLOverlayRef.current = null;
@@ -1523,13 +1664,11 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       return;
     }
 
-    // Create and initialize WebGL overlay
     const initOverlay = async () => {
       try {
-        // Use the same base point size as DeckGL ScatterplotLayer for consistency
         const basePointSize = radiusPixels || 1.5;
         const overlay = new OSDWebGLOverlay(osdViewerRef.current, {
-          pointSize: basePointSize, // Match DeckGL point size, will scale with zoom
+          pointSize: basePointSize,
           zoomScalePerLevel: pointZoomScalePerLevel,
           minZoomScale: MIN_ZOOM_SCALE,
           maxZoomScale: pointMaxZoomScale,
@@ -1537,6 +1676,19 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         await overlay.init();
         osdWebGLOverlayRef.current = overlay;
         setOverlayReady(true);
+
+        const viewer = osdViewerRef.current;
+        const tiledImage = viewer?.world?.getItemAt(0);
+        console.log('WebGL overlay initialized successfully. Viewer state:', {
+          hasViewer: !!viewer,
+          hasWorld: !!viewer?.world,
+          worldItemCount: viewer?.world?.getItemCount(),
+          hasTiledImage: !!tiledImage,
+          tiledImageDetails: tiledImage ? {
+            hasSource: !!tiledImage.source,
+            contentSize: tiledImage.getContentSize(),
+          } : null,
+        });
       } catch (error) {
         console.error('Failed to initialize WebGL overlay:', error);
       }
@@ -1553,8 +1705,14 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     };
   }, [osdViewerReady, histologyImage?.dziUrl, spatialIndex, bounds, radiusPixels, pointZoomScalePerLevel, pointMaxZoomScale]);
 
-  // Initialize osdViewState for OpenSeadragon-based rendering (with or without histology image)
   useEffect(() => {
+    console.log('osdViewState initialization effect triggered:', {
+      hasSpatialIndex: !!spatialIndex,
+      osdViewerReady,
+      hasOsdSize: !!osdSizeRef.current,
+      histologyImage: !!histologyImage?.dziUrl
+    });
+
     if (!spatialIndex || !osdViewerReady) {
       if (osdViewStateRef.current) {
         osdViewStateRef.current = null;
@@ -1563,11 +1721,9 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       return;
     }
 
-    // Get image size in pixels (use from histologyImage or OSD size ref)
     const imgW = histologyImage?.width || osdSizeRef.current?.x;
     const imgH = histologyImage?.height || osdSizeRef.current?.y;
 
-    // Get spatial bounds
     const { xMin, xMax, yMin, yMax } = spatialIndex.bounds;
     const spatialWidth = xMax - xMin;
     const spatialHeight = yMax - yMin;
@@ -1576,45 +1732,34 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       return;
     }
 
-    // ALWAYS use image pixel coordinates for osdViewState (same as when there's a transformation matrix)
-    // This ensures consistent behavior whether or not there's a histology image
-    // Blank tile source dimensions match spatial bounds exactly, so image coords [0,imgW] x [0,imgH] 
-    // map directly to spatial coords [xMin,xMax] x [yMin,yMax] by adding xMin/yMin offset
     let centerX, centerY, worldWidth, worldHeight;
 
     if (imgW && imgH) {
-      // Always use image pixel coordinates as world coordinates
-      // This matches the approach used when there's a transformation matrix
       centerX = imgW / 2;
       centerY = imgH / 2;
       worldWidth = imgW;
       worldHeight = imgH;
 
+      console.log('Using image coordinate system (always, matching histology image approach)');
     } else {
-      // Fallback: use spatial coordinates if image size not available yet
       centerX = (xMin + xMax) / 2;
       centerY = (yMin + yMax) / 2;
       worldWidth = spatialWidth;
       worldHeight = spatialHeight;
+
+      console.log('Using spatial coordinate system (fallback - image size not available)');
     }
 
-    // Create initial viewState that fits the world bounds
     const viewportWidth = dimensions.width || 800;
     const viewportHeight = dimensions.height || 600;
     const scaleX = viewportWidth / worldWidth;
     const scaleY = viewportHeight / worldHeight;
-    const scale = Math.min(scaleX, scaleY) * 0.95; // 95% to add some padding
+    const scale = Math.min(scaleX, scaleY) * 0.95;
     
-    // For DeckGL OrthographicView: viewport_width / 2^zoom = world_width
-    // So: zoom = log2(viewport_width / world_width)
-    // But we calculated scale = viewport_width / world_width, so:
     const defaultZoom = Math.log2(scale);
 
-    // Clamp zoom to reasonable values
-    // Make sure zoom is not too negative (which would show too much area)
     const clampedZoom = Math.max(-10, Math.min(20, defaultZoom));
     
-    // Verify the zoom produces reasonable bounds
     const testScale = Math.pow(2, clampedZoom);
     const testWorldWidth = viewportWidth / testScale;
     const testWorldHeight = viewportHeight / testScale;
@@ -1623,12 +1768,8 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     let finalCenterX = centerX;
     let finalCenterY = centerY;
     
-    // Always verify zoom for image coordinates (same check whether or not there's a transformation matrix)
     if (imgW && imgH) {
-      // For image coordinates, worldWidth and worldHeight should match imgW and imgH
-      // If the calculated world size is much larger, the zoom is too negative
       if (testWorldWidth > imgW * 1.5 || testWorldHeight > imgH * 1.5) {
-        // Recalculate zoom to fit image exactly
         const fitScaleX = viewportWidth / imgW;
         const fitScaleY = viewportHeight / imgH;
         const fitScale = Math.min(fitScaleX, fitScaleY) * 0.95;
@@ -1644,7 +1785,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       }
     }
 
-    // Only update if osdViewState is not set or needs updating
     const newViewState = {
       target: [finalCenterX, finalCenterY, 0],
       zoom: finalZoom,
@@ -1654,9 +1794,18 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
 
     osdViewStateRef.current = newViewState;
     setOsdViewState(newViewState);
+
+    console.log('Initialized osdViewState:', {
+      hasImageSize: !!(imgW && imgH),
+      hasTransformationMatrix: !!transformationMatrix,
+      center: [centerX, centerY],
+      zoom: newViewState.zoom,
+      worldWidth,
+      worldHeight,
+      dimensions: { width: dimensions.width, height: dimensions.height },
+    });
   }, [histologyImage?.dziUrl, histologyImage?.width, histologyImage?.height, spatialIndex, dimensions.width, dimensions.height, transformationMatrix, osdViewerReady]);
 
-  // Sync viewState to OpenSeadragon viewport (once viewer is ready)
   useEffect(() => {
     if (!osdViewerRef.current || !spatialIndex) {
       return;
@@ -1667,7 +1816,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       return;
     }
 
-    // Get image size in pixels
     const imgW = histologyImage?.width || osdSizeRef.current?.x || 1;
     const imgH = histologyImage?.height || osdSizeRef.current?.y || 1;
 
@@ -1675,8 +1823,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       return;
     }
 
-    // Map spatial coordinates to image pixel coordinates
-    // This is our "world coordinate system": image pixels
     const { xMin: spatialXMin, xMax: spatialXMax, yMin: spatialYMin, yMax: spatialYMax } = spatialIndex.bounds;
     const spatialWidth = spatialXMax - spatialXMin;
     const spatialHeight = spatialYMax - spatialYMin;
@@ -1685,11 +1831,10 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       return;
     }
 
-    // Function to convert OSD viewport to DeckGL viewState
     const updateDeckGLViewState = () => {
       if (!viewer.viewport) return;
 
-      isUpdatingFromOsdRef.current = true; // Prevent feedback loop
+      isUpdatingFromOsdRef.current = true;
 
       try {
         const viewport = viewer.viewport;
@@ -1699,17 +1844,11 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
           return;
         }
 
-        // Get viewport bounds in viewport coordinates (normalized [0,1] relative to viewport)
         const bounds = viewport.getBounds();
         
-        // Convert viewport bounds corners to image pixel coordinates using OpenSeadragon's coordinate conversion
-        // This correctly handles cases where viewport extends beyond image bounds
-        // Use tiledImage.viewportToImageCoordinates which converts viewport point to image point
         const topLeftViewport = new OpenSeadragon.Point(bounds.x, bounds.y);
         const bottomRightViewport = new OpenSeadragon.Point(bounds.x + bounds.width, bounds.y + bounds.height);
         
-        // Convert viewport coordinates to image pixel coordinates
-        // viewportToImageCoordinates converts a viewport point to an image point
         const topLeftImg = tiledImage.viewportToImageCoordinates(topLeftViewport);
         const bottomRightImg = tiledImage.viewportToImageCoordinates(bottomRightViewport);
         
@@ -1722,23 +1861,51 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
 
         let centerX, centerYDeck, worldWidth, worldHeight, zoom;
 
-        // WITH transformation data: use image pixel coordinates directly (no clamping, allows
-        // viewing outside image bounds; WebGL overlay and point filtering handle out-of-bounds areas)
+        console.log('OSD->DeckGL sync:', {
+          hasTransformationMatrix: !!transformationMatrix,
+          hasTransformedSpatialData: !!transformedSpatialData,
+          viewportBounds: bounds,
+          imageViewport: { viewLeftImg, viewTopImg, viewRightImg, viewBottomImg, viewWidthImg, viewHeightImg },
+          imgW,
+          imgH,
+        });
+
         if (transformedSpatialData && imgW && imgH) {
           centerX = (viewLeftImg + viewRightImg) / 2;
-          centerYDeck = (viewTopImg + viewBottomImg) / 2;
+          const centerYImage = (viewTopImg + viewBottomImg) / 2;
+          centerYDeck = centerYImage;
           worldWidth = viewWidthImg;
           worldHeight = viewHeightImg;
+
+          console.log('OSD->DeckGL sync (with transform - direct image coords, NO clamping):', {
+            osdBounds: bounds,
+            imageViewport: { viewLeftImg, viewTopImg, viewWidthImg, viewHeightImg },
+            center: [centerX, centerYDeck],
+            worldWidth,
+            worldHeight,
+            imageSize: { imgW, imgH },
+            note: 'No clamping - allows viewing outside image bounds',
+          });
         } else if (!transformationMatrix && spatialIndex) {
-          // WITHOUT transformation matrix: blank tile source image coords [0, imgW/imgH] map to
-          // spatial coords by adding the xMin/yMin offset
           const { xMin: spatialXMin, yMin: spatialYMin } = spatialIndex.bounds;
-          centerX = viewLeftImg + viewWidthImg / 2 + spatialXMin;
-          centerYDeck = viewTopImg + viewHeightImg / 2 + spatialYMin;
+          const centerXImage = viewLeftImg + viewWidthImg / 2;
+          const centerYImage = viewTopImg + viewHeightImg / 2;
+          centerX = centerXImage + spatialXMin;
+          centerYDeck = centerYImage + spatialYMin;
           worldWidth = viewWidthImg;
           worldHeight = viewHeightImg;
+          
+          console.log('OSD->DeckGL sync (no transform - direct image coords, converted to spatial):', {
+            osdBounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+            imageViewport: { viewLeftImg, viewTopImg, viewWidthImg, viewHeightImg },
+            imageCenter: [centerXImage, centerYImage],
+            spatialCenter: [centerX, centerYDeck],
+            worldWidth,
+            worldHeight,
+            spatialOffset: { xMin: spatialXMin, yMin: spatialYMin },
+            note: 'Image coords [0,imgW] map to spatial coords [xMin,xMax] by adding offset',
+          });
         } else {
-          // Fallback: proportional mapping
           const { xMin: spatialXMin, xMax: spatialXMax, yMin: spatialYMin, yMax: spatialYMax } = spatialIndex.bounds;
           const spatialWidth = spatialXMax - spatialXMin;
           const spatialHeight = spatialYMax - spatialYMin;
@@ -1754,37 +1921,38 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
           worldHeight = viewHeightSpatial;
         }
         
-        // Calculate zoom for DeckGL OrthographicView
-        // DeckGL OrthographicView uses: viewport_width / 2^zoom = world_width
-        // Use the minimum scale to ensure the entire viewport is visible in both dimensions
         const viewportWidth = dimensions.width;
         const viewportHeight = dimensions.height;
         const scaleX = viewportWidth / worldWidth;
         const scaleY = viewportHeight / worldHeight;
-        const scale = Math.min(scaleX, scaleY); // Use min to fit both dimensions
+        const scale = Math.min(scaleX, scaleY);
         zoom = Math.log2(scale);
         
-        // Create viewState for DeckGL OrthographicView
         const newViewState = {
           target: [centerX, centerYDeck, 0],
           zoom: zoom,
           minZoom: -10,
           maxZoom: 20,
         };
-
+        
+        console.log('Updated DeckGL viewState from OSD (final):', {
+          newViewState,
+          worldWidth,
+          viewportWidth,
+          zoom,
+        });
+        
         osdViewStateRef.current = newViewState;
         setOsdViewState(newViewState);
       } catch (e) {
         console.error('Error updating DeckGL viewState from OSD:', e);
       } finally {
-        // Use setTimeout to avoid immediate feedback
         setTimeout(() => {
           isUpdatingFromOsdRef.current = false;
         }, 100);
       }
     };
 
-    // Update on viewport changes
     const updateHandler = () => {
       if (!isUpdatingFromOsdRef.current) {
         updateDeckGLViewState();
@@ -1797,26 +1965,21 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     viewer.addHandler('resize', updateHandler);
     viewer.addHandler('update-viewport', updateHandler);
 
-    // Initial update: try immediately first, then retry if needed
     const tryUpdate = () => {
       if (viewer.viewport && viewer.viewport.getBounds) {
         updateDeckGLViewState();
       } else {
-        // Retry after a short delay if viewport isn't ready
         setTimeout(tryUpdate, 100);
       }
     };
     
-    // Try immediately if viewer is ready
     tryUpdate();
     
-    // Also try when image opens
     viewer.addHandler('open', () => {
       setTimeout(tryUpdate, 100);
     });
 
     return () => {
-      // Cleanup event handlers
       if (viewer && viewer.removeHandler) {
         viewer.removeHandler('animation', updateHandler);
         viewer.removeHandler('zoom', updateHandler);
@@ -1827,11 +1990,7 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     };
   }, [spatialIndex, dimensions.width, dimensions.height, transformationMatrix, transformedSpatialData, histologyImage?.width, histologyImage?.height, osdViewerReady]);
 
-
-  // Sync OpenSeadragon viewport from DeckGL viewport changes
-  // DISABLED: OpenSeadragon handles its own interaction
   useEffect(() => {
-    // Skip viewport syncing: OpenSeadragon handles its own interaction
     if (true) {
       return;
     }
@@ -1845,48 +2004,34 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         return;
       }
 
-      // Get spatial center from DeckGL viewState
       const spatialCenterX = viewState.target[0];
       const spatialCenterY = viewState.target[1];
 
-      // Transform spatial coordinates to image coordinates
-      // Note: For very large images, the affine transform was skipped during DZI conversion
-      // So we need to apply the full inverse transformation matrix to get image coordinates
-      // For smaller images, the affine transform was applied, so we only need to handle translation
       
       const imgW = osdSizeRef.current?.x || histologyImage?.width || 1;
       const imgH = osdSizeRef.current?.y || histologyImage?.height || 1;
 
-      // Check if affine transform was applied during DZI conversion
-      // If scale is close to 1 and angle is close to 0, the transform was likely skipped
-      // Or check the image size: if very large (>200MP), the transform was skipped
       const totalMegapixels = ((histologyImage?.width || 0) * (histologyImage?.height || 0)) / 1000000;
       const affineWasApplied = totalMegapixels <= 200 && histologyImage?.scale && Math.abs(histologyImage?.scale - 1) > 0.01;
       
       let imgCenterX, imgCenterY, viewportWidthImage, osdZoom;
       
       if (affineWasApplied) {
-        // Affine transform was applied during DZI conversion
-        // Only need to handle translation
         const tx = histologyImage?.offset?.tx || transformationMatrix[0][2] || 0;
         const ty = histologyImage?.offset?.ty || transformationMatrix[1][2] || 0;
         const scale = histologyImage?.scale || 1;
         
-        // Apply inverse of translation and scale
         const spatialMinusTx = spatialCenterX - tx;
         const spatialMinusTy = spatialCenterY - ty;
         imgCenterX = spatialMinusTx / scale;
         imgCenterY = spatialMinusTy / scale;
         
-        // Calculate zoom
         const deckglZoom = viewState.zoom || 0;
         const deckglScale = Math.pow(2, deckglZoom);
         const viewportWidthSpatial = dimensions.width / deckglScale;
         viewportWidthImage = viewportWidthSpatial / scale;
         osdZoom = imgW / viewportWidthImage;
       } else {
-        // Affine transform was NOT applied (image is very large)
-        // Need to apply full inverse transformation matrix
         const a = transformationMatrix[0][0];
         const b = transformationMatrix[0][1];
         const c = transformationMatrix[1][0];
@@ -1894,7 +2039,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         const tx = transformationMatrix[0][2] || 0;
         const ty = transformationMatrix[1][2] || 0;
 
-        // Compute inverse of transformation matrix to get image coordinates from spatial
         const det = a * d - b * c;
         if (Math.abs(det) < 1e-10) {
           console.warn('Transformation matrix is singular');
@@ -1911,28 +2055,23 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
         imgCenterX = invA * spatialMinusTx + invB * spatialMinusTy;
         imgCenterY = invC * spatialMinusTx + invD * spatialMinusTy;
         
-        // Calculate zoom, accounting for the transformation
         const deckglZoom = viewState.zoom || 0;
         const deckglScale = Math.pow(2, deckglZoom);
         const viewportWidthSpatial = dimensions.width / deckglScale;
-        // Transform viewport width to image space
-        const scale = Math.sqrt(a * a + c * c); // Scale factor from transformation matrix
+        const scale = Math.sqrt(a * a + c * c);
         viewportWidthImage = viewportWidthSpatial / scale;
         osdZoom = imgW / viewportWidthImage;
       }
 
-      // Normalize to 0-1 range for OpenSeadragon
       const normalizedX = imgCenterX / imgW;
       const normalizedY = imgCenterY / imgH;
 
-      // Clamp values
       const clampedX = Math.max(0, Math.min(1, normalizedX));
       const clampedY = Math.max(0, Math.min(1, normalizedY));
       const minZoom = viewer.viewport.getMinZoom();
       const maxZoom = viewer.viewport.getMaxZoom();
       const clampedZoom = Math.max(minZoom, Math.min(maxZoom, osdZoom));
 
-      // Update OpenSeadragon viewport (without animation to avoid sync loops)
       const centerPoint = new OpenSeadragon.Point(clampedX, clampedY);
       viewer.viewport.panTo(centerPoint, false);
       viewer.viewport.zoomTo(clampedZoom, null, false);
@@ -1941,10 +2080,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     }
   }, [viewState, histologyImage, transformationMatrix, dimensions.width, dimensions.height]);
 
-  // Use osdViewState when DZI image is loaded (OSD drives the viewport)
-  // The sync effect will convert image viewport to spatial coords properly
-  // Always use osdViewState when available (whether or not there's a histology image)
-  // This ensures consistent OpenSeadragon-based zoom/pan behavior
   const activeViewState = osdViewState || viewState;
 
   const clientPointToSpatial = useCallback((clientX, clientY) => {
@@ -2215,20 +2350,16 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
 
     const layerList = [];
 
-    // Add histology image layer (rendered beneath scatter plot)
-    // OpenSeadragon handles DZI rendering; DeckGL renders scatter on top
     if (histologyImage && !transformationMatrix) {
       if (histologyImage.dziUrl) {
-        // OpenSeadragon handles DZI rendering
+        console.log('Using OpenSeadragon for DZI image');
       } else if (histologyImageBounds) {
         const imageUrl = histologyImage.imageUrl || histologyImage.fileUrl || histologyImage.dataUrl;
         if (imageUrl && histologyImageBounds) {
-          // Check image dimensions to avoid WebGL texture size limits
-          const maxTextureSize = 8192; // Conservative limit
+          const maxTextureSize = 8192;
           const imageWidth = histologyImage.width || 0;
           const imageHeight = histologyImage.height || 0;
           
-          // Only add layer if dimensions are reasonable
           if (!imageWidth || !imageHeight || (imageWidth <= maxTextureSize && imageHeight <= maxTextureSize)) {
             try {
               layerList.push(
@@ -2244,13 +2375,12 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
                   opacity: imageOpacity,
                   desaturate: 0,
                   coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-                  // Disable mipmaps to avoid WebGL errors
                   // eslint-disable-next-line no-useless-computed-key
                   textureParameters: {
-                    10241: 9729, // TEXTURE_MIN_FILTER: LINEAR (no mipmap)
-                    10240: 9729, // TEXTURE_MAG_FILTER: LINEAR
-                    10242: 33071, // TEXTURE_WRAP_S: CLAMP_TO_EDGE
-                    10243: 33071, // TEXTURE_WRAP_T: CLAMP_TO_EDGE
+                    10241: 9729,
+                    10240: 9729,
+                    10242: 33071,
+                    10243: 33071,
                   },
                 })
               );
@@ -2265,7 +2395,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     }
 
     if (showBackgroundImage && imageInfo && bounds) {
-      // Check image dimensions to avoid WebGL texture size limits
       const maxTextureSize = 8192;
       const imageWidth = imageInfo.width || 0;
       const imageHeight = imageInfo.height || 0;
@@ -2285,12 +2414,11 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
               opacity: 0.7,
               desaturate: 0,
               coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-              // Disable mipmaps to avoid WebGL errors
               textureParameters: {
-                10241: 9729, // TEXTURE_MIN_FILTER: LINEAR (no mipmap)
-                10240: 9729, // TEXTURE_MAG_FILTER: LINEAR
-                10242: 33071, // TEXTURE_WRAP_S: CLAMP_TO_EDGE
-                10243: 33071, // TEXTURE_WRAP_T: CLAMP_TO_EDGE
+                10241: 9729,
+                10240: 9729,
+                10242: 33071,
+                10243: 33071,
               },
             })
           );
@@ -2302,9 +2430,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       }
     }
 
-    // Transform coordinates to image pixel space when we have transformedSpatialData
-    // This works for both histology images (with transformation matrix) AND blank tile source (no image)
-    // transformedSpatialData is created for both cases, so we use the same code path
     const useImageCoords = !!transformedSpatialData;
     
     if (renderState.mode === 'density' && renderState.density) {
@@ -2316,8 +2441,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
             const x = spatialIndex.xs[d.index];
             const y = spatialIndex.ys[d.index];
             if (useImageCoords && transformedSpatialData) {
-              // Transform to image pixel coordinates
-              // Apply modality-specific scale factor before transformation
               const isBlankTileSource = !histologyImage?.dziUrl;
               let scaledX, scaledY;
               if (isBlankTileSource || !needsScaling) {
@@ -2327,8 +2450,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
                 scaledX = x / spatialScaleFactor;
                 scaledY = y / spatialScaleFactor;
               }
-              // Transform to image pixel coordinates
-              // For blank tile source, Y is flipped in the transform to match ggplot convention
               const [imgX, imgY] = transformedSpatialData.toImageFromSpatial(scaledX, scaledY);
               return [imgX, imgY];
             }
@@ -2347,6 +2468,23 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
       const positions = renderState.points.positions;
       const colors = renderState.points.colors;
       
+      const sampleCount = renderState.points.indices.length;
+      console.log('Creating ScatterplotLayer:', {
+        pointCount: sampleCount,
+        useImageCoords,
+        hasTransformedData: !!transformedSpatialData,
+        transformedData: transformedSpatialData,
+        spatialIndexBounds: spatialIndex?.bounds,
+        currentViewBounds,
+        activeViewState,
+      });
+      
+      let renderedXMin = Number.POSITIVE_INFINITY;
+      let renderedXMax = Number.NEGATIVE_INFINITY;
+      let renderedYMin = Number.POSITIVE_INFINITY;
+      let renderedYMax = Number.NEGATIVE_INFINITY;
+      let renderedCount = 0;
+      
       layerList.push(
         new ScatterplotLayer({
           id: `spatial-cells-${renderState.level}`,
@@ -2356,8 +2494,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
             const x = spatialIndex.xs[idx];
             const y = spatialIndex.ys[idx];
             if (useImageCoords && transformedSpatialData) {
-              // Transform to image pixel coordinates
-              // Apply modality-specific scale factor before transformation
               const isBlankTileSource = !histologyImage?.dziUrl;
               let scaledX, scaledY;
               if (isBlankTileSource || !needsScaling) {
@@ -2367,14 +2503,31 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
                 scaledX = x / spatialScaleFactor;
                 scaledY = y / spatialScaleFactor;
               }
-              // Transform to image pixel coordinates
-              // For blank tile source, Y is flipped in the transform to match ggplot convention
               const [imgX, imgY] = transformedSpatialData.toImageFromSpatial(scaledX, scaledY);
 
-              // Track min/max of rendered coordinates
+              if (Number.isFinite(imgX) && Number.isFinite(imgY)) {
+                renderedXMin = Math.min(renderedXMin, imgX);
+                renderedXMax = Math.max(renderedXMax, imgX);
+                renderedYMin = Math.min(renderedYMin, imgY);
+                renderedYMax = Math.max(renderedYMax, imgY);
+                renderedCount++;
+              }
+
+              if (index < 10) {
+                const inBounds = imgX >= 0 && imgX <= transformedSpatialData.imgW &&
+                                imgY >= 0 && imgY <= transformedSpatialData.imgH;
+                console.log(`Point ${index}:`, {
+                  spatial: [x, y],
+                  scaledSpatial: [scaledX, scaledY],
+                  imagePixel: [imgX, imgY],
+                  inImageBounds: inBounds,
+                  imageSize: [transformedSpatialData.imgW, transformedSpatialData.imgH],
+                  transformUsed: transformedSpatialData.label,
+                });
+              }
+
               return [imgX, imgY];
             }
-            // Use pre-computed positions when no image
             return [positions[index * 2], positions[index * 2 + 1]];
           },
           getFillColor: (_, { index }) => [
@@ -2388,17 +2541,38 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
           radiusScale: zoomScale,
           radiusMinPixels: radiusPixels * MIN_ZOOM_SCALE,
           radiusMaxPixels: radiusPixels * pointMaxZoomScale,
-          opacity: 1.0,  // Use per-point alpha from colors, don't apply global opacity
+          opacity: 1.0,
           stroked: false,
           pickable: true,
           coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-          // Ensure all points are visible by not filtering based on viewport
           updateTriggers: {
             getPosition: [transformedSpatialData, activeViewState],
-            getFillColor: [colorBuffer],  // Re-render when colors change (selection)
+            getFillColor: [colorBuffer],
           },
         })
       );
+      
+      if (useImageCoords && transformedSpatialData && renderedCount > 0) {
+        console.log('=== RENDERED Scatter Plot Coordinates (after transformation) ===');
+        console.log('Rendered point count:', renderedCount);
+        console.log('xMin:', renderedXMin, 'xMax:', renderedXMax, 'xRange:', renderedXMax - renderedXMin);
+        console.log('yMin:', renderedYMin, 'yMax:', renderedYMax, 'yRange:', renderedYMax - renderedYMin);
+        console.log('Offset from origin:', {
+          offsetX: renderedXMin,
+          offsetY: renderedYMin,
+          note: 'If these are not 0, the scatter plot will be offset from the image origin'
+        });
+        console.log('Expected range (from transformedSpatialData):', {
+          xMin: transformedSpatialData.imageXMin,
+          xMax: transformedSpatialData.imageXMax,
+          yMin: transformedSpatialData.imageYMin,
+          yMax: transformedSpatialData.imageYMax,
+        });
+        console.log('Image size:', {
+          width: transformedSpatialData.imgW,
+          height: transformedSpatialData.imgH,
+        });
+      }
     }
 
     return layerList;
@@ -2423,16 +2597,29 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
     spatialScaleFactor,
   ]);
 
-
-  // Allow rendering even if viewState is not perfect; it will update
-  // Don't require layers to be ready, as they depend on viewState which might be updating
   const ready =
     activeViewState &&
     Number.isFinite(activeViewState.zoom) &&
     dimensions.width > 0 &&
     dimensions.height > 0 &&
-    spatialIndex; // Require spatialIndex to be ready
+    spatialIndex;
   
+  useEffect(() => {
+    console.log('Spatial view ready check:', {
+      ready,
+      hasActiveViewState: !!activeViewState,
+      hasOsdViewState: !!osdViewState,
+      hasViewState: !!viewState,
+      activeViewStateZoom: activeViewState?.zoom,
+      viewStateZoom: viewState?.zoom,
+      dimensions: { width: dimensions.width, height: dimensions.height },
+      hasSpatialIndex: !!spatialIndex,
+      layersCount: layers.length,
+      hasImage: !!histologyImage?.dziUrl,
+      hasTransformationMatrix: !!transformationMatrix,
+    });
+  }, [ready, activeViewState, osdViewState, viewState, dimensions.width, dimensions.height, spatialIndex, layers.length, histologyImage?.dziUrl, transformationMatrix]);
+
   if (!hasCoordinates) {
     return (
       <div className="plot-view" ref={containerRef}>
@@ -2449,9 +2636,6 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
   return (
   <div className="plot-view spatial-view" ref={containerRef} onContextMenu={handleContextMenu}>
       <div className="plot-view-content" style={{ position: 'relative' }}>
-        {/* OpenSeadragon container: always rendered for consistent zoom/pan controls */}
-        {/* When histology image present: renders image + scatter via WebGL overlay */}
-        {/* When no image: renders blank canvas + scatter via WebGL overlay */}
         <div
           ref={osdContainerRef}
           onMouseEnter={() => {
@@ -2467,9 +2651,9 @@ const SpatialPlotView = ({ activePlot, clusterPlot, regionPlot, artifacts, dataI
             width: '100%',
             height: '100%',
             opacity: histologyImage?.dziUrl ? imageOpacity : 1,
-            pointerEvents: 'auto', // OpenSeadragon handles interaction
+            pointerEvents: 'auto',
             zIndex: 1,
-            visibility: ready ? 'visible' : 'hidden', // Hide until ready but keep in DOM
+            visibility: ready ? 'visible' : 'hidden',
           }}
         />
         {!ready && (

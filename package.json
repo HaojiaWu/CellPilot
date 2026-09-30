@@ -1,6 +1,6 @@
 {
   "name": "cellpilot",
-  "version": "2.0.0",
+  "version": "2.0.2",
   "description": "CellPilot: A Serverless, AI-Powered Desktop Application for Chat-Based Single-Cell and Spatial Transcriptomics Analysis.",
   "main": "public/electron.js",
   "homepage": "./",
@@ -16,8 +16,8 @@
     "electron-pack-win": "electron-builder build --win --x64",
     "electron-pack-mac": "electron-builder build --mac",
     "electron-pack-linux": "electron-builder build --linux",
-    "dist:mac-intel": "npm run build && electron-rebuild -f -w sharp --arch x64 && electron-builder build --mac --x64 --publish=never",
-    "dist:mac-arm": "npm run build && electron-rebuild -f -w sharp --arch arm64 && electron-builder build --mac --arm64 --publish=never"
+    "dist:mac-intel": "cross-env GENERATE_SOURCEMAP=false npm run build && node scripts/prepare-release.js && electron-rebuild -f -w sharp --arch x64 && electron-builder build --mac --x64 --publish=never",
+    "dist:mac-arm": "cross-env GENERATE_SOURCEMAP=false npm run build && node scripts/prepare-release.js && electron-rebuild -f -w sharp --arch arm64 && electron-builder build --mac --arm64 --publish=never"
   },
   "build": {
     "appId": "com.cellpilot.app",
@@ -25,14 +25,15 @@
     "afterSign": "scripts/notarize.js",
     "files": [
       "build/**/*",
-      "public/electron.js",
-      "public/preload.js",
-      "public/tiffToDzi.js"
+      "!build/**/*.map",
+      "app-electron/*.js"
     ],
     "asarUnpack": [
       "build/**/*",
       "node_modules/sharp/**/*",
-      "node_modules/@img/**/*"
+      "node_modules/@img/**/*",
+      "node_modules/@cornerstonejs/codec-openjpeg/**/*",
+      "app-electron/jp2kTileWorker.js"
     ],
     "directories": {
       "buildResources": "assets"
@@ -63,6 +64,9 @@
         "AppImage"
       ],
       "icon": "assets/icon.png"
+    },
+    "extraMetadata": {
+      "main": "app-electron/electron.js"
     }
   },
   "keywords": [
@@ -76,6 +80,7 @@
   "author": "CellPilot Team",
   "license": "MIT",
   "dependencies": {
+    "@cornerstonejs/codec-openjpeg": "^1.3.6",
     "express": "^4.21.2",
     "sharp": "^0.34.5"
   },

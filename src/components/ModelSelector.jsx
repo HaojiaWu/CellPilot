@@ -12,7 +12,6 @@ import {
   getCurrentChatModel,
 } from '../llm/webllmService';
 
-// Embedding models for intent classification (fast, small)
 const EMBEDDING_MODELS = [
   {
     id: 'all-minilm-l6',
@@ -34,9 +33,7 @@ const EMBEDDING_MODELS = [
   },
 ];
 
-// Chat models for conversational responses
 const CHAT_MODELS = [
-  // Local WebLLM models (requires WebGPU)
   {
     id: 'qwen2.5-1.5b',
     name: 'Qwen2.5 1.5B (Local)',
@@ -68,14 +65,12 @@ const CHAT_MODELS = [
 ];
 
 const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedChatModel, onChatModelChange, onChatModelLoaded }) => {
-  // Embedding model state
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [modelReady, setModelReady] = useState(false);
   const [webllmAvailable, setWebllmAvailable] = useState(true);
   const [statusMessage, setStatusMessage] = useState('');
 
-  // Chat model state
   const [chatDownloading, setChatDownloading] = useState(false);
   const [chatDownloadProgress, setChatDownloadProgress] = useState(0);
   const [chatModelReady, setChatModelReady] = useState(false);
@@ -83,9 +78,7 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
   const [chatStatusMessage, setChatStatusMessage] = useState('');
   const [showChatSection, setShowChatSection] = useState(false);
   
-  // Check availability on mount
   useEffect(() => {
-    // Check embedding model availability
     checkWebLLMAvailable().then(available => {
       setWebllmAvailable(available);
       if (!available) {
@@ -93,7 +86,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
       }
     });
 
-    // Check WebGPU availability for chat models
     checkWebGPUAvailable().then(available => {
       setWebgpuAvailable(available);
       if (!available) {
@@ -101,13 +93,11 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
       }
     });
 
-    // Check if embedding model is already loaded
     if (isModelLoaded()) {
       setModelReady(true);
       setStatusMessage(`Model ready: ${getCurrentModel()}`);
     }
 
-    // Check if chat model is already loaded
     if (isChatModelLoaded()) {
       setChatModelReady(true);
       setChatStatusMessage(`Chat model ready: ${getCurrentChatModel()}`);
@@ -116,7 +106,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
 
   const handleModelChange = (e) => {
     onModelChange(e.target.value);
-    // Reset status when model changes
     if (getCurrentModel() !== e.target.value) {
       setModelReady(false);
       setStatusMessage('');
@@ -129,7 +118,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
       onChatModelChange(newModelId);
     }
     
-    // Reset status when model changes
     if (getCurrentChatModel() !== newModelId) {
       setChatModelReady(false);
       setChatStatusMessage('');
@@ -156,7 +144,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
 
       setStatusMessage(`Downloading ${model.name}...`);
 
-      // Actually download the model using WebLLM service
       const success = await downloadModel(selectedModel, (progress) => {
         setDownloadProgress(progress);
         if (progress < 100) {
@@ -168,7 +155,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
         setModelReady(true);
         setStatusMessage(`${model.name} ready!`);
 
-        // Notify parent that model is loaded
         if (onModelLoaded) {
           onModelLoaded(selectedModel);
         }
@@ -192,7 +178,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
       return;
     }
 
-    // Handle local WebLLM models
     if (!webgpuAvailable) {
       alert('WebGPU is not available in this browser. Local chat models require WebGPU support (Chrome 113+ or Edge 113+).');
       return;
@@ -237,7 +222,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
 
   return (
     <div className="model-selector">
-      {/* Embedding Model Selection Section */}
       <div className="model-selector-section">
         <div className="model-selector-row">
           <label className="model-selector-label">
@@ -269,7 +253,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
           />
         </div>
 
-        {/* Download progress bar */}
         {downloading && (
           <div className="model-progress">
             <ProgressBar
@@ -281,7 +264,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
           </div>
         )}
 
-        {/* Status message */}
         {statusMessage && (
           <div className={`model-status ${modelReady ? 'model-status-success' : ''}`}>
             <Icon icon={modelReady ? 'tick-circle' : 'info-sign'} size={11} />
@@ -289,7 +271,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
           </div>
         )}
 
-        {/* Model description */}
         {selectedModelInfo && !downloading && !statusMessage && (
           <div className="model-info">
             <Icon icon="info-sign" size={11} />
@@ -298,7 +279,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
         )}
       </div>
 
-      {/* Chat Model Section (Collapsible) */}
       <div className="model-selector-section chat-section">
         <div
           className="chat-section-header"
@@ -345,7 +325,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
               />
             </div>
 
-            {/* Chat download progress bar */}
             {chatDownloading && (
               <div className="model-progress">
                 <ProgressBar
@@ -357,7 +336,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
               </div>
             )}
 
-            {/* Chat status message */}
             {chatStatusMessage && (
               <div className={`model-status ${chatModelReady ? 'model-status-success' : ''}`}>
                 <Icon icon={chatModelReady ? 'tick-circle' : 'info-sign'} size={11} />
@@ -365,7 +343,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
               </div>
             )}
 
-            {/* Chat model description */}
             {selectedChatModelInfo && !chatDownloading && !chatStatusMessage && (
               <div className="model-info">
                 <Icon icon="info-sign" size={11} />
@@ -373,7 +350,6 @@ const ModelSelector = ({ selectedModel, onModelChange, onModelLoaded, selectedCh
               </div>
             )}
 
-            {/* WebGPU not available message (only for local models) */}
             {!webgpuAvailable && !chatStatusMessage && selectedChatModelInfo && (
               <div className="model-info" style={{ color: '#bf7326' }}>
                 <Icon icon="warning-sign" size={11} />

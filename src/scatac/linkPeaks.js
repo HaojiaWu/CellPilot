@@ -1,23 +1,3 @@
-/**
- * Peak-to-Gene Linkage for scMultiome data
- *
- * Port of Signac's LinkPeaks algorithm (SHARE-seq method, Ma et al. 2020, Cell).
- * Computes Pearson correlation between each peak's accessibility and each nearby
- * gene's expression across cells, then normalises against a null distribution of
- * trans-chromosome background peaks matched by total accessibility.
- *
- * GC-content matching is omitted (requires genome sequence not available in
- * the browser); background peaks are matched by total accessibility only:
- * still substantially reduces bias from global accessibility confounds.
- */
-
-// ---------------------------------------------------------------------------
-// Sparse-matrix helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Convert CSC sparse matrix → CSR for O(1) row access.
- */
 function cscToCSR(mat) {
   const nnz = mat.values.length;
   const rowPtr = new Int32Array(mat.nrows + 1);
@@ -41,7 +21,6 @@ function cscToCSR(mat) {
   return { nrows: mat.nrows, ncols: mat.ncols, rowPtr, colIdx, values };
 }
 
-/** Extract dense row i from a CSR matrix into a pre-allocated buffer (avoids GC). */
 function getCSRRowInto(csr, i, out) {
   out.fill(0);
   for (let k = csr.rowPtr[i]; k < csr.rowPtr[i + 1]; k++) {
@@ -49,19 +28,10 @@ function getCSRRowInto(csr, i, out) {
   }
 }
 
-/** Number of non-zero entries in row i of a CSR matrix. */
 function csrRowNNZ(csr, i) {
   return csr.rowPtr[i + 1] - csr.rowPtr[i];
 }
 
-// ---------------------------------------------------------------------------
-// Statistics helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Pearson correlation between x[] and pre-computed gene stats.
- * Avoids recomputing gene mean/variance for every peak tested against the same gene.
- */
 function pearsonCorrPrecomp(x, geneMean, geneSumSqDev, geneDevBuf, n) {
   let sx = 0;
   for (let i = 0; i < n; i++) sx += x[i];
@@ -89,10 +59,6 @@ function arrayStd(arr, mu) {
   return Math.sqrt(v / Math.max(arr.length - 1, 1));
 }
 
-/**
- * One-tailed p-value from z-score (Abramowitz & Stegun 26.2.17).
- * Matches Signac's pnorm(q = -abs(zscore)).
- */
 function zscoreToPvalue(z) {
   const az = Math.abs(z);
   const t = 1 / (1 + 0.2316419 * az);
@@ -102,14 +68,6 @@ function zscoreToPvalue(z) {
   return pdf * poly;
 }
 
-// ---------------------------------------------------------------------------
-// Genomic helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Parse peak name → { chr, start, end, mid }.
- * Handles "chr1:10000-20000", "chr1-10000-20000", "chr1_10000_20000".
- */
 export function parsePeakName(name) {
   if (!name || typeof name !== 'string') return null;
   let chr, start, end;
@@ -141,10 +99,6 @@ export function parsePeakName(name) {
   if (!chr || isNaN(start) || isNaN(end)) return null;
   return { chr, start, end, mid: (start + end) / 2 };
 }
-
-// ---------------------------------------------------------------------------
-// Spatial index: peaks sorted by chromosome + midpoint for O(log n) range queries
-// ---------------------------------------------------------------------------
 
 function buildPeakIndex(parsedPeaks) {
   const byChr = {};
@@ -186,14 +140,6 @@ function queryPeakRange(peakIndex, chr, lo, hi) {
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Background peak selection
-// ---------------------------------------------------------------------------
-
-/**
- * Build trans-chromosome background pools from already-parsed peaks.
- * Returns { chr: globalIdx[] } for peaks NOT on that chromosome.
- */
 function buildTransPools(parsedPeaks, filteredPeakIndices) {
   const byChr = new Map();
   const allValid = [];
@@ -214,15 +160,10 @@ function buildTransPools(parsedPeaks, filteredPeakIndices) {
   return transPools;
 }
 
-/**
- * Fast background selection: find nSample peaks with closest total accessibility.
- * Avoids O(n²) weighted sampling by sorting a subsample.
- */
 function selectBackground(queryPeakGlobalIdx, transPool, peakRowSums, nSample) {
   if (transPool.length <= nSample) return transPool.slice();
   const targetSum = peakRowSums[queryPeakGlobalIdx];
 
-  // For large pools, subsample first for speed
   let candidates;
   if (transPool.length > 5000) {
     const step = transPool.length / 5000;
@@ -234,10 +175,8 @@ function selectBackground(queryPeakGlobalIdx, transPool, peakRowSums, nSample) {
     const sorted = transPool.slice().sort((a, b) =>
       Math.abs(peakRowSums[a] - targetSum) - Math.abs(peakRowSums[b] - targetSum)
     );
-    // Take top 3× and randomly pick nSample
     const K = Math.min(nSample * 3, sorted.length);
     candidates = sorted.slice(0, K);
-    // Fisher-Yates shuffle then take first nSample
     for (let i = candidates.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
@@ -246,10 +185,6 @@ function selectBackground(queryPeakGlobalIdx, transPool, peakRowSums, nSample) {
   }
   return candidates;
 }
-
-// ---------------------------------------------------------------------------
-// Main linkPeaks function
-// ---------------------------------------------------------------------------
 
 export async function linkPeaks(
   peakMatrix,
@@ -275,15 +210,11 @@ export async function linkPeaks(
   const rnaCSR  = cscToCSR(rnaMatrix);
   const peakRowSums = peakMatrix.rowSums();
 
-  // Pre-allocate reusable buffers (avoid GC pressure in hot loop)
   const peakBuf    = new Float64Array(nCells);
   const geneBuf    = new Float64Array(nCells);
   const geneDevBuf = new Float64Array(nCells);
   const bgBuf      = new Float64Array(nCells);
 
-  // ---------------------------------------------------------------------------
-  // Filter peaks
-  // ---------------------------------------------------------------------------
   const filteredPeakIndices = [];
   const filteredPeakNames   = [];
   for (let i = 0; i < peakMatrix.nrows; i++) {
@@ -294,16 +225,14 @@ export async function linkPeaks(
   }
   const filteredParsed = filteredPeakNames.map(parsePeakName);
 
+  console.log(`[linkPeaks] Filtered peaks: ${filteredPeakIndices.length}, parsed OK: ${filteredParsed.filter(p => p !== null).length}`);
   if (filteredPeakNames.length > 0) {
+    console.log(`[linkPeaks] Sample peaks: ${filteredPeakNames.slice(0, 3).join(', ')}`);
   }
 
-  // Build spatial index for O(log n) range queries instead of O(n) scan
   report(1, 'Building peak spatial index…');
   const peakIndex = buildPeakIndex(filteredParsed);
 
-  // ---------------------------------------------------------------------------
-  // Filter genes
-  // ---------------------------------------------------------------------------
   const validGenes = [];
   let genesNoTSS = 0, genesLowCells = 0;
   for (let i = 0; i < rnaMatrix.nrows; i++) {
@@ -312,16 +241,13 @@ export async function linkPeaks(
     if (!geneTSS[name]) { genesNoTSS++; continue; }
     validGenes.push({ geneIdx: i, geneName: name });
   }
+  console.log(`[linkPeaks] Genes: ${geneNames.length} total, ${validGenes.length} valid, ${genesNoTSS} no TSS, ${genesLowCells} low cells`);
 
   report(3, `Testing ${validGenes.length} genes × ${filteredPeakIndices.length} peaks…`);
 
-  // Build trans-chromosome pools (reuses already-parsed peaks, no re-parsing)
   report(4, 'Building background peak pools…');
   const transPools = buildTransPools(filteredParsed, filteredPeakIndices);
 
-  // ---------------------------------------------------------------------------
-  // Main loop
-  // ---------------------------------------------------------------------------
   const links = [];
   const nGenes = validGenes.length;
   const startTime = Date.now();
@@ -330,11 +256,9 @@ export async function linkPeaks(
     const { geneIdx, geneName } = validGenes[gi];
     const { chr: geneChr, tss } = geneTSS[geneName];
 
-    // O(log n + k) range query instead of O(n) full scan
     const candidateLocalIdx = queryPeakRange(peakIndex, geneChr, tss - distance, tss + distance);
     if (candidateLocalIdx.length < 2) continue;
 
-    // Pre-compute gene vector stats (reused for all peak correlations + background)
     getCSRRowInto(rnaCSR, geneIdx, geneBuf);
     let geneSum = 0;
     for (let c = 0; c < nCells; c++) geneSum += geneBuf[c];
@@ -346,7 +270,6 @@ export async function linkPeaks(
     }
     if (geneSumSqDev < 1e-12) continue;
 
-    // Compute correlations for candidate peaks
     const passedLocalIdx = [];
     const passedCorrs    = [];
     for (const pi of candidateLocalIdx) {
@@ -359,7 +282,6 @@ export async function linkPeaks(
     }
     if (passedLocalIdx.length === 0) continue;
 
-    // Background z-score testing
     const transPool = transPools[geneChr] || [];
     for (let j = 0; j < passedLocalIdx.length; j++) {
       const pi            = passedLocalIdx[j];
@@ -393,7 +315,6 @@ export async function linkPeaks(
       }
     }
 
-    // Yield every 200 genes
     if (gi % 200 === 0) {
       const pct = 5 + Math.round((gi / nGenes) * 90);
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
@@ -406,12 +327,9 @@ export async function linkPeaks(
   links.sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
   report(100, `Found ${links.length} significant peak–gene links in ${totalTime}s`);
+  console.log(`[linkPeaks] Complete: ${links.length} links in ${totalTime}s`);
   return links;
 }
-
-// ---------------------------------------------------------------------------
-// Convenience accessors used by the plot component
-// ---------------------------------------------------------------------------
 
 export function indexLinksByGene(links) {
   const idx = new Map();

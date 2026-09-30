@@ -78,7 +78,6 @@ const formatClusterLabel = (label, labelMap = {}) => {
   }
   const key = String(label).trim();
   
-  // Check if there's a custom label in the label map
   if (labelMap && labelMap[key]) {
     return labelMap[key];
   }
@@ -193,8 +192,6 @@ const UmapDeckView = ({
   const initialSamplingRef = useRef(false);
   const [isHovering, setIsHovering] = useState(false);
 
-  // Finer tile grid (more levels) reduces "square cut" appearance: sampling is tile-based,
-  // so coarser levels produce visible tile boundaries; finer levels smooth the outline.
   const spatialIndex = useMemo(() => {
     if (!coordinates.length) {
       return null;
@@ -213,7 +210,6 @@ const UmapDeckView = ({
     [totalPoints]
   );
 
-  // Normalize cluster ids so special values like null/"null"/""/NaN map to "0"
   const normalizeCluster = useCallback((c) => {
     if (c == null) return '0';
     const s = String(c).trim().toLowerCase();
@@ -382,11 +378,9 @@ const UmapDeckView = ({
   }, []);
 
   const colorState = useMemo(() => {
-    // If gene expression is provided, use it for coloring instead of clusters
     if (geneExpression && geneExpression.expression && geneExpression.coordinates) {
       const expression = geneExpression.expression;
 
-      // Use expressionRange (e.g. 2nd–98th percentile) for better contrast, or globalMinExp/globalMaxExp, or extent
       let minExp = undefined;
       let maxExp = undefined;
       if (Array.isArray(geneExpression.expressionRange) && geneExpression.expressionRange.length >= 2 &&
@@ -411,7 +405,6 @@ const UmapDeckView = ({
         maxExp = minExp + 1e-6;
       }
 
-      // Create color function using the same logic as SpatialPlotView
       const colorDef = geneExpression.colorMap || { type: 'custom', colors: ['lightgray', 'orange', 'red'] };
       const safeRange = maxExp - minExp || 1;
 
@@ -423,7 +416,6 @@ const UmapDeckView = ({
         const scale = d3.scaleLinear().domain(domain).range(colors).clamp(true);
         colorFn = (value) => scale(value);
       } else {
-        // Default: lightgray-orange-red (same as other modalities)
         const defaultColors = ['lightgray', 'orange', 'red'];
         const steps = defaultColors.length - 1;
         const domain = defaultColors.map((_, idx) => minExp + (safeRange * idx) / steps);
@@ -432,7 +424,6 @@ const UmapDeckView = ({
       }
 
       const colorToRgba = (color) => {
-        // Handle "transparent" as a special case (d3.color doesn't parse it)
         if (typeof color === 'string' && color.toLowerCase().trim() === 'transparent') {
           return [0, 0, 0, 0];
         }
@@ -457,7 +448,6 @@ const UmapDeckView = ({
         Array.isArray(atacClustersForRnaHighlight) &&
         atacClustersForRnaHighlight.length === expression.length;
       const getColor = (index) => {
-        // Multiome: highlight cells from the selected RNA cluster on ATAC view in red (over gene expression)
         if (hasRnaHighlightGene && index < rnaClustersForAtacHighlight.length) {
           const rnaCluster = rnaClustersForAtacHighlight[index];
           const match =
@@ -465,7 +455,6 @@ const UmapDeckView = ({
             String(rnaCluster).trim() === String(rnaClusterHighlightOnAtac).trim();
           if (match) return [255, 0, 0, 255];
         }
-        // Multiome: highlight cells from the selected ATAC cluster on RNA view in red (over gene expression)
         if (hasAtacHighlightGene && index < atacClustersForRnaHighlight.length) {
           const atacCluster = atacClustersForRnaHighlight[index];
           const match =
@@ -481,7 +470,6 @@ const UmapDeckView = ({
         return colorToRgba(color);
       };
 
-      // Build legend gradient to match the actual color scale (so "change colors" updates the legend too)
       let legendGradient = 'linear-gradient(to top, lightgray, orange, red)';
       if (colorDef?.type === 'custom' && Array.isArray(colorDef.colors) && colorDef.colors.length >= 2) {
         legendGradient = `linear-gradient(to top, ${colorDef.colors.join(', ')})`;
@@ -512,19 +500,16 @@ const UmapDeckView = ({
       };
     }
 
-    // Otherwise use cluster coloring (existing logic)
     const useGlobalDomain = Array.isArray(clusterColorDomain) && clusterColorDomain.length > 0;
     const hasClusterData = Array.isArray(normalizedClusters) && normalizedClusters.length > 0;
     if (!useGlobalDomain && !hasClusterData) {
       return { getColor: () => UMAP_BASE_COLOR, legendEntries: null };
     }
 
-    // When clusterColorDomain is set (e.g. integration per-sample views), use it so colors/legend are identical across views
     const uniqueClusters = useGlobalDomain
       ? Array.from(new Set([...clusterColorDomain, ...(normalizedClusters || [])]))
       : Array.from(new Set(normalizedClusters));
 
-    // Build mapping: clusterID -> renamedLabel
     const clusterIdToLabel = {};
     uniqueClusters.forEach((clusterId) => {
       const key = String(clusterId);
@@ -541,7 +526,6 @@ const UmapDeckView = ({
       labelToClusterIds[label].push(clusterId);
     });
 
-    // When integration (useGlobalDomain): color by unique label so merged clusters (same name) share one color
     const uniqueLabelsInOrder = useGlobalDomain
       ? (() => {
           const seen = new Set();
@@ -563,7 +547,6 @@ const UmapDeckView = ({
       return { getColor: () => UMAP_BASE_COLOR, legendEntries: null };
     }
 
-    // Legend: one entry per unique label (merged clusters share one color and one legend row)
     const sorted = useGlobalDomain ? uniqueLabelsInOrder : sortClusterIds(uniqueClusters);
     const entries = [];
     const seenLabels = new Set();
@@ -589,7 +572,6 @@ const UmapDeckView = ({
       Array.isArray(atacClustersForRnaHighlight) &&
       atacClustersForRnaHighlight.length === normalizedClusters.length;
     const getColor = (index) => {
-      // WNN 3-panel: highlight cells from another panel by cell index mask
       if (highlightCellMask !== null) {
         const clusterValue = String(normalizedClusters[index]);
         const label = clusterIdToLabel[clusterValue];
@@ -598,7 +580,6 @@ const UmapDeckView = ({
         if (highlightCellMask[index]) return valueToRgba(colorValue);
         return [160, 174, 192, 80];
       }
-      // Multiome: legend-click sync – same cells highlighted on both views in cluster colors
       if (legendHighlightSelection && viewModality) {
         const sel = legendHighlightSelection;
         if (sel.selectedBarcodes instanceof Set && sel.selectedBarcodes.size > 0 && normalizedCellBarcodes.length === normalizedClusters.length) {
@@ -616,17 +597,14 @@ const UmapDeckView = ({
         }
         return DIMMED_COLOR;
       }
-      // Multiome: highlight cells from the selected RNA cluster on ATAC view in red
       if (hasRnaHighlight) {
         const rnaCluster = rnaClustersForAtacHighlight[index];
         const match =
           Number(rnaCluster) === Number(rnaClusterHighlightOnAtac) ||
           String(rnaCluster).trim() === String(rnaClusterHighlightOnAtac).trim();
         if (match) return RNA_HIGHLIGHT_RED;
-        // Non-matching cells: dim so red stands out
         return [160, 174, 192, 120];
       }
-      // Multiome: highlight cells from the selected ATAC cluster on RNA view in red
       if (hasAtacHighlight) {
         const atacCluster = atacClustersForRnaHighlight[index];
         const match =
@@ -642,9 +620,8 @@ const UmapDeckView = ({
       if (selectedClusters.size === 0) {
         return valueToRgba(colorValue);
       }
-      // When hovering with selection active, hide dimmed points completely
       if (isHovering && !selectedClusters.has(clusterValue)) {
-        return [0, 0, 0, 0]; // transparent
+        return [0, 0, 0, 0];
       }
       return selectedClusters.has(clusterValue)
         ? valueToRgba(colorValue)
@@ -669,18 +646,14 @@ const UmapDeckView = ({
     return buffer;
   }, [spatialIndex, colorState]);
 
-  // Compute cluster centroids for labels
   const clusterLabels = useMemo(() => {
     if (!spatialIndex || !Array.isArray(normalizedClusters) || normalizedClusters.length === 0) {
       return [];
     }
 
-    // Group by renamed label instead of original cluster ID
-    // This ensures merged clusters (same renamed label) have one centroid
     const labelCentroids = new Map();
     const labelCounts = new Map();
 
-    // Accumulate positions for each renamed label
     for (let i = 0; i < spatialIndex.pointCount; i += 1) {
       const clusterId = String(normalizedClusters[i]);
       const label = formatClusterLabel(clusterId, clusterLabelMap) || clusterId;
@@ -695,7 +668,6 @@ const UmapDeckView = ({
       labelCounts.set(label, labelCounts.get(label) + 1);
     }
 
-    // Convert to average positions and create label objects
     const labels = [];
     for (const [label, centroid] of labelCentroids.entries()) {
       const count = labelCounts.get(label);
@@ -805,7 +777,6 @@ const UmapDeckView = ({
     };
   }, [spatialIndex, currentViewBounds, colorBuffer]);
 
-  // Download utilities: export the DeckGL canvas as PNG on demand
   const downloadCanvasImage = useCallback((name = 'umap') => {
     try {
       const container = containerRef.current;
@@ -905,7 +876,6 @@ const UmapDeckView = ({
       );
     }
 
-    // Add cluster labels, size smaller at middle zoom so labels don't dominate; 22px at zoom extremes
     const clusterLabelSize = (() => {
       const f = Math.exp(-Math.pow(Math.log(Math.max(zoomScale, 0.1)), 2) / 2);
       return Math.round(14 + 8 * (1 - f));
@@ -1049,7 +1019,6 @@ const UmapDeckView = ({
             <div 
               className="spatial-overlay umap-overlay"
               onClick={(e) => {
-                // Click on empty space (the overlay background) clears selection
                 if (e.target.classList.contains('spatial-overlay') || 
                     e.target.classList.contains('spatial-overlay-section') ||
                     e.target.classList.contains('umap-legend-columns') ||
@@ -1064,7 +1033,6 @@ const UmapDeckView = ({
                 }
               }}
               onContextMenu={(e) => {
-                // Clicking outside the menu closes it
                 if (e.target.classList.contains('spatial-overlay') || 
                     e.target.classList.contains('spatial-overlay-section') ||
                     e.target.classList.contains('umap-legend-columns') ||
@@ -1076,18 +1044,16 @@ const UmapDeckView = ({
               <div className="spatial-overlay-section">
                 <span className="spatial-overlay-label">Clusters</span>
                 {(() => {
-                  // Column-major ordering: fill first column 0..N/2-1, second column remainder.
-                  const ordered = legendEntries.slice(); // already sorted above
+                  const ordered = legendEntries.slice();
                   const firstColumnCount = Math.ceil(ordered.length / 2);
                   const firstCol = ordered.slice(0, firstColumnCount);
                   const secondCol = ordered.slice(firstColumnCount);
                   
                   const handleLegendClick = (entry, event) => {
-                    event.stopPropagation(); // Prevent triggering overlay click
+                    event.stopPropagation();
                     const clusterId = entry.id;
                     const ctrlKey = event.ctrlKey || event.metaKey;
 
-                    // Multiome: legend-click sync – highlight same cells on both views in cluster colors
                     if (onLegendClusterClick && viewModality) {
                       onLegendClusterClick(viewModality, clusterId, entry.color, ctrlKey);
                       return;
@@ -1116,10 +1082,8 @@ const UmapDeckView = ({
                   const handleLegendContextMenu = (entry, event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    // Determine current color: override or entry.color
                     const key = String(entry.id ?? entry.label);
                     const override = clusterColorOverrides?.[key];
-                    // Convert entry.color (rgba array) to hex if needed
                     let current = override;
                     if (!current && Array.isArray(entry.color)) {
                       const [r, g, b] = entry.color;
@@ -1127,7 +1091,6 @@ const UmapDeckView = ({
                       current = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
                     }
                     if (!current) {
-                      // Fallback to black to satisfy input requirements
                       current = '#000000';
                     }
                     setColorMenu({ open: true, x: event.clientX, y: event.clientY, clusterId: key, value: current });
